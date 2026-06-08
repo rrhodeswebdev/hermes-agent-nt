@@ -6,10 +6,10 @@
 strategy_id: hermes-default
 
 instrument:
-  symbol: NQ            # display only; NinjaTrader sends its own instrument name
+  symbol: MNQ           # display only; NinjaTrader sends its own instrument name
   timeframe: 1m         # the chart timeframe you attach the strategy to
-  tick_size: 0.25       # NQ e-mini Nasdaq-100
-  tick_value: 5.00      # USD per tick per contract (NQ = $5.00; point value = $20)
+  tick_size: 0.25       # MNQ Micro E-mini Nasdaq-100
+  tick_value: 0.50      # USD per tick per contract (MNQ = $0.50; point value = $2)
 
 # Deterministic strategy parameters (used by the rules/mock engine and shown to the LLM).
 strategy:
@@ -22,19 +22,20 @@ strategy:
   min_confidence: 0.55  # ignore entries below this confidence
 
 # Hard risk limits — enforced server-side by the RiskGate.
-# NQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. NQ is volatile ($20/point),
-# so a 1.5*ATR stop can risk several hundred $/contract; max_risk_per_trade must be high
-# enough to admit a 1-contract trade or the gate rejects every entry.
+# MNQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. MNQ is a micro ($2/point),
+# so a 1.5*ATR stop risks only ~$30/contract; these are scaled ~10x down from the NQ
+# values. max_risk_per_trade must admit at least a 1-contract trade or entries are rejected.
 risk:
-  max_contracts: 1             # NQ is large; 1 contract while validating on Sim
-  max_risk_per_trade: 500.0    # USD; ~ a 1.5*ATR NQ stop on 1 contract (sim placeholder)
+  max_contracts: 2             # micros are small; allow a couple while validating on Sim
+  max_risk_per_trade: 250.0    # USD per-trade ceiling (effective cap is the lesser of this
+                               # and remaining daily-loss room; see daily_goal.max_daily_loss)
   max_trades_per_day: 10
-  default_stop_ticks: 16       # injected only if a decision arrives with no stop ($80 on NQ)
+  default_stop_ticks: 16       # injected only if a decision arrives with no stop ($8 on MNQ)
 
-# Daily goal — the bridge halts (and flattens) when either is hit. (NQ sim placeholders.)
+# Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
 daily_goal:
-  profit_target: 750.0         # USD realized → halt new entries for the day
-  max_daily_loss: 600.0        # USD realized → flatten + halt for the day
+  profit_target: 150.0         # USD realized → halt new entries for the day
+  max_daily_loss: 120.0        # USD realized → flatten + halt for the day
 
 # Optional Regular-Trading-Hours guard (rejects entries outside the window).
 session:
