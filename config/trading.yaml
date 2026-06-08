@@ -1,0 +1,69 @@
+# Hermes × NinjaTrader 8 — trading configuration
+# Loaded by the bridge (hermes_bridge.config.BridgeConfig). Every field has a safe
+# default; override here. Env vars HERMES_BRIDGE_HOST / _PORT / _AGENT also override.
+
+# Must MATCH the StrategyId set on the NinjaScript strategy and HERMES_STRATEGY_ID.
+strategy_id: hermes-default
+
+instrument:
+  symbol: NQ            # display only; NinjaTrader sends its own instrument name
+  timeframe: 1m         # the chart timeframe you attach the strategy to
+  tick_size: 0.25       # NQ e-mini Nasdaq-100
+  tick_value: 5.00      # USD per tick per contract (NQ = $5.00; point value = $20)
+
+# Deterministic strategy parameters (used by the rules/mock engine and shown to the LLM).
+strategy:
+  ema_fast: 9
+  ema_slow: 21
+  atr_period: 14
+  atr_stop_mult: 1.5    # protective stop = 1.5 * ATR
+  atr_target_mult: 2.0  # target = 2.0 * ATR (~1.33R)
+  pullback_atr: 0.5     # how far past the fast EMA still counts as a pullback "tag"
+  min_confidence: 0.55  # ignore entries below this confidence
+
+# Hard risk limits — enforced server-side by the RiskGate.
+# NQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. NQ is volatile ($20/point),
+# so a 1.5*ATR stop can risk several hundred $/contract; max_risk_per_trade must be high
+# enough to admit a 1-contract trade or the gate rejects every entry.
+risk:
+  max_contracts: 1             # NQ is large; 1 contract while validating on Sim
+  max_risk_per_trade: 500.0    # USD; ~ a 1.5*ATR NQ stop on 1 contract (sim placeholder)
+  max_trades_per_day: 10
+  default_stop_ticks: 16       # injected only if a decision arrives with no stop ($80 on NQ)
+
+# Daily goal — the bridge halts (and flattens) when either is hit. (NQ sim placeholders.)
+daily_goal:
+  profit_target: 750.0         # USD realized → halt new entries for the day
+  max_daily_loss: 600.0        # USD realized → flatten + halt for the day
+
+# Optional Regular-Trading-Hours guard (rejects entries outside the window).
+session:
+  enforce_hours: false
+  start: "09:30"
+  end: "16:00"
+  timezone: America/New_York
+
+# Decision brain: mock (rules, no LLM) or hermes (the installed Hermes Agent).
+agent:
+  client: hermes               # mock (rules, no LLM) | hermes (Codex via Hermes oneshot)
+  hermes:
+    mode: cli                  # cli = `hermes -z` oneshot (resolves Codex OAuth) | in_process
+    hermes_bin: /Users/hypawolf/.local/bin/hermes
+    model: ""                  # oneshot uses Hermes' configured model (your Codex selection)
+    # Trading knowledge loaded verbatim into the system prompt (absolute path):
+    context_dir: /Users/hypawolf/code/hermes-trading-agent/hermes/context
+    enabled_toolsets: []       # [] = pure reasoning; the bridge executes the orders
+    skip_memory: true          # each bar is an independent decision
+    quiet_mode: true
+    timeout_s: 60
+
+# HTTP server the NinjaScript strategy connects to.
+server:
+  host: 0.0.0.0                # listen on all interfaces (LAN access from Windows/NT)
+  port: 8787
+
+# Execution safety. allow_live must be explicitly true to trade real money; the
+# NinjaScript strategy ALSO refuses non-Sim accounts unless its AllowLive is true.
+execution:
+  allow_live: false
+  account: Sim101

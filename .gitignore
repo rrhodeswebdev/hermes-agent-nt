@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Env / secrets
+.env
+*.local.yaml
+
+# OS / editor
+.DS_Store
+*.swp
+
+# OMC session state at any depth (keep specs/plans under .omc/autopilot and .omc/plans)
+**/.omc/state/

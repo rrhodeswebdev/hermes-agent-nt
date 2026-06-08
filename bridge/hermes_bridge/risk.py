@@ -1,0 +1,155 @@
+"""RiskGate — the single safety chokepoint.
+
+EVERY order command (from the deterministic engine, the LLM agent's `nt_place_order`
+tool, or a manual API call) is evaluated here before it can be queued for
+NinjaTrader. The gate is pure and fully unit-tested. Rules:
+
+  * EXIT / FLATTEN are ALWAYS allowed (we must always be able to reduce risk).
+  * Entries are rejected when the session is halted or the daily goal is hit.
+  * Entries require a flat position (no pyramiding/flips in v1).
+  * Entries respect max trades/day and the position cap (qty is clamped down).
+  * Every entry must carry a protective stop; a default is injected if missing.
+  * Per-trade dollar risk must not exceed max_risk_per_trade (qty clamped down).
+  * An entry whose worst-case stop-out would breach max_daily_loss is rejected.
+  * Optional trading-hours window can reject entries outside RTH.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
+
+from .config import BridgeConfig
+from .models import Action, OrderCommand
+from .session import SessionState
+
+
+@dataclass
+class RiskDecision:
+    approved: bool
+    command: OrderCommand | None
+    reasons: list[str] = field(default_factory=list)
+
+
+_ENTRIES = {Action.ENTER_LONG, Action.ENTER_SHORT}
+
+
+class RiskGate:
+    def __init__(self, config: BridgeConfig) -> None:
+        self.cfg = config
+
+    def evaluate(
+        self,
+        command: OrderCommand,
+        session: SessionState,
+        *,
+        last_price: float | None = None,
+        now_ts: float | None = None,
+    ) -> RiskDecision:
+        # Risk-reducing actions are never blocked.
+        if command.action in (Action.EXIT, Action.FLATTEN):
+            qty = abs(session.position) if command.qty <= 0 else command.qty
+            return RiskDecision(True, command.model_copy(update={"qty": qty}), ["risk_reducing"])
+
+        if command.action not in _ENTRIES:
+            return RiskDecision(False, None, [f"unsupported_action:{command.action}"])
+
+        reasons: list[str] = []
+
+        # 1) Halt / daily goal.
+        if session.halted:
+            return RiskDecision(False, None, [f"halted:{session.halt_reason or 'halted'}"])
+        if session.daily_goal_hit:
+            return RiskDecision(False, None, ["daily_goal_hit"])
+
+        # 2) Trading-hours window (optional).
+        if self.cfg.session.enforce_hours and now_ts is not None:
+            if not self._within_hours(now_ts):
+                return RiskDecision(False, None, ["outside_session_hours"])
+
+        # 3) Flat-only entries.
+        if session.position != 0:
+            return RiskDecision(False, None, ["already_in_position"])
+
+        # 4) Max trades/day.
+        if session.trades_today >= self.cfg.risk.max_trades_per_day:
+            return RiskDecision(False, None, ["max_trades_per_day"])
+
+        # 5) Position cap (clamp qty).
+        qty = command.qty if command.qty > 0 else 1
+        cap = self.cfg.risk.max_contracts
+        if qty > cap:
+            qty = cap
+            reasons.append(f"qty_clamped_to_cap:{cap}")
+        if qty <= 0:
+            return RiskDecision(False, None, ["zero_qty"])
+
+        # 6) Mandatory protective stop (inject default if missing).
+        stop_ticks = command.stop_ticks
+        if stop_ticks is None and command.stop_price is None:
+            stop_ticks = self.cfg.risk.default_stop_ticks
+            reasons.append(f"default_stop_injected:{stop_ticks}")
+
+        # 7) Per-trade dollar risk (clamp qty down to fit).
+        risk_ticks = self._risk_ticks(stop_ticks, command.stop_price, command.action, last_price)
+        if risk_ticks is None or risk_ticks <= 0:
+            return RiskDecision(False, None, ["cannot_determine_stop_distance"])
+        per_contract_risk = risk_ticks * self.cfg.instrument.tick_value
+        max_qty_by_risk = int(self.cfg.risk.max_risk_per_trade // per_contract_risk)
+        if max_qty_by_risk < 1:
+            return RiskDecision(
+                False, None, [f"single_contract_risk_exceeds_max:{per_contract_risk:.2f}"]
+            )
+        if qty > max_qty_by_risk:
+            qty = max_qty_by_risk
+            reasons.append(f"qty_clamped_by_risk:{qty}")
+
+        trade_risk = per_contract_risk * qty
+
+        # 8) Daily-loss projection: would the worst case breach the daily loss cap?
+        projected_worst = session.realized_pnl - trade_risk
+        if projected_worst <= -session.max_daily_loss:
+            return RiskDecision(
+                False,
+                None,
+                [f"would_breach_daily_loss:realized={session.realized_pnl:.2f}"
+                 f",risk={trade_risk:.2f},limit={session.max_daily_loss:.2f}"],
+            )
+
+        approved = command.model_copy(
+            update={
+                "qty": qty,
+                "stop_ticks": stop_ticks if command.stop_price is None else None,
+                "stop_price": command.stop_price,
+            }
+        )
+        reasons.append(f"approved:risk={trade_risk:.2f}")
+        return RiskDecision(True, approved, reasons)
+
+    # ---- helpers ------------------------------------------------------------
+    def _risk_ticks(
+        self,
+        stop_ticks: int | None,
+        stop_price: float | None,
+        action: Action,
+        last_price: float | None,
+    ) -> float | None:
+        if stop_ticks is not None:
+            return float(stop_ticks)
+        if stop_price is not None and last_price is not None:
+            dist = abs(last_price - stop_price)
+            return dist / self.cfg.instrument.tick_size if self.cfg.instrument.tick_size else None
+        return None
+
+    def _within_hours(self, now_ts: float) -> bool:
+        tz = ZoneInfo(self.cfg.session.timezone)
+        local = datetime.fromtimestamp(now_ts, tz).time()
+        start = _parse_hhmm(self.cfg.session.start)
+        end = _parse_hhmm(self.cfg.session.end)
+        return start <= local <= end
+
+
+def _parse_hhmm(s: str) -> time:
+    hh, mm = s.split(":")
+    return time(int(hh), int(mm))
