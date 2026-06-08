@@ -38,8 +38,11 @@ NinjaTrader 8  ──bars──▶  hermes-bridge  ──asks──▶  Hermes A
 | `hermes/tools/ninjatrader.py` | the agent's `nt_*` tools (registry.register) |
 | `hermes/personalities/` · `hermes/cron/` | trader personality, optional session cron |
 | `config/trading.yaml` | instrument, strategy params, risk limits, daily goal |
-| `docs/` | `ARCHITECTURE.md`, `SETUP.md`, `SAFETY.md` |
+| `docs/` | `EASY-SETUP.md` (plain-English walkthrough), `ARCHITECTURE.md`, `SETUP.md`, `SAFETY.md` |
 | `scripts/` | install / run / healthcheck helpers |
+
+> 🆕 **New to this? Start with [`docs/EASY-SETUP.md`](docs/EASY-SETUP.md)** — a simple,
+> step-by-step setup guide written in plain language.
 
 ## Quick start (no LLM, no NinjaTrader)
 
