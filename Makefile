@@ -9,10 +9,11 @@ RUFF     := $(VENV)/bin/ruff
 CLI      := $(VENV)/bin/hermes-bridge
 CONFIG   := config/trading.yaml
 
-.PHONY: help setup test lint replay serve sample clean
+.PHONY: help start setup test lint replay serve sample clean
 
 help:
 	@echo "Targets:"
+	@echo "  start    one command to bring up everything (Mac side): ./start.sh"
 	@echo "  setup    create the bridge venv (Python 3.11) and install deps"
 	@echo "  test     run the bridge test suite"
 	@echo "  lint     run ruff over the bridge package"
@@ -20,6 +21,11 @@ help:
 	@echo "  serve    start the bridge HTTP server"
 	@echo "  sample   regenerate bridge/replay/sample_bars.csv"
 	@echo "  clean    remove the venv and Python caches"
+
+# One-command startup: reads config, sets up the venv if needed, picks the right
+# serve path, waits for health, prints the NinjaTrader connection info, streams logs.
+start:
+	./start.sh
 
 setup:
 	cd $(BRIDGE) && uv venv --python 3.11 .venv && uv pip install --python .venv -e ".[dev]"

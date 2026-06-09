@@ -39,10 +39,28 @@ NinjaTrader 8  ──bars──▶  hermes-bridge  ──asks──▶  Hermes A
 | `hermes/personalities/` · `hermes/cron/` | trader personality, optional session cron |
 | `config/trading.yaml` | instrument, strategy params, risk limits, daily goal |
 | `docs/` | `EASY-SETUP.md` (plain-English walkthrough), `ARCHITECTURE.md`, `SETUP.md`, `SAFETY.md` |
-| `scripts/` | install / run / healthcheck helpers |
+| `start.sh` | **one-command startup** for the whole Mac side (bridge + dashboard) |
+| `scripts/` | install / run / healthcheck helpers (called by `start.sh` or standalone) |
 
 > 🆕 **New to this? Start with [`docs/EASY-SETUP.md`](docs/EASY-SETUP.md)** — a simple,
 > step-by-step setup guide written in plain language.
+
+## Start everything (Mac side)
+
+```bash
+./start.sh          # the single command: brings up the whole Mac side
+```
+
+`start.sh` reads `config/trading.yaml`, creates the bridge venv on first run, picks the
+right serve path for the configured brain (`mock`, Hermes `cli`, or Hermes `in_process`),
+waits until the bridge is healthy, prints exactly what to plug into NinjaTrader (host,
+`BridgePort`, `StrategyId`), then streams the logs. **Ctrl-C** stops it cleanly. You start
+the **NinjaTrader** side yourself (compile + enable `HermesBridgeStrategy` on a Sim chart).
+
+```bash
+./start.sh --mock          # force the deterministic brain (no LLM)
+./start.sh --check-hermes  # also do a live `hermes -z` ping before serving
+```
 
 ## Quick start (no LLM, no NinjaTrader)
 
