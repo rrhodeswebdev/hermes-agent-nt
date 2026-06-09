@@ -15,5 +15,7 @@ venv/
 .DS_Store
 *.swp
 
-# OMC session state at any depth (keep specs/plans under .omc/autopilot and .omc/plans)
+# OMC local tool state (keep specs/plans under .omc/autopilot and .omc/plans)
 **/.omc/state/
+**/.omc/sessions/
+**/.omc/project-memory.json
