@@ -15,7 +15,5 @@ venv/
 .DS_Store
 *.swp
 
-# OMC local tool state (keep specs/plans under .omc/autopilot and .omc/plans)
-**/.omc/state/
-**/.omc/sessions/
-**/.omc/project-memory.json
+# OMC local tool state (not tracked)
+**/.omc/
