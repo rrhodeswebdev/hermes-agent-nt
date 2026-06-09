@@ -25,11 +25,12 @@ Take an **ENTER_LONG** only when ALL are true:
    (within ~0.5 × ATR), i.e. a real dip, not an extended bar far above the EMA.
 3. **Resumption**: the bar **closed back above** `ema_fast` and is a **bullish bar**
    (close > open). This is the "and then resumes" trigger.
-4. **Order flow confirms**: `recent_delta >= 0` (buyers in control). Prefer clearly
-   positive delta; be skeptical if delta is negative while you're trying to buy.
-5. **Location is sane**: you are not buying directly into the `swing_high` resistance
-   with no room to the target. There must be at least ~1R of room before obvious
-   resistance.
+4. **Order flow is not clearly against you** (RELAXED for testing): you do not need
+   strongly positive `recent_delta`. Only veto the long when delta is *clearly*
+   negative (strong selling). Mildly negative or flat delta is acceptable.
+5. **Location is reasonable** (RELAXED for testing): prefer some room to the target,
+   but you may take the entry even when `swing_high` is fairly close — treat location
+   as a preference, not a hard gate, while testing.
 
 **Short setup** is the exact mirror: downtrend, bar tags the fast EMA from below,
 closes back below it as a bearish bar, `recent_delta <= 0`, room to the downside.
@@ -52,7 +53,15 @@ closes back below it as a bearish bar, `recent_delta <= 0`, room to the downside
 - Do **not** move your stop further away. You may exit early; you may not add risk.
 - Never flip directly from long to short in one step. Exit, then re-evaluate next bar.
 
-## Most bars are WAIT
+## Bias toward taking clean setups (RELAXED test profile)
 
-This setup appears a handful of times per session. If conditions are not cleanly met,
-the correct action is **WAIT**. Overtrading is the fastest way to fail the daily goal.
+> ⚠️ This is a **relaxed, testing-only** profile to exercise the agent end-to-end and
+> generate more entries on Sim. It is intentionally less selective than the production
+> rules. Revert this section (and the order-flow/location relaxations above) before
+> trading anything that matters.
+
+When the **core** conditions are met — right trend, a real pullback that tags the fast
+EMA, and a same-direction resumption bar — you may **ENTER** even if order flow is only
+neutral or location is less than ideal. You still WAIT when the trend is wrong, there is
+no pullback, or the bar is not a resumption. The resting `1.5×ATR` stop bracket caps the
+downside of each test trade.

@@ -18,8 +18,8 @@ strategy:
   atr_period: 14
   atr_stop_mult: 1.5    # protective stop = 1.5 * ATR
   atr_target_mult: 2.0  # target = 2.0 * ATR (~1.33R)
-  pullback_atr: 0.5     # how far past the fast EMA still counts as a pullback "tag"
-  min_confidence: 0.55  # ignore entries below this confidence
+  pullback_atr: 0.9     # RELAXED (test): wider tag tolerance → more pullbacks qualify (was 0.5)
+  min_confidence: 0.40  # RELAXED (test): admit lower-conviction entries (was 0.55)
 
 # Hard risk limits — enforced server-side by the RiskGate.
 # MNQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. MNQ is a micro ($2/point),
@@ -29,7 +29,7 @@ risk:
   max_contracts: 2             # micros are small; allow a couple while validating on Sim
   max_risk_per_trade: 250.0    # USD per-trade ceiling (effective cap is the lesser of this
                                # and remaining daily-loss room; see daily_goal.max_daily_loss)
-  max_trades_per_day: 10
+  max_trades_per_day: 20       # RELAXED (test): allow more entries per session (was 10)
   default_stop_ticks: 16       # injected only if a decision arrives with no stop ($8 on MNQ)
 
 # Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
