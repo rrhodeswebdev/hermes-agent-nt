@@ -147,7 +147,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         recent = list(st.decisions)[-15:]
         return {
             "agent": cfg.agent.client,
-            "mode": cfg.agent.hermes.mode,
+            "mode": cfg.agent.claude.model,
             "strategy_id": cfg.strategy_id,
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,

@@ -44,19 +44,19 @@ session:
   end: "16:00"
   timezone: America/New_York
 
-# Decision brain: mock (rules, no LLM) or hermes (the installed Hermes Agent).
+# Decision brain: mock (rules, no LLM) or claude (the `claude` CLI on your subscription).
 agent:
-  client: hermes               # mock (rules, no LLM) | hermes (Codex via Hermes oneshot)
-  hermes:
-    mode: cli                  # cli = `hermes -z` oneshot (resolves Codex OAuth) | in_process
-    hermes_bin: /Users/hypawolf/.local/bin/hermes
-    model: ""                  # oneshot uses Hermes' configured model (your Codex selection)
+  client: claude               # mock (rules, no LLM) | claude (`claude -p` oneshot)
+  claude:
+    claude_bin: claude         # path/name of the claude launcher (must be on PATH)
+    model: haiku               # sonnet | haiku | opus | full model id (haiku = fastest decisions)
+    safe_mode: true            # --safe-mode: isolate from your CLAUDE.md/hooks/MCP/skills
+    max_thinking_tokens: 0     # SPEED: cap extended thinking (the main latency cost). 0 = fastest
+                               # (~10s); raise to ~1024 if you see too many WAITs; null = uncapped.
     # Trading knowledge loaded verbatim into the system prompt (absolute path):
     context_dir: /Users/hypawolf/code/hermes-trading-agent/hermes/context
-    enabled_toolsets: []       # [] = pure reasoning; the bridge executes the orders
-    skip_memory: true          # each bar is an independent decision
-    quiet_mode: true
-    timeout_s: 60
+    timeout_s: 30
+    extra_args: []             # appended verbatim to the claude argv (advanced)
 
 # HTTP server the NinjaScript strategy connects to.
 server:

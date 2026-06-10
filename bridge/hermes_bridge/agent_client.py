@@ -4,22 +4,21 @@
 
 * `MockAgentClient` — a deterministic order-flow + price-action rule set. It makes
   the WHOLE system runnable and testable with no LLM and no API key, and serves as
-  the safe fallback if Hermes is unavailable. It is also the "rules gate" half of
-  the hybrid engine.
+  the safe fallback if the LLM brain is unavailable. It is also the "rules gate" half
+  of the hybrid engine.
 
-* `HermesAgentClient` — delegates judgment to the installed Hermes Agent runtime via
-  its documented `AIAgent` programmatic interface (or the `hermes` CLI). The trading
-  knowledge/strategy/risk/goal live in Hermes context files; this client just frames
-  the request and parses a JSON Decision back. Any failure degrades to WAIT (never
-  auto-trades on a malformed/absent response — open positions remain protected by the
-  resting bracket stop in NinjaTrader).
+* `ClaudeAgentClient` — delegates judgment to the `claude` CLI in headless print mode
+  (on your Claude subscription, no API key). The trading knowledge/strategy/risk/goal
+  live in the `context/*.md` files; this client just frames the request and parses a
+  JSON Decision back. Any failure degrades to WAIT (never auto-trades on a
+  malformed/absent response — open positions remain protected by the resting bracket
+  stop in NinjaTrader). It lives in `claude_agent.py` to keep this module import-light.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -124,7 +123,7 @@ class MockAgentClient(AgentClient):
 
 
 # --------------------------------------------------------------------------- #
-# Hermes Agent client (LLM judgment)                                          #
+# Shared LLM-prompt framing (used by ClaudeAgentClient)                       #
 # --------------------------------------------------------------------------- #
 DECISION_INSTRUCTION = """\
 === YOUR TASK ===
@@ -151,116 +150,43 @@ _CONTEXT_ORDER = [
 ]
 
 
-class HermesAgentClient(AgentClient):
-    """Adapter over the installed Hermes runtime (Nous Research hermes-agent).
+def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
+    """Concatenate the *.md context files in priority order into one string.
 
-    Verified against hermes-agent 0.16.0: `run_agent.AIAgent(...)` exposes
-    `run_conversation(user_message, system_message=...) -> {"final_response": str}`.
-    The agent is constructed ONCE and reused. The trading knowledge is loaded from the
-    `context_dir` *.md files into the system prompt so the agent reliably trades the
-    configured way. Any failure degrades to WAIT (never auto-trades on error).
+    UTF-8 explicit so reading does not depend on the platform locale (Windows
+    defaults to cp1252 and would crash on the em-dashes/arrows in the notes).
     """
+    order = order or _CONTEXT_ORDER
+    d = Path(context_dir)
+    if not d.is_dir():
+        return ""
+    parts: list[str] = []
+    for name in order:
+        f = d / name
+        if f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    # Include any other *.md not in the explicit order.
+    for f in sorted(d.glob("*.md")):
+        if f.name not in order and f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n\n---\n\n".join(parts)
 
-    def __init__(self, config: BridgeConfig) -> None:
-        super().__init__(config)
-        self._agent = None          # cached AIAgent (lazy; needs a configured provider)
-        self._system: str | None = None  # cached system prompt
 
-    def decide(self, req: AgentRequest) -> Decision:
-        try:
-            reply = self._ask(self._system_prompt(), self._user_prompt(req))
-            return self._parse(reply)
-        except Exception as exc:  # noqa: BLE001 — fail safe: never auto-trade on error
-            return Decision(action=Action.WAIT, rationale=f"hermes_error:{type(exc).__name__}")
-
-    # ---- prompt framing -----------------------------------------------------
-    def _system_prompt(self) -> str:
-        if self._system is not None:
-            return self._system
-        knowledge = self._load_context_files()
-        if not knowledge:
-            knowledge = self.cfg.agent.hermes.context_hint
-        self._system = f"{knowledge}\n\n{DECISION_INSTRUCTION}"
-        return self._system
-
-    def _load_context_files(self) -> str:
-        d = Path(self.cfg.agent.hermes.context_dir)
-        if not d.is_dir():
-            return ""
-        parts: list[str] = []
-        for name in _CONTEXT_ORDER:
-            f = d / name
-            if f.is_file():
-                parts.append(f.read_text())
-        # Include any other *.md not in the explicit order.
-        for f in sorted(d.glob("*.md")):
-            if f.name not in _CONTEXT_ORDER and f.is_file():
-                parts.append(f.read_text())
-        return "\n\n---\n\n".join(parts)
-
-    def _user_prompt(self, req: AgentRequest) -> str:
-        bars = [
-            {"ts": b.ts, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
-            for b in req.recent_bars[-30:]
-        ]
-        payload = {
-            "mode": req.mode,
-            "instrument": req.account.instrument,
-            "timeframe": req.account.timeframe,
-            "context": req.context.to_dict(),
-            "account": req.account.model_dump(),
-            "recent_bars": bars,
-        }
-        return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
-
-    # ---- runtime call -------------------------------------------------------
-    def _ask(self, system: str, user: str) -> str:
-        if self.cfg.agent.hermes.mode == "cli":
-            return self._ask_cli(system, user)
-        return self._ask_in_process(system, user)
-
-    def _ask_in_process(self, system: str, user: str) -> str:
-        agent = self._get_agent()
-        result = agent.run_conversation(user, system_message=system)
-        if isinstance(result, dict):
-            return str(result.get("final_response", ""))
-        return str(result)
-
-    def _get_agent(self):
-        if self._agent is None:
-            # Lazy import so the bridge has no hard dependency on Hermes being present.
-            from run_agent import AIAgent  # type: ignore
-
-            h = self.cfg.agent.hermes
-            self._agent = AIAgent(
-                model=h.model or "",
-                enabled_toolsets=list(h.enabled_toolsets),
-                skip_memory=h.skip_memory,
-                quiet_mode=h.quiet_mode,
-            )
-        return self._agent
-
-    def _ask_cli(self, system: str, user: str) -> str:
-        # Hermes oneshot: `hermes -z "<prompt>"`. Reuses Hermes' provider/auth resolution
-        # (e.g. OpenAI Codex OAuth), unlike a bare in-process AIAgent() construction.
-        h = self.cfg.agent.hermes
-        out = subprocess.run(
-            [h.hermes_bin, "-z", f"{system}\n\n{user}"],
-            capture_output=True, text=True, timeout=h.timeout_s,
-        )
-        return out.stdout
-
-    # ---- response parsing ---------------------------------------------------
-    @staticmethod
-    def _parse(reply: str) -> Decision:
-        block = _extract_json(reply)
-        if block is None:
-            return Decision(action=Action.WAIT, rationale="no_json_in_reply")
-        try:
-            data = json.loads(block)
-            return Decision.model_validate(data)
-        except Exception:  # noqa: BLE001
-            return Decision(action=Action.WAIT, rationale="unparseable_decision")
+def build_user_prompt(req: AgentRequest) -> str:
+    """Frame the current market state as the agent's user message."""
+    bars = [
+        {"ts": b.ts, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
+        for b in req.recent_bars[-30:]
+    ]
+    payload = {
+        "mode": req.mode,
+        "instrument": req.account.instrument,
+        "timeframe": req.account.timeframe,
+        "context": req.context.to_dict(),
+        "account": req.account.model_dump(),
+        "recent_bars": bars,
+    }
+    return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
 
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -279,6 +205,7 @@ def _extract_json(text: str) -> str | None:
 
 
 def build_agent_client(config: BridgeConfig) -> AgentClient:
-    if config.agent.client == "hermes":
-        return HermesAgentClient(config)
+    if config.agent.client == "claude":
+        from .claude_agent import ClaudeAgentClient  # lazy: avoid circular import
+        return ClaudeAgentClient(config)
     return MockAgentClient(config)

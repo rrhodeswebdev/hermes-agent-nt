@@ -53,35 +53,33 @@ class SessionWindow(BaseModel):
     timezone: str = "America/New_York"
 
 
-class HermesClientConfig(BaseModel):
-    # `mode` selects how HermesAgentClient reaches the runtime.
-    mode: str = "in_process"            # in_process | cli
-    # OpenRouter-style "provider/model"; "" → use Hermes' own config.yaml model.default.
-    model: str = ""
+class ClaudeClientConfig(BaseModel):
+    # The decision brain via the Claude Code CLI in headless print mode, on your
+    # subscription (no ANTHROPIC_API_KEY / metered API).
+    claude_bin: str = "claude"          # path/name of the claude launcher
+    model: str = "sonnet"               # sonnet | haiku | opus | full model id (haiku = fastest)
+    safe_mode: bool = True              # --safe-mode: isolate from CLAUDE.md/hooks/MCP/skills
+    # Latency lever. Extended-"thinking" tokens dominate decision latency: uncapped, one
+    # decision can emit thousands of tokens (~30–50s) and even blow past timeout_s → WAIT.
+    # Threaded into the subprocess as MAX_THINKING_TOKENS. 0 = minimal thinking (fastest,
+    # ~10s); raise (e.g. 1024) if decisions show a WAIT bias from too little reasoning;
+    # None = uncapped (slowest, most deliberation).
+    max_thinking_tokens: int | None = 0
+    timeout_s: float = 30.0
+    extra_args: list[str] = Field(default_factory=list)  # appended verbatim to the claude argv
     # Directory of *.md context files loaded verbatim into the system prompt (this is
     # how the agent learns the strategy/order-flow/risk/goal). Absolute or relative to CWD.
     context_dir: str = "hermes/context"
-    # Toolsets exposed to the agent. [] = pure reasoning (the bridge executes orders);
-    # e.g. ["ninjatrader"] to let the agent call the nt_* tools itself.
-    enabled_toolsets: list[str] = Field(default_factory=list)
-    skip_memory: bool = True           # per-bar decisions are stateless
-    quiet_mode: bool = True
-    timeout_s: float = 60.0
-    # CLI mode (mode == "cli"): shell out to Hermes' non-interactive oneshot
-    # (`hermes -z "<prompt>"`). This reuses Hermes' full provider/auth resolution —
-    # including OpenAI Codex OAuth — so it works where a bare in-process AIAgent() does
-    # not. Recommended for OAuth providers (Codex, Nous Portal, etc.).
-    hermes_bin: str = "hermes"         # path to the `hermes` launcher
     # Used only if context_dir is missing/empty.
     context_hint: str = (
-        "You are Hermes, a disciplined futures day-trader. Trade a trend-pullback "
-        "strategy with order-flow confirmation, ATR brackets, and strict risk limits."
+        "You are a disciplined futures day-trader. Trade a trend-pullback strategy "
+        "with order-flow confirmation, ATR brackets, and strict risk limits."
     )
 
 
 class AgentConfig(BaseModel):
-    client: str = "mock"              # mock | hermes
-    hermes: HermesClientConfig = Field(default_factory=HermesClientConfig)
+    client: str = "mock"              # mock | claude
+    claude: ClaudeClientConfig = Field(default_factory=ClaudeClientConfig)
 
 
 class ServerConfig(BaseModel):

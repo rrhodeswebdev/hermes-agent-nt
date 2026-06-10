@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         help="CSV columns: ts,open,high,low,close,volume[,bid_volume,ask_volume]",
     )
     p_replay.add_argument("--config", default=default_cfg)
-    p_replay.add_argument("--agent", default=None, choices=["mock", "hermes"])
+    p_replay.add_argument("--agent", default=None, choices=["mock", "claude"])
     p_replay.add_argument("--warmup", type=int, default=50)
     p_replay.add_argument("--verbose", "-v", action="store_true")
     p_replay.set_defaults(func=_cmd_replay)
