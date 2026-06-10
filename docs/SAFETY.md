@@ -6,9 +6,9 @@ to real money.
 
 ## The single chokepoint
 
-**Every** order — whether from the deterministic engine, the Hermes `nt_place_order`
-tool, or a manual API call — passes through `RiskGate.evaluate()` before it can be
-queued for NinjaTrader. The agent cannot bypass it. The gate enforces:
+**Every** order — whether from the deterministic engine or a manual API call — passes
+through `RiskGate.evaluate()` before it can be queued for NinjaTrader. The agent cannot
+bypass it. The gate enforces:
 
 | Rule | Behaviour |
 |------|-----------|
@@ -46,8 +46,8 @@ enforced in `SessionState` + `TradingEngine`, independent of what the agent "wan
 3. **RiskGate** — the rules above, on every order.
 4. **Resting bracket** — every entry places a real stop + target in NinjaTrader, so even
    if the bridge or agent goes away, the position is protected by the exchange-side stop.
-5. **Fail-safe agent** — if Hermes errors or returns garbage, the decision is `WAIT`
-   (never a trade).
+5. **Fail-safe agent** — if Claude errors, times out, or returns garbage, the decision is
+   `WAIT` (never a trade).
 6. **Kill switch** — `POST /control/flatten` flattens + halts immediately.
 
 ## Going live (only after thorough Sim validation)

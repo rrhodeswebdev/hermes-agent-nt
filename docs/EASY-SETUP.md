@@ -17,8 +17,7 @@ Think of it like a team of helpers. Here is who does what:
 | **NinjaTrader** | A TV that shows the price going up and down | Shows the market chart (lives on the Windows side) |
 | **The Strategy** (`HermesBridgeStrategy`) | A mail carrier 📬 | Every minute it mails the new price to the robot, and does what the robot says (buy / sell / wait) |
 | **The Bridge** | The robot's desk + a safety guard 👮 | Keeps the rule book, checks every order is safe, and remembers the score |
-| **Hermes** | The robot's brain 🧠 | The thinking program you install |
-| **Codex** (your ChatGPT login) | Brain power ⚡ | Lets the brain actually think |
+| **Claude** (the robot's brain) | The robot's brain 🧠 | The Claude Code app on your computer — it does the thinking, running on your own Claude subscription |
 | **The Dashboard** | A window 🪟 | Lets *you* watch what the robot is thinking |
 
 The robot's job: look at the price, then say **BUY**, **SELL**, or **WAIT** — using
@@ -31,45 +30,47 @@ rules you can read and change.
 1. A **Mac** computer (you have this!).
 2. **NinjaTrader 8** running in Windows (you run it in Parallels — that's a Windows
    "computer inside your Mac").
-3. A **ChatGPT / Codex account** (this gives the brain its thinking power).
+3. The **Claude Code CLI** installed and logged in (this is the brain — it runs on your
+   own **Claude subscription**, so make sure you can sign in).
 4. The **project folder** at `/Users/hypawolf/code/hermes-trading-agent` (you have this too!).
 
 ---
 
-## Step 1 — Install the robot brain 🧠
+## Step 1 — Get the robot brain 🧠
 
-Open the **Terminal** app on your Mac. Copy this line, paste it, and press **Enter**:
+The brain is the **Claude Code CLI** (the `claude` app). Good news: you very likely
+**already have it** — that's the app you're probably reading this with!
+
+Open the **Terminal** app on your Mac and check by typing this, then pressing **Enter**:
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+claude --version
 ```
 
-This downloads the brain (called **Hermes**). It takes a few minutes. Let it finish.
+If it shows a version number, the brain is ready — skip to Step 2! ✅
 
-**How do you know it worked?** Type `hermes` and press Enter. If a little chat starts,
-the brain is alive! (Type `exit` or press Ctrl+C to leave the chat.)
+Only if it says "command not found", install it from the official page:
+**https://claude.com/claude-code** — then run `claude --version` again.
+
+**How do you know it worked?** `claude --version` shows a version number.
 
 ---
 
 ## Step 2 — Give the brain its thinking power ⚡
 
-The brain needs a way to *think*. We use your **Codex** (ChatGPT) login. In the Terminal:
+The brain thinks using your own **Claude subscription** — no API key, no separate
+sign-up. You just need to be **logged in**. In the Terminal, type:
 
 ```bash
-hermes auth add openai-codex
+claude
 ```
 
-A web page will pop up. **Log in with your ChatGPT account.** That's it!
+If it asks you to sign in, type `/login` and follow the steps to log in with your
+**Claude subscription**. If it just opens a chat, you're already logged in. That's it! ✅
 
-Now pick which brain it uses:
+(Type `/exit` or press Ctrl+C to leave the chat.)
 
-```bash
-hermes model
-```
-
-A little menu shows up. Choose **OpenAI Codex**. Done. ✅
-
-**How do you know it worked?** Type `hermes`, say "hi", and see if it answers back.
+**How do you know it worked?** Run `claude`, say "hi", and see if it answers back.
 
 ---
 
@@ -91,7 +92,7 @@ This builds everything the desk needs. Wait for it to finish.
 make test
 ```
 
-If it says something like **"38 passed"**, you're golden! 🌟
+If it says something like **"60 passed"**, you're golden! 🌟
 
 ---
 
@@ -242,8 +243,8 @@ press **Ctrl + C**.
 
 ## 🧠 The one-minute review
 
-1. Install the brain → `curl … | bash`
-2. Give it thinking power → `hermes auth add openai-codex` then `hermes model`
+1. Get the brain → check `claude --version` (you probably already have it)
+2. Give it thinking power → run `claude` and `/login` with your Claude subscription
 3. Build the desk → `make setup`
 4. (Optional) change the rules → `config/trading.yaml` and `hermes/context/`
 5. Start the desk → `./scripts/run_bridge.sh`

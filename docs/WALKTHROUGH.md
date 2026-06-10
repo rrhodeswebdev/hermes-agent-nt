@@ -6,7 +6,7 @@ you'll understand every piece without needing to read the code.
 
 > **The one-sentence version:** NinjaTrader watches the market and mails each finished
 > price bar to a Python **bridge**; the bridge asks a **brain** (either simple rules or
-> the Hermes LLM) "enter, exit, or wait?", runs that answer through a hard **safety gate**,
+> the Claude CLI) "enter, exit, or wait?", runs that answer through a hard **safety gate**,
 > and sends any approved order back to NinjaTrader to execute on a **practice (Sim)**
 > account — with a stop-loss attached every time.
 
@@ -21,14 +21,15 @@ Think of it as a small team, each with one job:
 | **NinjaTrader 8** | The TV showing the live market | Windows (Parallels) | — |
 | **The Strategy** | The mail carrier: mails each new bar to the bridge, places the orders it's told to | Windows (inside NT) | `ninjatrader/HermesBridgeStrategy.cs` |
 | **The Bridge** | The desk + safety guard: keeps history, computes indicators, asks the brain, checks every order, keeps score | Mac | `bridge/hermes_bridge/*` |
-| **The Brain** | The decision-maker: looks at the market and says enter / exit / wait | Mac | rules: `agent_client.py` · LLM: Hermes |
-| **Hermes + Codex** | The actual "thinking" (an LLM, powered by your ChatGPT/Codex login) | Mac | `hermes/context/*`, `hermes/tools/*` |
+| **The Brain** | The decision-maker: looks at the market and says enter / exit / wait | Mac | rules: `agent_client.py` · LLM: Claude CLI |
+| **Claude CLI** | The actual "thinking" (the `claude -p` command on your Claude subscription, reading the strategy notes) | Mac | `hermes/context/*` |
 | **The Dashboards** | The windows *you* watch it through | Browser + NT chart | `dashboard.py`, `HermesDashboard.cs` |
 
-There are really **three running programs**: NinjaTrader (Windows), the bridge (Mac), and
-the Hermes agent (Mac, only when the brain is set to `hermes`).
+There are really **two running programs**: NinjaTrader (Windows) and the bridge (Mac).
+There is no separate brain process — when the brain is set to `claude`, the bridge simply
+invokes `claude -p` as a short-lived subprocess once per closed bar.
 
-The guiding principle: **Hermes provides judgment, the bridge provides safety.** The brain
+The guiding principle: **Claude provides judgment, the bridge provides safety.** The brain
 can *suggest* anything; it can never place an order that the bridge's safety gate hasn't
 approved.
 
@@ -59,8 +60,7 @@ flowchart LR
         end
         BRAIN{{"Decision brain"}}
         MOCK["mock = rules<br/>(no LLM)"]
-        HERM["Hermes Agent<br/>+ context files"]
-        CODEX["Codex model<br/>(your login)"]
+        CLAUDE["Claude CLI (claude -p)<br/>on your subscription<br/>+ context files"]
         WEB["Web dashboard<br/>localhost:8787"]
     end
 
@@ -69,8 +69,7 @@ flowchart LR
     SRV --> STORE --> IND --> ENG
     ENG --> BRAIN
     BRAIN -. "client: mock" .-> MOCK
-    BRAIN -. "client: hermes" .-> HERM
-    HERM --> CODEX
+    BRAIN -. "client: claude" .-> CLAUDE
     ENG --> RISK --> SESS
     PANEL -- "GET /dashboard.txt" --> SRV
     WEB -- "GET /dashboard" --> SRV
@@ -86,11 +85,12 @@ sequenceDiagram
     participant NT as NinjaTrader<br/>(Strategy)
     participant BR as Bridge<br/>(server)
     participant EN as Engine
-    participant BN as Brain<br/>(mock / Hermes)
+    participant BN as Brain<br/>(mock / Claude)
     participant RG as RiskGate
     participant SS as SessionState
 
     Note over NT: A bar closes (e.g. each minute)
+    Note over BN: Claude latency depends on thinking tokens<br/>(0 ≈ 10s · uncapped ≈ 30–50s)
     NT->>BR: POST /ingest/bar  (open,high,low,close,volume)
     BR->>EN: on_bar(bar)
     EN->>SS: new trading day? still halted?
@@ -197,7 +197,7 @@ it are several cooperating parts:
 
 The bridge is also fully testable on its own: `make replay` runs synthetic bars through
 this exact engine + gate with no NinjaTrader and no LLM, and `make test` runs the unit
-tests (38 of them, all green).
+tests (60 of them, all green).
 
 ### C. The Brain — *the decision-maker*
 
@@ -209,24 +209,35 @@ config (`agent.client`):
   the exact strategy: in an uptrend, when a bar dips to "tag" the fast EMA and then closes
   back above it as an up-bar with non-negative order flow → go long (mirror for shorts).
   This is also the **safe fallback** and the engine used by the replay/test harness.
-- **`hermes` — the LLM** (currently selected). The bridge sends the market state to the
-  Hermes agent, which reads your strategy notes (section D) and replies with a decision in a
-  structured format. If Hermes ever errors, times out, or replies with nonsense, the
-  decision safely degrades to **WAIT** — it never guesses a trade on a broken answer.
+- **`claude` — the LLM** (currently selected). The bridge runs `claude -p` on your Claude
+  subscription, sending it the market state; Claude reads your strategy notes (section D) and
+  replies with a schema-validated JSON decision. If Claude ever errors, times out, or replies
+  with nonsense, the decision safely degrades to **WAIT** — it never guesses a trade on a
+  broken answer.
 
 Either way, the answer is just a *suggestion* until the risk gate approves it.
 
-> **How the LLM is reached:** in `cli` mode the bridge shells out to `hermes -z "<prompt>"`,
-> which reuses Hermes' own login resolution (your OpenAI **Codex** OAuth). That's why you
-> log in with ChatGPT during setup. There's also an `in_process` mode that imports Hermes
-> directly.
+> **How the LLM is reached:** the bridge shells out to `claude -p --safe-mode "<prompt>"` in
+> headless print mode, authenticated by your Claude subscription (no API key, no
+> `ANTHROPIC_API_KEY`). `--safe-mode` isolates the run — Claude ignores your global
+> `CLAUDE.md`, hooks, MCP servers, and skills — and `--json-schema` constrains the reply,
+> which the bridge reads from the `structured_output` field. This is why setup just needs you
+> logged in.
+
+> **Timeframe & cadence (cost/latency):** the brain runs once per *closed* bar, so a
+> sub-minute chart calls Claude very frequently — each call needs to finish before the next
+> bar matters. Extended "thinking" tokens dominate that latency, and
+> `agent.claude.max_thinking_tokens` (threaded in as the `MAX_THINKING_TOKENS` env var) is the
+> lever: **0 = fastest (~10s)**, uncapped ≈ 30–50s. It defaults to 0, and `model: haiku` (the
+> default) is the fastest model. Pick a bar size that comfortably exceeds your chosen
+> latency.
 
 ### D. The trading knowledge — *the context files*
 
 This is the clever part: **the strategy isn't hard-coded — it's written in plain English**
-in `hermes/context/`, and those notes are loaded straight into the LLM's instructions every
-bar. Want it to trade differently? Edit the notes, restart the bridge. The files, in the
-order the brain reads them:
+in `hermes/context/`, and those notes are loaded verbatim into Claude's **system prompt**
+every bar. Want it to trade differently? Edit the notes, restart the bridge. The files, in
+the order the brain reads them:
 
 | File | What it teaches the brain |
 |------|---------------------------|
@@ -237,14 +248,12 @@ order the brain reads them:
 | `risk-management.md` | The hard limits and the behavioral rules (no revenge trading, no chasing, think in "R"). |
 | `daily-goal.md` | Trade to a daily plan; bank green days; walk away at the max loss. |
 
-Two more customization files round out the agent:
-
-- `hermes/personalities/hermes-trader.md` — the agent's *voice*: calm, patient, concise,
-  process-over-outcome.
-- `hermes/tools/ninjatrader.py` — the agent's **hands**, the `nt_*` tools: `nt_recent_bars`
-  (look at recent bars), `nt_account_status` / `nt_session_status` (check position & limits),
-  `nt_place_order` / `nt_flatten` (act). Every one of these still goes through the risk gate.
-- `hermes/cron/trading-session.yaml` — optional pre-open and post-close check-ins.
+Note that Claude here is a **pure reasoner**: it reads these notes and the market state and
+returns a decision — it does *not* call any tools or place orders itself. The bridge executes
+every order (and runs it through the risk gate first). A few leftover files from the previous
+design (`hermes/tools/ninjatrader.py`, `hermes/personalities/*`, `hermes/cron/*`) still exist
+on disk but are **dormant** — the Claude brain doesn't use them, and you don't need to install
+or enable anything.
 
 > **Note on the numbers in these files:** the context notes quote the *original* example
 > limits (e.g. +$500 / −$400 / 10 trades). The **real, enforced** limits are always the ones
@@ -265,8 +274,10 @@ you need. The sections:
 - **`daily_goal`** — `profit_target` (stop winning at $X) and `max_daily_loss` (stop losing
   at $Y; also flattens you).
 - **`session`** — optional "only trade during these hours" guard (off by default).
-- **`agent`** — which brain (`mock` / `hermes`), and how to reach Hermes (`cli` vs
-  `in_process`, the binary path, the context folder, timeout).
+- **`agent`** — which brain (`mock` / `claude`), plus the Claude settings under
+  `agent.claude`: `model` (default `haiku`, the fastest; `sonnet`/`opus` also valid),
+  `safe_mode` (true), `max_thinking_tokens` (default 0 = fastest), `context_dir` (the notes
+  folder), `timeout_s` (30), and `claude_bin` (default `claude`, must be on PATH).
 - **`server`** — the host/port the bridge listens on (`0.0.0.0:8787` so Windows can reach it).
 - **`execution`** — `allow_live` (default **false**) and the account name. An advisory
   posture; the NinjaScript account guard is the real interlock.
@@ -286,16 +297,15 @@ Two views, same data, so you're never guessing what the robot is thinking:
 ### G. Starting it all — *`start.sh`, scripts, Makefile*
 
 - **`./start.sh`** is the one command for the Mac side. It reads your config, creates the
-  Python environment on first run, validates the chosen brain (e.g. checks the `hermes`
-  binary exists, or `--check-hermes` does a live ping), waits until the bridge answers
-  `/health`, then **prints exactly what to type into NinjaTrader** (host, port, StrategyId,
-  account) and streams the logs. `Ctrl-C` stops it cleanly. `./start.sh --mock` forces the
-  no-LLM brain.
+  Python environment on first run, validates the chosen brain (for `claude`, it checks that
+  `claude` is on your PATH; `--check-claude` does a live `claude -p` ping), waits until the
+  bridge answers `/health`, then **prints exactly what to type into NinjaTrader** (host,
+  port, StrategyId, account) and streams the logs. `Ctrl-C` stops it cleanly.
+  `./start.sh --mock` forces the no-LLM mock brain.
 - **`Makefile`** — developer shortcuts: `make setup`, `make test`, `make replay`,
   `make serve`, `make lint`, `make clean`.
-- **`scripts/`** — smaller helpers: `install_hermes.sh` (copy the customization into your
-  Hermes install, optionally install Hermes itself), `run_bridge.sh` / `run_bridge_hermes.sh`
-  (start the server), `healthcheck.sh` (ping `/health` + `/session/status`).
+- **`scripts/`** — smaller helpers: `run_bridge.sh` (start the server) and `healthcheck.sh`
+  (ping `/health` + `/session/status`).
 
 ---
 
@@ -349,15 +359,16 @@ real money or runs away:
 The full, friendly version is in `docs/EASY-SETUP.md`; the developer version in
 `docs/SETUP.md`. The short path:
 
-1. **Install the brain (Hermes):** `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`
-2. **Give it thinking power:** `hermes auth add openai-codex`, then `hermes model` → pick Codex.
-3. **Build the desk:** `make setup`, then `make test` (expect "38 passed").
-4. **(Optional) adjust the rules:** edit `config/trading.yaml` and the notes in `hermes/context/`.
-5. **Start the desk:** `./start.sh` (or `./scripts/run_bridge.sh`). It prints the NinjaTrader settings.
-6. **Add the mail carrier:** in NinjaTrader, compile `HermesBridgeStrategy.cs`, add it to an
+1. **Set up the brain (Claude CLI):** install the Claude Code CLI and make sure you're logged
+   in on your Claude subscription — run `claude` once and `/login` if prompted. (No API key,
+   no `ANTHROPIC_API_KEY`.)
+2. **Build the desk:** `make setup`, then `make test` (expect "60 passed").
+3. **(Optional) adjust the rules:** edit `config/trading.yaml` and the notes in `hermes/context/`.
+4. **Start the desk:** `./start.sh` (or `./scripts/run_bridge.sh`). It prints the NinjaTrader settings.
+5. **Add the mail carrier:** in NinjaTrader, compile `HermesBridgeStrategy.cs`, add it to an
    MNQ 1-minute chart, set `BridgeHost`/`BridgePort`/`StrategyId`, keep **`AllowLive: false`**
    and account **`Sim101`**, then Enable.
-7. **Watch:** open `http://localhost:8787/` (and/or add the `HermesDashboard` indicator).
+6. **Watch:** open `http://localhost:8787/` (and/or add the `HermesDashboard` indicator).
 
 > Remember: after editing any config or context file, **restart the bridge** for it to take
 > effect (the LLM's instructions are loaded once at startup).
