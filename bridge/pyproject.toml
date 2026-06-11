@@ -1,0 +1,45 @@
+[project]
+name = "hermes-bridge"
+version = "0.1.0"
+description = "Bridge connecting NinjaTrader 8 to the Hermes trading agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+hermes-bridge = "hermes_bridge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hermes_bridge"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]  # FastAPI uses function calls in defaults (Depends/Query)
+
+[tool.ruff.lint.per-file-ignores]
+# dashboard.py embeds an HTML/CSS/JS document; long lines there are expected.
+"hermes_bridge/dashboard.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

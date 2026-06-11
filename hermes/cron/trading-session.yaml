@@ -1,0 +1,29 @@
+# Optional Hermes cron schedule — trading session bookends.
+#
+# Hermes runs schedules dropped into ~/.hermes/cron/ via its daemon. This is a
+# convenience: the bridge's risk gate and daily-goal halt are the real enforcement,
+# but a daily session check is useful for a heads-up and an end-of-day review.
+#
+# NOTE: confirm the exact cron schema against your installed Hermes version
+# (`hermes cron --help`); field names below follow the documented YAML form and may
+# need light adjustment.
+
+schedules:
+  - name: session-open-check
+    # 09:25 America/New_York, Monday–Friday (5 minutes before the RTH open).
+    cron: "25 9 * * 1-5"
+    timezone: America/New_York
+    prompt: |
+      Pre-open check. Use nt_session_status to confirm the bridge is connected and the
+      account is a simulation account. Report today's profit target and max-loss, and
+      confirm you are flat and not halted. Do not place any orders.
+
+  - name: session-close-review
+    # 16:05 America/New_York, Monday–Friday (just after the RTH close).
+    cron: "5 16 * * 1-5"
+    timezone: America/New_York
+    prompt: |
+      End-of-day review. Use nt_session_status and nt_account_status to report realized
+      P&L, number of trades, and whether the daily goal or max-loss halted the day.
+      Note in one paragraph what setups worked and what to watch tomorrow. If anything
+      is still open, flatten it with nt_flatten.

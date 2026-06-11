@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Env / secrets
+.env
+*.local.yaml
+
+# OS / editor
+.DS_Store
+*.swp
+
+# OMC local tool state (not tracked)
+**/.omc/
+
+# AI planning/brainstorming scratch (superpowers specs/plans) — local only, never pushed
+docs/superpowers/
+
+# Raw episodic trade journal (local runtime state)
+bridge/state/
+
+# Per-trader learned memory — stays local, never pushed (each dev/agent learns its own).
+# Templates ship as *.example.md; copy them to the live names to seed a fresh checkout.
+hermes/learned/trader-profile.md
+hermes/learned/agent-notes.md
+hermes/learned/lessons/*.md

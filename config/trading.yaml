@@ -1,0 +1,81 @@
+# Hermes × NinjaTrader 8 — trading configuration  (SHARED TEMPLATE — committed)
+# Loaded by the bridge (hermes_bridge.config.BridgeConfig). Every field has a safe
+# default; override here. Env vars HERMES_BRIDGE_HOST / _PORT / _AGENT also override.
+#
+# Keep this file NEUTRAL — it is pushed. Put PERSONAL values (your NinjaTrader account,
+# your own daily risk) in `config/trading.local.yaml` (gitignored); the loader
+# deep-merges that file on top of this one at startup.
+
+# Must MATCH the StrategyId set on the NinjaScript strategy and HERMES_STRATEGY_ID.
+strategy_id: hermes-default
+
+instrument:
+  symbol: MNQ           # display only; NinjaTrader sends its own instrument name
+  timeframe: 1m         # the chart timeframe you attach the strategy to
+  tick_size: 0.25       # MNQ Micro E-mini Nasdaq-100
+  tick_value: 0.50      # USD per tick per contract (MNQ = $0.50; point value = $2)
+
+# Deterministic strategy parameters (used by the rules/mock engine and shown to the LLM).
+strategy:
+  ema_fast: 9
+  ema_slow: 21
+  atr_period: 14
+  atr_stop_mult: 1.5    # protective stop = 1.5 * ATR
+  atr_target_mult: 2.0  # target = 2.0 * ATR (~1.33R)
+  pullback_atr: 0.9     # RELAXED (test): wider tag tolerance → more pullbacks qualify (was 0.5)
+  min_confidence: 0.40  # RELAXED (test): admit lower-conviction entries (was 0.55)
+
+# Hard risk limits — enforced server-side by the RiskGate.
+# MNQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. MNQ is a micro ($2/point),
+# so a 1.5*ATR stop risks only ~$30/contract; these are scaled ~10x down from the NQ
+# values. max_risk_per_trade must admit at least a 1-contract trade or entries are rejected.
+risk:
+  max_contracts: 2             # micros are small; allow a couple while validating on Sim
+  max_risk_per_trade: 250.0    # USD per-trade ceiling (effective cap is the lesser of this
+                               # and remaining daily-loss room; see daily_goal.max_daily_loss)
+  max_trades_per_day: 20       # RELAXED (test): allow more entries per session (was 10)
+  default_stop_ticks: 16       # injected only if a decision arrives with no stop ($8 on MNQ)
+
+# Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
+daily_goal:
+  profit_target: 500.0         # halt new entries for the day when reached
+  max_daily_loss: 400.0        # flatten + halt when reached. Your tolerance -> trading.local.yaml
+
+# Optional Regular-Trading-Hours guard (rejects entries outside the window).
+session:
+  enforce_hours: false
+  start: "09:30"
+  end: "16:00"
+  timezone: America/New_York
+
+# Decision brain: mock (rules, no LLM) | hermes (installed Hermes) | claude (Claude CLI).
+agent:
+  client: claude              # Claude Code CLI on your subscription (no metered API)
+  claude:
+    claude_bin: claude        # on PATH; or an absolute path to claude.exe
+    model: sonnet             # sonnet | haiku | opus
+    safe_mode: true           # isolate from your CLAUDE.md/OMC/hooks/MCP; keep subscription auth
+    timeout_s: 90             # was 60; Sonnet can take ~25-65s, so 90s avoids timeouts
+    context_dir: hermes/context
+  hermes:
+    mode: cli                 # kept for reference; unused while client=claude
+    hermes_bin: hermes
+    model: ""
+    context_dir: hermes/context
+    enabled_toolsets: []
+    skip_memory: true
+    quiet_mode: true
+    timeout_s: 60
+
+# HTTP server the NinjaScript strategy connects to.
+server:
+  host: 0.0.0.0                # listen on all interfaces (LAN access from Windows/NT)
+  port: 8787
+
+# Execution safety. allow_live must be explicitly true to trade real money; the
+# NinjaScript strategy ALSO refuses non-Sim accounts unless its AllowLive is true.
+execution:
+  allow_live: false
+  account: Sim101              # your Sim account name -> override in config/trading.local.yaml
+  entry_freshness_s: 0.0       # 0 = auto (one bar interval); drop ENTRIES whose decision
+                               # took >= this many seconds as stale. Exits always execute.
