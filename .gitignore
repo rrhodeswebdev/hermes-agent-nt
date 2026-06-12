@@ -17,3 +17,20 @@ venv/
 
 # OMC local tool state (not tracked)
 **/.omc/
+
+# AI planning/brainstorming scratch (superpowers specs/plans) — local only, never pushed
+docs/superpowers/
+
+# Session continuity / handoff notes — local only
+CONTINUITY.md
+
+# Raw episodic trade journal (local runtime state)
+bridge/state/
+
+# Per-trader learned memory — stays local, never pushed (each dev/agent learns its own).
+# Templates ship as *.example.md; copy them to the live names to seed a fresh checkout.
+hermes/learned/trader-profile.md
+hermes/learned/trader-profile.proposed.md
+hermes/learned/agent-notes.md
+hermes/learned/lessons/*.md
+hermes/learned/.history/

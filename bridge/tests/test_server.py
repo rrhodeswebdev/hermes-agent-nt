@@ -89,6 +89,67 @@ def test_dashboard_endpoints(cfg):
     assert html.status_code == 200 and "Hermes" in html.text
 
 
+def test_panel_txt(cfg):
+    c = _client(cfg)
+    bars = synthetic_bars(60)
+    c.post("/ingest/history", json={"instrument": "ES", "timeframe": "5m",
+                                    "bars": [b.model_dump() for b in bars]})
+    c.post("/ingest/bar", json={"instrument": "ES", "timeframe": "5m",
+                                "bar": bars[-1].model_dump()})
+    r = c.get("/panel.txt")
+    assert r.status_code == 200
+    lines = r.text.splitlines()
+    kv = dict(line.split("=", 1) for line in lines
+              if "=" in line and not line.startswith("row="))
+    assert kv["ok"] == "1"
+    assert kv["instrument"] == "ES" and kv["timeframe"] == "5m"
+    assert kv["goal_target"] == "500" and kv["goal_loss"] == "400"
+    assert "model" in kv and "ld_action" in kv and "ld_rationale" in kv
+    # Recent decisions come through as pipe-separated row= lines.
+    rows = [line for line in lines if line.startswith("row=")]
+    assert rows and len(rows[0].split("=", 1)[1].split("|")) == 5
+    # No plan in the payload yet -> no plan_* keys (they appear after the armed-plan merge).
+    assert not any(k.startswith("plan_") for k in kv)
+
+
+def test_ingest_bar_requests_history_when_store_thin(cfg):
+    c = _client(cfg)
+    bars = synthetic_bars(60)
+    # No history pushed yet: a lone live bar must come back flagged.
+    r = c.post("/ingest/bar", json={"instrument": "ES", "timeframe": "5m",
+                                    "bar": bars[-1].model_dump()})
+    assert r.json()["need_history"] is True
+    # Once history lands (60 >= HISTORY_MIN_BARS) the flag clears.
+    c.post("/ingest/history", json={"instrument": "ES", "timeframe": "5m",
+                                    "bars": [b.model_dump() for b in bars]})
+    r2 = c.post("/ingest/bar", json={"instrument": "ES", "timeframe": "5m",
+                                     "bar": bars[-1].model_dump()})
+    assert r2.json()["need_history"] is False
+
+
+def test_render_panel_price_precision():
+    # :g would truncate to 6 significant digits ("21512.8") — a tick+ off at MNQ levels.
+    from hermes_bridge.dashboard import render_panel
+
+    d = {
+        "instrument": "MNQ", "timeframe": "2m", "agent": "claude", "model": "sonnet",
+        "strategy_id": "s", "data_age_seconds": 3.0,
+        "last_bar": {"ts": 1.0, "close": 21512.75},
+        "session": {"position": -1, "avg_price": 21510.25, "realized_pnl": 0.0,
+                    "unrealized_pnl": 0.0, "trades_today": 1, "halted": False,
+                    "halt_reason": "", "daily_goal_hit": False},
+        "goal": {"profit_target": 500.0, "max_daily_loss": 400.0},
+        "last_decision": {"ts": 1.0, "close": 21512.75, "action": "WAIT",
+                          "confidence": 0.5, "rationale": "x", "queued": None},
+        "recent_decisions": [{"ts": 1.0, "close": 21512.75, "action": "WAIT",
+                              "confidence": 0.5, "queued": None}],
+    }
+    txt = render_panel(d)
+    assert "last_close=21512.75" in txt
+    assert "avg_price=21510.25" in txt
+    assert "|21512.75|" in txt
+
+
 def test_fill_updates_account_and_flatten_kill_switch(cfg):
     c = _client(cfg)
     # Apply an entry fill, then a closing fill in profit.

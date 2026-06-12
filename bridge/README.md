@@ -36,8 +36,16 @@ The bridge is the "rules + safety" half of a **hybrid** engine:
 - `HermesAgentClient` — delegates judgment to the installed Hermes runtime
   (`AIAgent.run_conversation`) using the trading-knowledge **context files**, and
   parses a JSON `Decision` back. Any failure degrades to `WAIT`.
+- `ClaudeAgentClient` — delegates judgment to Claude Code in headless print mode
+  (`claude -p --safe-mode`) on your subscription (no metered API), isolated from your
+  global CLAUDE.md/hooks/MCP. Uses the same context files and `--json-schema` for a
+  validated `Decision`; any failure degrades to `WAIT`.
+- **Self-improvement** (`reflect.py`) — after each closed trade a background, tool-less
+  Claude call proposes lesson/notes/profile updates (schema-validated); the bridge applies
+  them to `hermes/learned/`. `agent.prefilter: mock` screens entries with the deterministic
+  rules so Claude is only spent on candidate setups. `POST /control/curate` consolidates lessons.
 
-Select with `agent.client: mock | hermes` in `config/trading.yaml`.
+Select with `agent.client: mock | hermes | claude` in `config/trading.yaml`.
 
 ## Safety model
 

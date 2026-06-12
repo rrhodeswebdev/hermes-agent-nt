@@ -151,6 +151,40 @@ _CONTEXT_ORDER = [
 ]
 
 
+def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
+    """Concatenate the *.md context files in priority order into one string."""
+    order = order or _CONTEXT_ORDER
+    d = Path(context_dir)
+    if not d.is_dir():
+        return ""
+    parts: list[str] = []
+    for name in order:
+        f = d / name
+        if f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    for f in sorted(d.glob("*.md")):
+        if f.name not in order and f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n\n---\n\n".join(parts)
+
+
+def build_user_prompt(req: AgentRequest) -> str:
+    """Frame the current market state as the agent's user message."""
+    bars = [
+        {"ts": b.ts, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
+        for b in req.recent_bars[-30:]
+    ]
+    payload = {
+        "mode": req.mode,
+        "instrument": req.account.instrument,
+        "timeframe": req.account.timeframe,
+        "context": req.context.to_dict(),
+        "account": req.account.model_dump(),
+        "recent_bars": bars,
+    }
+    return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
+
+
 class HermesAgentClient(AgentClient):
     """Adapter over the installed Hermes runtime (Nous Research hermes-agent).
 
@@ -184,34 +218,10 @@ class HermesAgentClient(AgentClient):
         return self._system
 
     def _load_context_files(self) -> str:
-        d = Path(self.cfg.agent.hermes.context_dir)
-        if not d.is_dir():
-            return ""
-        parts: list[str] = []
-        for name in _CONTEXT_ORDER:
-            f = d / name
-            if f.is_file():
-                parts.append(f.read_text())
-        # Include any other *.md not in the explicit order.
-        for f in sorted(d.glob("*.md")):
-            if f.name not in _CONTEXT_ORDER and f.is_file():
-                parts.append(f.read_text())
-        return "\n\n---\n\n".join(parts)
+        return load_context_files(self.cfg.agent.hermes.context_dir)
 
     def _user_prompt(self, req: AgentRequest) -> str:
-        bars = [
-            {"ts": b.ts, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
-            for b in req.recent_bars[-30:]
-        ]
-        payload = {
-            "mode": req.mode,
-            "instrument": req.account.instrument,
-            "timeframe": req.account.timeframe,
-            "context": req.context.to_dict(),
-            "account": req.account.model_dump(),
-            "recent_bars": bars,
-        }
-        return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
+        return build_user_prompt(req)
 
     # ---- runtime call -------------------------------------------------------
     def _ask(self, system: str, user: str) -> str:
@@ -241,8 +251,8 @@ class HermesAgentClient(AgentClient):
         return self._agent
 
     def _ask_cli(self, system: str, user: str) -> str:
-        # Hermes oneshot: `hermes -z "<prompt>"`. Reuses Hermes' provider/auth resolution
-        # (e.g. OpenAI Codex OAuth), unlike a bare in-process AIAgent() construction.
+        # Hermes oneshot: `hermes -z "<prompt>"`. Reuses Hermes' own provider/auth
+        # resolution (its OAuth logins), unlike a bare in-process AIAgent() construction.
         h = self.cfg.agent.hermes
         out = subprocess.run(
             [h.hermes_bin, "-z", f"{system}\n\n{user}"],
@@ -281,4 +291,7 @@ def _extract_json(text: str) -> str | None:
 def build_agent_client(config: BridgeConfig) -> AgentClient:
     if config.agent.client == "hermes":
         return HermesAgentClient(config)
+    if config.agent.client == "claude":
+        from .claude_agent import ClaudeAgentClient  # lazy: avoid circular import
+        return ClaudeAgentClient(config)
     return MockAgentClient(config)

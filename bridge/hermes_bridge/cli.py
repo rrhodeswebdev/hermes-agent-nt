@@ -43,6 +43,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     from .server import create_app
 
+    # Console safety: agent rationales contain Unicode (—, ≈, →). Default Windows stdout
+    # is cp1252 and raises UnicodeEncodeError on print(), 500-ing /ingest/bar. Force UTF-8.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
     cfg = load_config(args.config)
     if args.host:
         cfg.server.host = args.host
@@ -90,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         help="CSV columns: ts,open,high,low,close,volume[,bid_volume,ask_volume]",
     )
     p_replay.add_argument("--config", default=default_cfg)
-    p_replay.add_argument("--agent", default=None, choices=["mock", "hermes"])
+    p_replay.add_argument("--agent", default=None, choices=["mock", "hermes", "claude"])
     p_replay.add_argument("--warmup", type=int, default=50)
     p_replay.add_argument("--verbose", "-v", action="store_true")
     p_replay.set_defaults(func=_cmd_replay)
