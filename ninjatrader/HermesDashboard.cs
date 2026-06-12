@@ -1,24 +1,75 @@
 #region Using declarations
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Globalization;
 using System.Net.Http;
 using System.Threading;
+using System.Windows.Input;
 using System.Windows.Media;
+using NinjaTrader.Gui.Chart;
 using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.DrawingTools;
+using D2D = SharpDX.Direct2D1;
+using DW = SharpDX.DirectWrite;
+using DXRect = SharpDX.RectangleF;   // SharpDX 2.6.3 (NT8-shipped): ctor is (x, y, WIDTH, HEIGHT)
+using DXVec = SharpDX.Vector2;
 #endregion
 
 // =============================================================================
 //  HermesDashboard (Indicator)
 // -----------------------------------------------------------------------------
-//  Shows what the Hermes agent is doing, as a fixed text panel on the chart. It
-//  polls the bridge's pre-formatted panel (GET /dashboard.txt) on a timer and draws
-//  it — so there is NO JSON parsing on the NinjaScript side.
+//  A dark card-style HUD for the Hermes agent (status pill, P&L stat boxes,
+//  daily-goal progress, armed-plan section, last decision, recent-decision
+//  table) plus the agent's support/resistance (swing) lines.
 //
-//  Drop it on ANY chart or a dedicated chart window (it doesn't have to be the
-//  trading chart). It only needs network access to the bridge.
+//  DATA: polls the bridge's /panel.txt (structured key=value lines — no JSON
+//  parsing in NinjaScript, same philosophy as /levels.txt). plan_* keys render
+//  the ARMED PLAN section and appear once the analysis/execution-split bridge
+//  is merged; until then the section shows "none armed".
 //
-//  Compile inside NinjaTrader (NinjaScript Editor → New Indicator → paste → F5).
+//  THREADING / LOCKUP SAFETY (see E:\Coding\NinjaTrader\AGENTS.md):
+//   * The background timer ONLY fetches + parses + caches an immutable snapshot
+//     (overlap-gated via Interlocked). It makes NO ChartControl / Dispatcher /
+//     Draw calls (gotcha #17 — dispatcher saturation locks the chart). NEVER add
+//     a synchronous Dispatcher.Invoke anywhere reachable from a data thread —
+//     that deadlocks against F5 reload / dialogs (dump-verified 2026-06-10).
+//   * The card is drawn in OnRender with SharpDX only — no Draw.* there (gotcha
+//     #13). The DirectWrite display list is rebuilt at most ~1×/s (or when a new
+//     snapshot arrives); every other render pass just replays cached layouts.
+//   * SharpDX brushes are device resources, handled per AGENTS.md §5b: EAGERLY
+//     (re)created in OnRenderTargetChanged with a same-target skip
+//     (ReferenceEquals + _dxInitialized), plus a self-heal re-init in OnRender if
+//     NT8 swapped the target without firing the callback. Never created lazily
+//     per draw — stale brushes on a disposed RT fault the UI thread (the
+//     "chart-then-NT8" lockup).
+//   * Every lifecycle override swallows its own exceptions with a bounded error
+//     print (§5d — unhandled lifecycle exceptions count toward MaxRestarts).
+//   * A volatile _terminated flag (set FIRST in State.Terminated) stops OnRender
+//     from touching DX resources while Terminated disposes them.
+//   * S/R lines still use Draw.HorizontalLine from OnBarUpdate, wall-clock
+//     throttled (~5 Hz) so Calculate.OnEachTick cannot flood WPF.
+//   * SharpDX here is 2.6.3 (NT8-shipped): no Mathematics.Interop Raw* types;
+//     RectangleF takes width/height (NOT right/bottom) — see Ltrb().
+//   * DRAG: the card is click-draggable. Preview mouse events are hooked ONCE on
+//     the ChartControl via an ASYNC dispatcher hop (a sync Invoke here can ABBA-
+//     deadlock with F5 reload's Clone — dump-verified 2026-06-10). Handlers run
+//     on the UI thread: they check _terminated first, are fully try/caught
+//     (gotcha #21), mutate only plain float fields, and repaint via
+//     InvalidateVisual throttled to ~30 Hz. The drag offset is applied as a D2D
+//     transform at replay time, so dragging never rebuilds the display list.
+//     Double-click snaps the card back to its default corner. The offset
+//     persists with the workspace via serialized CardOffsetX/Y properties.
+//
+//  KNOWN LIMIT: the LIVE pill's age only advances when the chart repaints (we
+//  deliberately never poke the dispatcher from the timer). If the data feed dies
+//  completely, the card freezes until the next repaint, which then shows STALE.
+//
+//  Put it on the MNQ trading chart (same timeframe as the bridge) so the S/R
+//  lines sit at the right prices. Drag the card anywhere with the mouse
+//  (double-click it to reset); the ▾/▸ glyph in its header folds it down to a
+//  compact header + position/P&L strip. Compile inside NinjaTrader (F5).
 // =============================================================================
 
 namespace NinjaTrader.NinjaScript.Indicators
@@ -27,7 +78,50 @@ namespace NinjaTrader.NinjaScript.Indicators
     {
         private static readonly HttpClient Http = new HttpClient();
         private Timer _timer;
-        private volatile string _panelText = "HERMES — connecting…";
+        private int _pollBusy;   // Interlocked gate: timer ticks must not overlap
+
+        // Snapshot published by the timer thread, consumed by OnRender. Immutable
+        // after construction; volatile swap gives safe publication.
+        private volatile Snapshot _snap;
+        private volatile string _levelsText = "";   // raw /levels.txt, parsed on the chart thread
+        private volatile string _error;             // last poll failure (null when healthy)
+
+        private DateTime _lastDrawUtc = DateTime.MinValue;  // throttle for Draw.* (S/R lines)
+
+        // ---- card dragging (handlers run on the UI thread; OnRender only reads
+        //      the float offsets — 32-bit reads/writes are atomic) ---------------
+        private ChartControl _mouseChart;     // chart whose Preview events we hooked
+        private bool _mouseHooked;
+        private volatile bool _hookQueued;    // an InvokeAsync hookup is in flight
+        private bool _dragging;
+        private float _dragGrabX, _dragGrabY; // mouse-to-card-origin grab offset
+        private DateTime _lastDragRefreshUtc = DateTime.MinValue;
+        private int _mouseErrorCount;
+        private float _offX, _offY;           // clamped offset actually applied at replay
+        private float _foldX1, _foldY1, _foldX2, _foldY2;   // fold-toggle hit box (built coords)
+        private volatile bool _rebuildAsap;   // UI thread requests a display-list rebuild
+
+        // ---- display list (built/replayed only on the render thread) ------------
+        private readonly List<DrawOp> _ops = new List<DrawOp>();
+        private readonly Dictionary<uint, D2D.SolidColorBrush> _brushes =
+            new Dictionary<uint, D2D.SolidColorBrush>();
+        private Snapshot _builtFrom;
+        private string _builtError;
+        private DateTime _lastBuildUtc = DateTime.MinValue;
+        private float _cardX, _cardY, _cardW, _cardH;
+        private bool _hasCard;
+        private float _s = 1f;                      // FontSize/12 scale factor
+
+        // Device-resource lifecycle (AGENTS.md §5b) + teardown guard (§5d).
+        private volatile bool _terminated;          // set FIRST in Terminated; OnRender bails on it
+        private D2D.RenderTarget _lastSeenRT;       // target the brush palette was created against
+        private bool _dxInitialized;                // palette valid for _lastSeenRT
+        private int _renderErrorCount;              // bounded error prints
+        private int _barErrorCount;
+        private int _stateErrorCount;
+
+        private DW.TextFormat _fLabel, _fSub, _fBody, _fBodyB, _fHead, _fBig, _fRat;
+        private DW.EllipsisTrimming _ratEllipsis;
 
         [NinjaScriptProperty]
         public string BridgeHost { get; set; } = "127.0.0.1";
@@ -41,16 +135,78 @@ namespace NinjaTrader.NinjaScript.Indicators
         [NinjaScriptProperty]
         public int FontSize { get; set; } = 12;
 
+        [NinjaScriptProperty]
+        public int RecentRows { get; set; } = 5;    // decision-table rows (1..8)
+
+        [NinjaScriptProperty]
+        public bool ShowLevels { get; set; } = true;   // plot the agent's S/R (swing) lines
+
+        // Dragged card position (px offset from the default top-left anchor). Not
+        // browsable — set by dragging; serialized so it persists with the workspace.
+        [Browsable(false)]
+        public float CardOffsetX { get; set; }
+
+        [Browsable(false)]
+        public float CardOffsetY { get; set; }
+
+        // Folded = header + position/P&L strip only. Toggled by the ▾/▸ glyph in
+        // the card header; serialized so it persists with the workspace.
+        [Browsable(false)]
+        public bool CardFolded { get; set; }
+
         private string BaseUrl => string.Format("http://{0}:{1}", BridgeHost, BridgePort);
 
+        // ---- palette (AARRGGBB) --------------------------------------------------
+        private const uint ColCardBg   = 0xF0131720;
+        private const uint ColCardEdge = 0xFF2A3140;
+        private const uint ColDivider  = 0xFF222836;
+        private const uint ColBoxBg    = 0xFF191E29;
+        private const uint ColBoxEdge  = 0xFF2A3140;
+        private const uint ColTrack    = 0xFF262C3A;
+        private const uint ColText     = 0xFFE6E9EF;
+        private const uint ColMuted    = 0xFF9AA3B2;
+        private const uint ColDim      = 0xFF6B7280;
+        private const uint ColGreen    = 0xFF4ADE80;
+        private const uint ColRed      = 0xFFF87171;
+        private const uint ColAmber    = 0xFFFBBF24;
+        private const uint ColBlue     = 0xFF60A5FA;
+        private const uint ColGreenBg  = 0xFF143A22;
+        private const uint ColRedBg    = 0xFF3A1717;
+        private const uint ColAmberBg  = 0xFF3A2D12;
+        private const uint ColBlueBg   = 0xFF142B44;
+
+        // The complete brush palette, created EAGERLY against the current RenderTarget
+        // (§5b). ReplayOps only ever looks brushes up — it never creates them.
+        private static readonly uint[] Palette =
+        {
+            ColCardBg, ColCardEdge, ColDivider, ColBoxBg, ColBoxEdge, ColTrack,
+            ColText, ColMuted, ColDim, ColGreen, ColRed, ColAmber, ColBlue,
+            ColGreenBg, ColRedBg, ColAmberBg, ColBlueBg,
+        };
+
         protected override void OnStateChange()
+        {
+            // §5d: a lifecycle exception counts toward MaxRestarts — never let one out.
+            try { OnStateChangeInner(); }
+            catch (Exception ex)
+            {
+                if (_stateErrorCount < 5)
+                {
+                    _stateErrorCount++;
+                    Print("[HermesDashboard] OnStateChange error #" + _stateErrorCount
+                        + " (State=" + State + "): " + ex.Message);
+                }
+            }
+        }
+
+        private void OnStateChangeInner()
         {
             if (State == State.SetDefaults)
             {
                 Name = "HermesDashboard";
-                Description = "Live panel of the Hermes agent's decisions / position / P&L.";
+                Description = "Hermes agent card (status / P&L / plan / decisions) + its S/R levels.";
                 IsOverlay = true;                 // draw on the price panel
-                Calculate = Calculate.OnEachTick; // repaint as ticks arrive
+                Calculate = Calculate.OnEachTick; // tick-driven, but drawing is wall-clock throttled
                 DisplayInDataBox = false;
                 PaintPriceMarkers = false;
                 IsSuspendedWhileInactive = false;
@@ -60,46 +216,1036 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (_timer == null)
                     _timer = new Timer(Poll, null, 0, Math.Max(1, RefreshSeconds) * 1000);
             }
+            else if (State == State.Historical)
+            {
+                // Earliest chance — but ChartControl can STILL be null here (notably on
+                // the F5 clone-reload path), so OnRender retries until hooked.
+                HookMouse(ChartControl);
+            }
             else if (State == State.Terminated)
             {
-                if (_timer != null) { _timer.Dispose(); _timer = null; }
+                _terminated = true;   // FIRST: stop OnRender touching DX before we dispose it
+                if (_timer != null) { try { _timer.Dispose(); } catch { } _timer = null; }
+                UnhookMouse();        // async if off the UI thread — never a sync Invoke here
+                // Synchronous cleanup so enable/disable cycles don't leak. Each step
+                // guarded — Terminated must never throw (counts toward MaxRestarts).
+                try
+                {
+                    RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel");
+                    RemoveDrawObject("HermesSupport");    RemoveDrawObject("HermesSupLabel");
+                }
+                catch { }
+                try { DisposeOps(); } catch { }
+                try { DisposeBrushes(); } catch { }
+                try { DisposeFormats(); } catch { }
             }
         }
 
-        // Background poll — fetch the pre-formatted panel and cache it. Drawing happens
-        // on the chart thread in OnBarUpdate; here we only update the cached text and
-        // request a repaint so the panel stays current even in a quiet market.
+        // =====================================================================
+        //  Background poll — ONLY fetch + parse + cache. No chart / UI / dispatcher
+        //  calls here (AGENTS.md #17). Rendering reads the cached snapshot.
+        // =====================================================================
         private async void Poll(object state)
         {
+            if (Interlocked.Exchange(ref _pollBusy, 1) == 1)
+                return;   // previous tick still in flight (slow bridge) — skip, don't stack
             try
             {
                 using (var cts = new CancellationTokenSource(Math.Max(2, RefreshSeconds) * 1000))
-                using (var resp = await Http.GetAsync(BaseUrl + "/dashboard.txt", cts.Token))
+                using (var resp = await Http.GetAsync(BaseUrl + "/panel.txt", cts.Token))
                 {
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        // A 404 here means the bridge predates /panel.txt — restart it.
+                        _error = "HTTP " + (int)resp.StatusCode + " /panel.txt (old bridge? restart it)";
+                        return;
+                    }
                     string text = await resp.Content.ReadAsStringAsync();
                     if (!string.IsNullOrWhiteSpace(text))
-                        _panelText = text;
+                        _snap = ParsePanel(text);
                 }
-                if (ChartControl != null)
-                    ChartControl.Dispatcher.InvokeAsync(() => ForceRefresh());
+                using (var cts2 = new CancellationTokenSource(Math.Max(2, RefreshSeconds) * 1000))
+                using (var resp2 = await Http.GetAsync(BaseUrl + "/levels.txt", cts2.Token))
+                {
+                    if (resp2.IsSuccessStatusCode)
+                        _levelsText = await resp2.Content.ReadAsStringAsync() ?? "";
+                }
+                _error = null;
             }
             catch (Exception ex)
             {
-                _panelText = "HERMES — bridge unreachable\n" + ex.Message;
+                _error = ex.Message;   // keep the last good snapshot; the pill shows OFFLINE
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _pollBusy, 0);
             }
         }
 
+        // =====================================================================
+        //  Snapshot model + parser (runs on the timer thread)
+        // =====================================================================
+        private sealed class Snapshot
+        {
+            public bool Ok;
+            public string Instrument = "", Timeframe = "", Agent = "", Model = "", StrategyId = "";
+            public double AgeS = double.NaN, LastClose = double.NaN;
+            public int Position, Trades;
+            public double AvgPrice = double.NaN, Realized, Unrealized;
+            public bool Halted, GoalHit;
+            public string HaltReason = "";
+            public double GoalTarget = double.NaN, GoalLoss = double.NaN;
+            public string LdTime = "", LdAction = "", LdOrder = "", LdRationale = "";
+            public double LdConf = double.NaN, LdClose = double.NaN;
+            public List<string[]> Rows = new List<string[]>();  // time|action|conf|close|order
+            public bool HasPlan;
+            public string PlanStatus = "", PlanDirection = "", PlanNote = "", PlanBarsLeft = "";
+            public double PlanHigh = double.NaN, PlanLow = double.NaN;
+            public DateTime PolledUtc;     // for client-side age extrapolation between polls
+            public DateTime PolledLocal;   // footer "updated HH:mm:ss"
+        }
+
+        private static Snapshot ParsePanel(string text)
+        {
+            var p = new Snapshot { PolledUtc = DateTime.UtcNow, PolledLocal = DateTime.Now };
+            foreach (var raw in text.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                string k = line.Substring(0, eq), v = line.Substring(eq + 1);
+                switch (k)
+                {
+                    case "ok":           p.Ok = v == "1"; break;
+                    case "instrument":   p.Instrument = v; break;
+                    case "timeframe":    p.Timeframe = v; break;
+                    case "agent":        p.Agent = v; break;
+                    case "model":        p.Model = v; break;
+                    case "strategy_id":  p.StrategyId = v; break;
+                    case "age_s":        p.AgeS = Num(v); break;
+                    case "last_close":   p.LastClose = Num(v); break;
+                    case "position":     p.Position = (int)NumOr(v, 0); break;
+                    case "avg_price":    p.AvgPrice = Num(v); break;
+                    case "realized":     p.Realized = NumOr(v, 0); break;
+                    case "unrealized":   p.Unrealized = NumOr(v, 0); break;
+                    case "trades":       p.Trades = (int)NumOr(v, 0); break;
+                    case "halted":       p.Halted = v == "1"; break;
+                    case "halt_reason":  p.HaltReason = v; break;
+                    case "goal_hit":     p.GoalHit = v == "1"; break;
+                    case "goal_target":  p.GoalTarget = Num(v); break;
+                    case "goal_loss":    p.GoalLoss = Num(v); break;
+                    case "ld_time":      p.LdTime = v; break;
+                    case "ld_action":    p.LdAction = v; break;
+                    case "ld_conf":      p.LdConf = Num(v); break;
+                    case "ld_close":     p.LdClose = Num(v); break;
+                    case "ld_order":     p.LdOrder = v; break;
+                    case "ld_rationale": p.LdRationale = v; break;
+                    case "row":
+                        var parts = v.Split('|');
+                        if (parts.Length >= 5) p.Rows.Add(parts);
+                        break;
+                    case "plan_status":     p.HasPlan = true; p.PlanStatus = v; break;
+                    case "plan_direction":  p.HasPlan = true; p.PlanDirection = v; break;
+                    case "plan_entry_high": p.HasPlan = true; p.PlanHigh = Num(v); break;
+                    case "plan_entry_low":  p.HasPlan = true; p.PlanLow = Num(v); break;
+                    case "plan_bars_left":  p.HasPlan = true; p.PlanBarsLeft = v; break;
+                    case "plan_note":       p.HasPlan = true; p.PlanNote = v; break;
+                }
+            }
+            return p;
+        }
+
+        private static double Num(string v)
+        {
+            double d;
+            if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d))
+                return d;
+            return double.NaN;
+        }
+
+        private static double NumOr(string v, double fallback)
+        {
+            double d = Num(v);
+            return double.IsNaN(d) ? fallback : d;
+        }
+
+        // =====================================================================
+        //  S/R level lines — unchanged mechanism: Draw.* ONLY from the throttled
+        //  OnBarUpdate (never from OnRender / the timer thread).
+        // =====================================================================
         protected override void OnBarUpdate()
         {
-            // Color the panel by position direction if we can cheaply detect it.
-            Brush text = Brushes.White;
-            if (_panelText.Contains("pos: LONG")) text = Brushes.LimeGreen;
-            else if (_panelText.Contains("pos: SHORT")) text = Brushes.OrangeRed;
-            if (_panelText.Contains("HALTED")) text = Brushes.Gold;
+            if ((DateTime.UtcNow - _lastDrawUtc).TotalMilliseconds < 200)
+                return;
+            _lastDrawUtc = DateTime.UtcNow;
+            try { DrawAgentLevels(); }
+            catch (Exception ex)
+            {
+                // §5d: bounded — an unhandled OnBarUpdate exception counts toward MaxRestarts.
+                if (_barErrorCount < 5)
+                {
+                    _barErrorCount++;
+                    Print("[HermesDashboard] OnBarUpdate error #" + _barErrorCount + ": " + ex.Message);
+                }
+            }
+        }
 
-            Draw.TextFixed(this, "HermesPanel", _panelText, TextPosition.TopLeft,
-                text, new SimpleFont("Courier New", FontSize), Brushes.Transparent,
-                Brushes.Black, 55);
+        private void DrawAgentLevels()
+        {
+            if (!ShowLevels)
+            {
+                RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel");
+                RemoveDrawObject("HermesSupport");    RemoveDrawObject("HermesSupLabel");
+                return;
+            }
+            string lv = _levelsText;
+            double r = GetLevel(lv, "swing_high");
+            double s = GetLevel(lv, "swing_low");
+            if (!double.IsNaN(r))
+            {
+                Draw.HorizontalLine(this, "HermesResistance", r, Brushes.Red);
+                Draw.Text(this, "HermesResLabel", "R (agent)", 0, r, Brushes.Red);
+            }
+            else { RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel"); }
+            if (!double.IsNaN(s))
+            {
+                Draw.HorizontalLine(this, "HermesSupport", s, Brushes.LimeGreen);
+                Draw.Text(this, "HermesSupLabel", "S (agent)", 0, s, Brushes.LimeGreen);
+            }
+            else { RemoveDrawObject("HermesSupport"); RemoveDrawObject("HermesSupLabel"); }
+        }
+
+        private double GetLevel(string text, string key)
+        {
+            if (string.IsNullOrEmpty(text)) return double.NaN;
+            foreach (var raw in text.Split('\n'))
+            {
+                string line = raw.Trim();
+                int eq = line.IndexOf('=');
+                if (eq > 0 && line.Substring(0, eq) == key)
+                {
+                    double v;
+                    if (double.TryParse(line.Substring(eq + 1), NumberStyles.Float,
+                        CultureInfo.InvariantCulture, out v))
+                        return v;
+                }
+            }
+            return double.NaN;
+        }
+
+        // =====================================================================
+        //  Card dragging — Preview mouse events on the ChartControl. Hook/unhook
+        //  hop to the UI thread ASYNC (a sync Invoke from a lifecycle path can
+        //  ABBA-deadlock with F5 reload's Clone — dump-verified 2026-06-10).
+        //  Handlers run on the UI thread: guard _terminated, try/catch all
+        //  bodies (#21), touch only plain fields, never Draw.* (#22).
+        // =====================================================================
+        private void HookMouse(ChartControl cc)
+        {
+            try
+            {
+                if (cc == null || _mouseHooked || _hookQueued || _terminated) return;
+                _hookQueued = true;   // one InvokeAsync in flight at most
+                cc.Dispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        if (_terminated || _mouseHooked) return;
+                        cc.PreviewMouseLeftButtonDown += OnChartMouseDown;
+                        cc.PreviewMouseMove += OnChartMouseMove;
+                        cc.PreviewMouseLeftButtonUp += OnChartMouseUp;
+                        _mouseChart = cc;
+                        _mouseHooked = true;
+                        Print("[HermesDashboard] card drag enabled (mouse hook installed)");
+                    }
+                    catch (Exception ex) { _hookQueued = false; MouseError(ex); }   // retry next frame
+                });
+            }
+            catch (Exception ex) { _hookQueued = false; MouseError(ex); }
+        }
+
+        private void UnhookMouse()
+        {
+            try
+            {
+                var cc = _mouseChart;
+                if (cc == null) return;
+                if (cc.Dispatcher.CheckAccess()) UnhookMouse(cc);
+                else cc.Dispatcher.InvokeAsync(() => UnhookMouse(cc));
+            }
+            catch { }   // Terminated path — must never throw
+        }
+
+        private void UnhookMouse(ChartControl cc)
+        {
+            try
+            {
+                cc.PreviewMouseLeftButtonDown -= OnChartMouseDown;
+                cc.PreviewMouseMove -= OnChartMouseMove;
+                cc.PreviewMouseLeftButtonUp -= OnChartMouseUp;
+            }
+            catch { }
+            _mouseHooked = false;
+            _mouseChart = null;
+        }
+
+        private void OnChartMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            try
+            {
+                if (_terminated || !_hasCard) return;
+                var cc = _mouseChart;
+                if (cc == null) return;
+                float mx = MouseX(cc, e), my = MouseY(cc, e);
+                if (!HitCard(mx, my)) return;
+                if (HitFold(mx, my))
+                {
+                    if (e.ClickCount == 1)   // swallow the 2nd click of a fast double
+                    {
+                        CardFolded = !CardFolded;
+                        _rebuildAsap = true;
+                        cc.InvalidateVisual();
+                    }
+                    _dragging = false;
+                    e.Handled = true;
+                    return;
+                }
+                if (e.ClickCount == 2)   // double-click: snap back to the default corner
+                {
+                    CardOffsetX = 0f; CardOffsetY = 0f;
+                    _dragging = false;
+                    e.Handled = true;
+                    cc.InvalidateVisual();
+                    return;
+                }
+                _dragging = true;
+                _dragGrabX = mx - _offX;
+                _dragGrabY = my - _offY;
+                e.Handled = true;   // keep the chart from panning/crosshairing inside the card
+            }
+            catch (Exception ex) { MouseError(ex); }
+        }
+
+        private void OnChartMouseMove(object sender, MouseEventArgs e)
+        {
+            try
+            {
+                if (_terminated || !_dragging) return;
+                if (e.LeftButton != MouseButtonState.Pressed)
+                {
+                    _dragging = false;   // the Up happened off-chart — self-heal
+                    return;
+                }
+                var cc = _mouseChart;
+                if (cc == null) return;
+                CardOffsetX = MouseX(cc, e) - _dragGrabX;
+                CardOffsetY = MouseY(cc, e) - _dragGrabY;
+                e.Handled = true;
+                if ((DateTime.UtcNow - _lastDragRefreshUtc).TotalMilliseconds >= 33)
+                {
+                    _lastDragRefreshUtc = DateTime.UtcNow;
+                    cc.InvalidateVisual();   // UI thread — schedules the next OnRender
+                }
+            }
+            catch (Exception ex) { MouseError(ex); }
+        }
+
+        private void OnChartMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            try
+            {
+                if (!_dragging) return;
+                _dragging = false;
+                e.Handled = true;
+                var cc = _mouseChart;
+                if (cc != null) cc.InvalidateVisual();   // final paint past the 33 ms gate
+            }
+            catch (Exception ex) { MouseError(ex); }
+        }
+
+        // WPF mouse coords are DIPs; ChartPanel/SharpDX are device px — convert
+        // via NT8's extensions so hit-testing works at any DPI scaling.
+        private static float MouseX(ChartControl cc, MouseEventArgs e)
+        {
+            return (float)e.GetPosition(cc).X.ConvertToHorizontalPixels(cc.PresentationSource);
+        }
+
+        private static float MouseY(ChartControl cc, MouseEventArgs e)
+        {
+            return (float)e.GetPosition(cc).Y.ConvertToVerticalPixels(cc.PresentationSource);
+        }
+
+        private bool HitCard(float x, float y)
+        {
+            return _hasCard
+                && x >= _cardX + _offX && x <= _cardX + _offX + _cardW
+                && y >= _cardY + _offY && y <= _cardY + _offY + _cardH;
+        }
+
+        private bool HitFold(float x, float y)
+        {
+            return _foldX2 > _foldX1
+                && x >= _foldX1 + _offX && x <= _foldX2 + _offX
+                && y >= _foldY1 + _offY && y <= _foldY2 + _offY;
+        }
+
+        // Clamp the dragged offset so the card can't leave the panel (render thread).
+        private void ApplyCardOffset()
+        {
+            if (!_hasCard || ChartPanel == null)
+            {
+                _offX = CardOffsetX; _offY = CardOffsetY;
+                return;
+            }
+            float x = _cardX + CardOffsetX, y = _cardY + CardOffsetY;
+            x = Math.Max(ChartPanel.X, Math.Min(x, ChartPanel.X + ChartPanel.W - _cardW));
+            y = Math.Max(ChartPanel.Y, Math.Min(y, ChartPanel.Y + ChartPanel.H - _cardH));
+            _offX = x - _cardX;
+            _offY = y - _cardY;
+        }
+
+        private void MouseError(Exception ex)
+        {
+            if (_mouseErrorCount < 5)
+            {
+                _mouseErrorCount++;
+                Print("[HermesDashboard] mouse error #" + _mouseErrorCount + ": " + ex.Message);
+            }
+        }
+
+        // =====================================================================
+        //  Card rendering (SharpDX only — no Draw.* in OnRender, AGENTS.md #13)
+        // =====================================================================
+        protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+        {
+            try { base.OnRender(chartControl, chartScale); } catch { }
+            if (!_mouseHooked) HookMouse(chartControl);   // retry until installed (cheap: flag-guarded)
+            if (_terminated || RenderTarget == null || ChartPanel == null) return;
+
+            try
+            {
+                // §5b self-heal: if NT8 swapped the target without firing
+                // OnRenderTargetChanged, drawing with the old brushes faults the UI
+                // thread (the "chart-then-NT8" lockup). Re-init against the live RT.
+                if (!_dxInitialized || !object.ReferenceEquals(RenderTarget, _lastSeenRT))
+                    InitDeviceResources();
+                if (!_dxInitialized)
+                    return;   // init failed (transient RT state) — skip the frame, retry next pass
+
+                // Rebuild the display list at most ~1×/s (age counter tick) or when a new
+                // snapshot/error arrives. OnRender itself can fire per tick; building
+                // DirectWrite layouts that often is the GC/dispatcher pressure #17 warns about.
+                Snapshot p = _snap;
+                string err = _error;
+                if (p != _builtFrom || err != _builtError || _rebuildAsap
+                    || (DateTime.UtcNow - _lastBuildUtc).TotalMilliseconds >= 1000)
+                {
+                    BuildOps(p, err);
+                }
+
+                ApplyCardOffset();   // clamp the dragged offset to the panel each frame
+
+                var oldAa = RenderTarget.AntialiasMode;
+                var oldTxt = RenderTarget.TextAntialiasMode;
+                var oldXf = RenderTarget.Transform;
+                RenderTarget.AntialiasMode = D2D.AntialiasMode.PerPrimitive;
+                RenderTarget.TextAntialiasMode = D2D.TextAntialiasMode.Grayscale;
+                if (_offX != 0f || _offY != 0f)   // drag = one transform, zero rebuilds
+                    RenderTarget.Transform = SharpDX.Matrix3x2.Multiply(
+                        SharpDX.Matrix3x2.Translation(_offX, _offY), oldXf);
+                try { ReplayOps(); }
+                finally
+                {
+                    RenderTarget.Transform = oldXf;
+                    RenderTarget.AntialiasMode = oldAa;
+                    RenderTarget.TextAntialiasMode = oldTxt;
+                }
+            }
+            catch (Exception ex)
+            {
+                // §5d: bounded — never let a render bug take down the chart or count
+                // toward MaxRestarts.
+                if (_renderErrorCount < 5)
+                {
+                    _renderErrorCount++;
+                    Print("[HermesDashboard] OnRender error #" + _renderErrorCount + ": " + ex.Message);
+                }
+            }
+        }
+
+        // §5b: same-target skip + EAGER re-init. Never lazy-init brushes in the draw
+        // path; never leave a frame with a half-valid palette.
+        public override void OnRenderTargetChanged()
+        {
+            try { base.OnRenderTargetChanged(); } catch { }
+            try
+            {
+                // No-op when NT8 fires the callback without actually swapping the
+                // target (it does, e.g. around playback/state transitions).
+                if (RenderTarget != null && _dxInitialized
+                    && object.ReferenceEquals(RenderTarget, _lastSeenRT))
+                    return;
+
+                DisposeBrushes();                       // sets _dxInitialized = false
+                if (RenderTarget == null || _terminated)
+                    return;
+                InitDeviceResources();                  // eager — never let a frame see null brushes
+            }
+            catch (Exception ex)
+            {
+                if (_renderErrorCount < 5)
+                {
+                    _renderErrorCount++;
+                    Print("[HermesDashboard] OnRenderTargetChanged error #" + _renderErrorCount + ": " + ex.Message);
+                }
+            }
+        }
+
+        // Create the full palette against the CURRENT RenderTarget. On partial failure
+        // everything is torn down so the next attempt starts clean (§5b companion rule:
+        // a half-initialized palette + same-target skip would stay dead forever).
+        private void InitDeviceResources()
+        {
+            DisposeBrushes();
+            var rt = RenderTarget;
+            if (rt == null) return;
+            try
+            {
+                foreach (uint argb in Palette)
+                {
+                    var c = new SharpDX.Color4(
+                        ((argb >> 16) & 0xFF) / 255f,
+                        ((argb >> 8) & 0xFF) / 255f,
+                        (argb & 0xFF) / 255f,
+                        ((argb >> 24) & 0xFF) / 255f);
+                    _brushes[argb] = new D2D.SolidColorBrush(rt, c);
+                }
+                _lastSeenRT = rt;
+                _dxInitialized = true;
+            }
+            catch
+            {
+                DisposeBrushes();   // partial init → tear down so the next call retries cleanly
+            }
+        }
+
+        private enum OpKind { FillRect, StrokeRect, Line, FillEllipse, Text }
+
+        private struct DrawOp
+        {
+            public OpKind Kind;
+            // Geometry by kind: Fill/StrokeRect = LTRB bounds · Line = x1,y1 -> x2,y2 ·
+            // FillEllipse = center x1,y1 + radii x2,y2 · Text = origin x1,y1.
+            public float X1, Y1, X2, Y2;
+            public float Radius;         // rounded-corner radius (0 = square)
+            public float Thick;          // stroke width for lines / borders
+            public uint Color;
+            public DW.TextLayout Layout; // Text ops own their layout; disposed on rebuild
+        }
+
+        // SharpDX 2.6.3's RectangleF ctor is (x, y, width, height) — build from LTRB.
+        private static DXRect Ltrb(float l, float t, float r, float b)
+        {
+            return new DXRect(l, t, r - l, b - t);
+        }
+
+        private void ReplayOps()
+        {
+            if (_hasCard)
+            {
+                var bg = BrushFor(ColCardBg);
+                var edge = BrushFor(ColCardEdge);
+                var rr = new D2D.RoundedRectangle
+                {
+                    Rect = new DXRect(_cardX, _cardY, _cardW, _cardH),
+                    RadiusX = 10f * _s,
+                    RadiusY = 10f * _s,
+                };
+                if (bg != null) RenderTarget.FillRoundedRectangle(rr, bg);
+                if (edge != null) RenderTarget.DrawRoundedRectangle(rr, edge, 1f);
+            }
+            foreach (var op in _ops)
+            {
+                var b = BrushFor(op.Color);
+                if (b == null) continue;
+                switch (op.Kind)
+                {
+                    case OpKind.FillRect:
+                        if (op.Radius > 0f)
+                            RenderTarget.FillRoundedRectangle(new D2D.RoundedRectangle
+                            {
+                                Rect = Ltrb(op.X1, op.Y1, op.X2, op.Y2),
+                                RadiusX = op.Radius,
+                                RadiusY = op.Radius,
+                            }, b);
+                        else
+                            RenderTarget.FillRectangle(Ltrb(op.X1, op.Y1, op.X2, op.Y2), b);
+                        break;
+                    case OpKind.StrokeRect:
+                        if (op.Radius > 0f)
+                            RenderTarget.DrawRoundedRectangle(new D2D.RoundedRectangle
+                            {
+                                Rect = Ltrb(op.X1, op.Y1, op.X2, op.Y2),
+                                RadiusX = op.Radius,
+                                RadiusY = op.Radius,
+                            }, b, op.Thick);
+                        else
+                            RenderTarget.DrawRectangle(Ltrb(op.X1, op.Y1, op.X2, op.Y2), b, op.Thick);
+                        break;
+                    case OpKind.Line:
+                        RenderTarget.DrawLine(new DXVec(op.X1, op.Y1), new DXVec(op.X2, op.Y2),
+                            b, op.Thick);
+                        break;
+                    case OpKind.FillEllipse:
+                        RenderTarget.FillEllipse(
+                            new D2D.Ellipse(new DXVec(op.X1, op.Y1), op.X2, op.Y2), b);
+                        break;
+                    case OpKind.Text:
+                        if (op.Layout != null && !op.Layout.IsDisposed)
+                            RenderTarget.DrawTextLayout(new DXVec(op.X1, op.Y1), op.Layout, b);
+                        break;
+                }
+            }
+        }
+
+        // ---- display-list construction ------------------------------------------
+        private void BuildOps(Snapshot p, string err)
+        {
+            _builtFrom = p;
+            _builtError = err;
+            _lastBuildUtc = DateTime.UtcNow;
+            _rebuildAsap = false;
+            _foldX1 = _foldY1 = _foldX2 = _foldY2 = 0f;   // no fold toggle until placed
+            DisposeOps();
+            EnsureFormats();
+
+            float s = Math.Max(0.5f, FontSize / 12f);
+            _s = s;
+            float x0 = ChartPanel.X + 12f, y0 = ChartPanel.Y + 12f;
+            float w = 340f * s, pad = 14f * s;
+            float xL = x0 + pad, xR = x0 + w - pad, innerW = xR - xL;
+            float y = y0 + pad;
+
+            if (p == null)   // never reached the bridge yet
+            {
+                AddText("HERMES", _fHead, xL, y, ColText);
+                AddPill(err == null ? "CONNECTING" : "OFFLINE",
+                        err == null ? ColAmberBg : ColRedBg,
+                        err == null ? ColAmber : ColRed, xR, y + 9f * s);
+                y += 26f * s;
+                AddText("bridge " + BridgeHost + ":" + BridgePort, _fSub, xL, y, ColDim);
+                y += 18f * s;
+                SetCard(x0, y0, w, y + pad - 4f * s - y0);
+                return;
+            }
+
+            // ---- status pill ----------------------------------------------------
+            double age = double.IsNaN(p.AgeS)
+                ? double.NaN
+                : p.AgeS + (DateTime.UtcNow - p.PolledUtc).TotalSeconds;
+            int staleAfter = TimeframeSeconds(p.Timeframe) * 2 + 30;
+            string pill; uint pillBg, pillFg;
+            if (err != null) { pill = "OFFLINE"; pillBg = ColRedBg; pillFg = ColRed; }
+            else if (!p.Ok) { pill = "NO DATA"; pillBg = ColAmberBg; pillFg = ColAmber; }
+            else if (double.IsNaN(age)) { pill = "WAITING"; pillBg = ColAmberBg; pillFg = ColAmber; }
+            else if (age > staleAfter) { pill = "STALE " + FmtAge(age); pillBg = ColAmberBg; pillFg = ColAmber; }
+            else { pill = "LIVE " + FmtAge(age); pillBg = ColGreenBg; pillFg = ColGreen; }
+
+            // ---- header ----------------------------------------------------------
+            AddEllipse(xL + 4f * s, y + 9f * s, 4f * s, pillFg);
+            var hHead = AddText("HERMES", _fHead, xL + 14f * s, y, ColText);
+            AddText(Join(" · ", p.Instrument, p.Timeframe), _fSub,
+                xL + 14f * s + hHead.Metrics.WidthIncludingTrailingWhitespace + 8f * s,
+                y + 3.5f * s, ColMuted);
+            AddPill(pill, pillBg, pillFg, xR - 18f * s, y + 9f * s);
+            // fold toggle (▾ open / ▸ folded) — generous hit box, tested on mouse-down
+            AddTextRight(CardFolded ? "▸" : "▾", _fBody, xR + 2f * s, y + 3f * s, ColMuted);
+            _foldX1 = xR - 14f * s; _foldY1 = y - 2f * s;
+            _foldX2 = x0 + w;       _foldY2 = y + 20f * s;
+            y += 24f * s;
+
+            if (CardFolded)   // compact card: header + position/P&L strip
+            {
+                double tot = p.Realized + p.Unrealized;
+                AddText(PosText(p), _fBodyB, xL, y, PosColor(p));
+                AddTextRight(FmtMoney(tot) + " today", _fSub, xR, y + 1.5f * s, MoneyColor(tot));
+                y += 20f * s;
+                SetCard(x0, y0, w, y + pad - 5f * s - y0);
+                return;
+            }
+
+            AddText(Join(" · ", p.Agent, p.Model, p.StrategyId), _fSub, xL, y, ColDim);
+            y += 20f * s;
+            Divider(xL, xR, ref y);
+
+            // ---- position + last price ------------------------------------------
+            AddText(PosText(p), _fBig, xL, y, PosColor(p));
+            AddTextRight("last " + FmtPrice(p.LastClose), _fSub, xR, y + 5f * s, ColMuted);
+            y += 26f * s;
+
+            // ---- stat boxes ------------------------------------------------------
+            double total = p.Realized + p.Unrealized;
+            string[] labels = { "REALIZED", "UNREALIZED", "TOTAL", "TRADES" };
+            string[] vals = { FmtMoney(p.Realized), FmtMoney(p.Unrealized), FmtMoney(total),
+                              p.Trades.ToString(CultureInfo.InvariantCulture) };
+            uint[] vcols = { MoneyColor(p.Realized), MoneyColor(p.Unrealized), MoneyColor(total), ColText };
+            float gap = 8f * s, bw = (innerW - gap * 3f) / 4f, bh = 38f * s;
+            for (int i = 0; i < 4; i++)
+            {
+                float bx = xL + i * (bw + gap);
+                AddRect(bx, y, bx + bw, y + bh, 6f * s, ColBoxBg, ColBoxEdge);
+                AddText(labels[i], _fLabel, bx + 7f * s, y + 5f * s, ColDim);
+                AddText(vals[i], _fBodyB, bx + 7f * s, y + 17f * s, vcols[i]);
+            }
+            y += bh + 12f * s;
+
+            // ---- daily goal ------------------------------------------------------
+            AddText("DAILY GOAL", _fLabel, xL, y, ColDim);
+            string goalRight; uint goalRightCol;
+            if (p.Halted)
+            {
+                goalRight = "HALTED" + (p.HaltReason.Length > 0 ? ": " + p.HaltReason : "");
+                goalRightCol = ColAmber;
+            }
+            else if (p.GoalHit) { goalRight = "GOAL HIT"; goalRightCol = ColGreen; }
+            else
+            {
+                goalRight = "stop -" + FmtPrice(p.GoalLoss) + "  target +" + FmtPrice(p.GoalTarget);
+                goalRightCol = ColMuted;
+            }
+            AddTextRight(goalRight, _fSub, xR, y - 1.5f * s, goalRightCol);
+            y += 15f * s;
+            AddRect(xL, y, xR, y + 4f * s, 2f * s, ColTrack, 0);
+            double span = p.GoalLoss + p.GoalTarget;
+            double frac = (double.IsNaN(span) || span <= 0) ? 0.5
+                : Math.Min(1.0, Math.Max(0.0, (total + p.GoalLoss) / span));
+            float mx = xL + (float)(innerW * frac);
+            AddRect(mx - 1.5f * s, y - 3f * s, mx + 1.5f * s, y + 7f * s, 1.5f * s,
+                total < 0 ? ColRed : ColGreen, 0);
+            y += 14f * s;
+            Divider(xL, xR, ref y);
+
+            // ---- armed plan (forward-compat with the analysis/execution split) ---
+            AddText("ARMED PLAN", _fLabel, xL, y, ColDim);
+            if (p.PlanStatus.Length > 0)
+            {
+                string st = p.PlanStatus.ToUpperInvariant();
+                uint bg = st == "ARMED" ? ColGreenBg : st == "ANALYZING" ? ColBlueBg : ColBoxBg;
+                uint fg = st == "ARMED" ? ColGreen : st == "ANALYZING" ? ColBlue : ColMuted;
+                AddPill(st, bg, fg, xR, y + 5f * s);
+            }
+            y += 17f * s;
+            string dir = p.PlanDirection.Length > 0 ? p.PlanDirection.ToUpperInvariant() : "NEUTRAL";
+            uint dirCol = dir.Contains("LONG") ? ColGreen : dir.Contains("SHORT") ? ColRed : ColText;
+            var hDir = AddText("◆ " + dir, _fBodyB, xL, y, dirCol);
+            string note = p.PlanNote.Length > 0 ? p.PlanNote
+                : p.HasPlan ? "seeking entry" : "per-bar mode";
+            AddText(note, _fSub,
+                xL + hDir.Metrics.WidthIncludingTrailingWhitespace + 8f * s, y + 1f * s, ColMuted);
+            y += 18f * s;
+            if (!double.IsNaN(p.PlanLow) && !double.IsNaN(p.PlanHigh))
+            {
+                string rng = FmtPrice(p.PlanLow) + " – " + FmtPrice(p.PlanHigh)
+                    + (p.PlanBarsLeft.Length > 0 ? "  ·  " + p.PlanBarsLeft + " bars left" : "");
+                AddText(rng, _fBody, xL, y, ColText);
+            }
+            else
+                AddText("none armed", _fBody, xL, y, ColMuted);
+            y += 20f * s;
+            Divider(xL, xR, ref y);
+
+            // ---- last decision ---------------------------------------------------
+            AddText("LAST DECISION", _fLabel, xL, y, ColDim);
+            AddTextRight(p.LdTime, _fSub, xR, y - 1.5f * s, ColMuted);
+            y += 17f * s;
+            string act = p.LdAction.Length > 0 ? DisplayAction(p.LdAction) : "—";
+            var hAct = AddText(act, _fBig, xL, y, ActionColor(p.LdAction));
+            float ax = xL + hAct.Metrics.WidthIncludingTrailingWhitespace + 10f * s;
+            var hConf = AddText("conf " + FmtConf(p.LdConf), _fSub, ax, y + 5f * s, ColMuted);
+            AddText("@ " + FmtPrice(p.LdClose), _fBodyB,
+                ax + hConf.Metrics.WidthIncludingTrailingWhitespace + 10f * s, y + 4f * s, ColText);
+            if (p.LdOrder.Length > 0)   // an order actually left the bridge for this decision
+                AddTextRight("→ " + DisplayAction(p.LdOrder), _fBodyB, xR, y + 4f * s,
+                    ActionColor(p.LdOrder));
+            y += 23f * s;
+            if (p.LdRationale.Length > 0)
+            {
+                AddText(p.LdRationale, _fRat, xL, y, ColMuted, innerW);
+                y += 17f * s;
+            }
+            Divider(xL, xR, ref y);
+
+            // ---- recent decisions table -----------------------------------------
+            float cTime = xL, cAct = xL + 62f * s, cConf = xL + 148f * s,
+                  cClose = xL + 192f * s, cOrd = xL + 258f * s;
+            AddText("TIME", _fLabel, cTime, y, ColDim);
+            AddText("ACTION", _fLabel, cAct, y, ColDim);
+            AddText("CONF", _fLabel, cConf, y, ColDim);
+            AddText("CLOSE", _fLabel, cClose, y, ColDim);
+            AddText("ORDER", _fLabel, cOrd, y, ColDim);
+            y += 15f * s;
+            int n = Math.Min(p.Rows.Count, Math.Max(1, Math.Min(8, RecentRows)));
+            if (p.Rows.Count == 0)
+            {
+                AddText("no decisions yet", _fSub, xL, y, ColDim);
+                y += 15f * s;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                var r = p.Rows[i];
+                string ord = r[4].Length > 0 ? DisplayAction(r[4]) : "—";
+                AddText(r[0], _fSub, cTime, y, ColMuted);
+                AddText(DisplayAction(r[1]), _fSub, cAct, y, ActionColor(r[1]));
+                AddText(r[2], _fSub, cConf, y, ColMuted);
+                AddText(r[3], _fSub, cClose, y, ColText);
+                AddText(ord, _fSub, cOrd, y, r[4].Length > 0 ? ActionColor(r[4]) : ColDim);
+                y += 15f * s;
+            }
+            y += 3f * s;
+            Divider(xL, xR, ref y);
+
+            // ---- footer ----------------------------------------------------------
+            AddText("bridge " + BridgeHost + ":" + BridgePort, _fSub, xL, y, ColDim);
+            AddTextRight(err != null ? "retrying…" : "updated " + p.PolledLocal.ToString("HH:mm:ss"),
+                _fSub, xR, y, ColDim);
+            y += 15f * s;
+
+            SetCard(x0, y0, w, y + pad - 5f * s - y0);
+        }
+
+        private void SetCard(float x, float y, float w, float h)
+        {
+            _cardX = x; _cardY = y; _cardW = w; _cardH = h;
+            _hasCard = true;
+        }
+
+        // ---- small build helpers (render thread only) ----------------------------
+        private DW.TextLayout AddText(string text, DW.TextFormat fmt, float x, float y,
+            uint color, float maxW = 4000f)
+        {
+            var tl = new DW.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
+                text ?? "", fmt, maxW, 200f);
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.Text,
+                Layout = tl,
+                X1 = x, Y1 = y,
+                Color = color,
+            });
+            return tl;
+        }
+
+        private void AddTextRight(string text, DW.TextFormat fmt, float right, float y, uint color)
+        {
+            var tl = new DW.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
+                text ?? "", fmt, 4000f, 200f);
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.Text,
+                Layout = tl,
+                X1 = right - tl.Metrics.Width, Y1 = y,
+                Color = color,
+            });
+        }
+
+        private void AddPill(string text, uint bg, uint fg, float rightEdge, float cy)
+        {
+            var tl = new DW.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
+                text ?? "", _fLabel, 4000f, 200f);
+            float tw = tl.Metrics.Width, th = tl.Metrics.Height;
+            float padX = 8f * _s, padY = 3f * _s;
+            float left = rightEdge - tw - padX * 2f;
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.FillRect,
+                X1 = left, Y1 = cy - th / 2f - padY, X2 = rightEdge, Y2 = cy + th / 2f + padY,
+                Radius = th / 2f + padY,
+                Color = bg,
+            });
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.Text,
+                Layout = tl,
+                X1 = left + padX, Y1 = cy - th / 2f,
+                Color = fg,
+            });
+        }
+
+        private void AddRect(float l, float t, float r, float b, float radius, uint fill, uint stroke)
+        {
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.FillRect,
+                X1 = l, Y1 = t, X2 = r, Y2 = b,
+                Radius = radius,
+                Color = fill,
+            });
+            if (stroke != 0)
+                _ops.Add(new DrawOp
+                {
+                    Kind = OpKind.StrokeRect,
+                    X1 = l, Y1 = t, X2 = r, Y2 = b,
+                    Radius = radius,
+                    Thick = 1f,
+                    Color = stroke,
+                });
+        }
+
+        private void AddEllipse(float cx, float cy, float radius, uint color)
+        {
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.FillEllipse,
+                X1 = cx, Y1 = cy, X2 = radius, Y2 = radius,
+                Color = color,
+            });
+        }
+
+        private void Divider(float xL, float xR, ref float y)
+        {
+            _ops.Add(new DrawOp
+            {
+                Kind = OpKind.Line,
+                X1 = xL, Y1 = y, X2 = xR, Y2 = y,
+                Thick = 1f,
+                Color = ColDivider,
+            });
+            y += 11f * _s;
+        }
+
+        // ---- formatting helpers ---------------------------------------------------
+        private static string Join(string sep, params string[] parts)
+        {
+            var keep = new List<string>();
+            foreach (var part in parts)
+                if (!string.IsNullOrEmpty(part)) keep.Add(part);
+            return string.Join(sep, keep);
+        }
+
+        private static string FmtPrice(double v)
+        {
+            return double.IsNaN(v) ? "—" : v.ToString("0.##", CultureInfo.InvariantCulture);
+        }
+
+        private static string FmtMoney(double v)
+        {
+            return double.IsNaN(v) ? "—" : v.ToString("+0.00;-0.00;+0.00", CultureInfo.InvariantCulture);
+        }
+
+        private static string FmtConf(double v)
+        {
+            return double.IsNaN(v) ? "—" : v.ToString("0.00", CultureInfo.InvariantCulture);
+        }
+
+        private static string FmtAge(double seconds)
+        {
+            if (seconds < 0) seconds = 0;
+            if (seconds < 100) return ((int)seconds) + "s";
+            return ((int)(seconds / 60)) + "m";
+        }
+
+        private static int TimeframeSeconds(string tf)
+        {
+            if (string.IsNullOrEmpty(tf)) return 120;
+            int i = 0;
+            while (i < tf.Length && char.IsDigit(tf[i])) i++;
+            int n;
+            if (i == 0 || !int.TryParse(tf.Substring(0, i), out n)) return 120;
+            char unit = i < tf.Length ? char.ToLowerInvariant(tf[i]) : 'm';
+            if (unit == 's') return n;
+            if (unit == 'h') return n * 3600;
+            return n * 60;
+        }
+
+        private static string DisplayAction(string a)
+        {
+            return (a ?? "").Replace("ENTER_", "");
+        }
+
+        private uint ActionColor(string a)
+        {
+            string u = (a ?? "").ToUpperInvariant();
+            if (u.Contains("LONG") || u.Contains("BUY")) return ColGreen;
+            if (u.Contains("SHORT") || u.Contains("SELL")) return ColRed;
+            if (u.Contains("FLAT")) return ColAmber;
+            if (u.Contains("WAIT")) return ColMuted;
+            if (u.Contains("HOLD")) return ColBlue;
+            return ColText;
+        }
+
+        private static string PosText(Snapshot p)
+        {
+            if (p.Position > 0) return "LONG " + p.Position + " @ " + FmtPrice(p.AvgPrice);
+            if (p.Position < 0) return "SHORT " + (-p.Position) + " @ " + FmtPrice(p.AvgPrice);
+            return "FLAT";
+        }
+
+        private static uint PosColor(Snapshot p)
+        {
+            return p.Position > 0 ? ColGreen : p.Position < 0 ? ColRed : ColText;
+        }
+
+        private uint MoneyColor(double v)
+        {
+            if (double.IsNaN(v)) return ColText;
+            if (v > 0.005) return ColGreen;
+            if (v < -0.005) return ColRed;
+            return ColText;
+        }
+
+        // ---- resource lifecycle -----------------------------------------------------
+        private void EnsureFormats()
+        {
+            if (_fLabel != null) return;
+            float s = Math.Max(0.5f, FontSize / 12f);
+            var fac = NinjaTrader.Core.Globals.DirectWriteFactory;
+            _fLabel = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.SemiBold, DW.FontStyle.Normal, 9f * s);
+            _fSub   = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal,   DW.FontStyle.Normal, 11f * s);
+            _fBody  = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal,   DW.FontStyle.Normal, 12f * s);
+            _fBodyB = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,     DW.FontStyle.Normal, 12f * s);
+            _fHead  = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,     DW.FontStyle.Normal, 15f * s);
+            _fBig   = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,     DW.FontStyle.Normal, 16f * s);
+            _fRat   = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal,   DW.FontStyle.Normal, 10.5f * s);
+            _fRat.WordWrapping = DW.WordWrapping.NoWrap;
+            _ratEllipsis = new DW.EllipsisTrimming(fac, _fRat);
+            _fRat.SetTrimming(new DW.Trimming { Granularity = DW.TrimmingGranularity.Character },
+                _ratEllipsis);
+        }
+
+        private void DisposeOps()
+        {
+            foreach (var op in _ops)
+                if (op.Layout != null && !op.Layout.IsDisposed) op.Layout.Dispose();
+            _ops.Clear();
+            _hasCard = false;
+        }
+
+        private void DisposeBrushes()
+        {
+            _dxInitialized = false;
+            _lastSeenRT = null;
+            foreach (var b in _brushes.Values)
+                if (b != null && !b.IsDisposed) b.Dispose();
+            _brushes.Clear();
+        }
+
+        private void DisposeFormats()
+        {
+            if (_ratEllipsis != null && !_ratEllipsis.IsDisposed) _ratEllipsis.Dispose();
+            _ratEllipsis = null;
+            var formats = new[] { _fLabel, _fSub, _fBody, _fBodyB, _fHead, _fBig, _fRat };
+            foreach (var f in formats)
+                if (f != null && !f.IsDisposed) f.Dispose();
+            _fLabel = _fSub = _fBody = _fBodyB = _fHead = _fBig = _fRat = null;
+        }
+
+        // Lookup ONLY — the palette is created eagerly in InitDeviceResources (§5b).
+        private D2D.SolidColorBrush BrushFor(uint argb)
+        {
+            D2D.SolidColorBrush b;
+            if (_brushes.TryGetValue(argb, out b) && b != null && !b.IsDisposed)
+                return b;
+            return null;
         }
     }
 }

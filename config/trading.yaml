@@ -1,6 +1,10 @@
-# Hermes × NinjaTrader 8 — trading configuration
+# Hermes × NinjaTrader 8 — trading configuration  (SHARED TEMPLATE — committed)
 # Loaded by the bridge (hermes_bridge.config.BridgeConfig). Every field has a safe
 # default; override here. Env vars HERMES_BRIDGE_HOST / _PORT / _AGENT also override.
+#
+# Keep this file NEUTRAL — it is pushed. Put PERSONAL values (your NinjaTrader account,
+# your own daily risk) in `config/trading.local.yaml` (gitignored); the loader
+# deep-merges that file on top of this one at startup.
 
 # Must MATCH the StrategyId set on the NinjaScript strategy and HERMES_STRATEGY_ID.
 strategy_id: hermes-default
@@ -34,8 +38,8 @@ risk:
 
 # Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
 daily_goal:
-  profit_target: 150.0         # USD realized → halt new entries for the day
-  max_daily_loss: 120.0        # USD realized → flatten + halt for the day
+  profit_target: 500.0         # halt new entries for the day when reached
+  max_daily_loss: 400.0        # flatten + halt when reached. Your tolerance -> trading.local.yaml
 
 # Optional Regular-Trading-Hours guard (rejects entries outside the window).
 session:
@@ -44,17 +48,22 @@ session:
   end: "16:00"
   timezone: America/New_York
 
-# Decision brain: mock (rules, no LLM) or hermes (the installed Hermes Agent).
+# Decision brain: mock (rules, no LLM) | hermes (installed Hermes) | claude (Claude CLI).
 agent:
-  client: hermes               # mock (rules, no LLM) | hermes (Codex via Hermes oneshot)
+  client: claude              # Claude Code CLI on your subscription (no metered API)
+  claude:
+    claude_bin: claude        # on PATH; or an absolute path to claude.exe
+    model: sonnet             # sonnet | haiku | opus
+    safe_mode: true           # isolate from your CLAUDE.md/OMC/hooks/MCP; keep subscription auth
+    timeout_s: 90             # was 60; Sonnet can take ~25-65s, so 90s avoids timeouts
+    context_dir: hermes/context
   hermes:
-    mode: cli                  # cli = `hermes -z` oneshot (resolves Codex OAuth) | in_process
-    hermes_bin: /Users/hypawolf/.local/bin/hermes
-    model: ""                  # oneshot uses Hermes' configured model (your Codex selection)
-    # Trading knowledge loaded verbatim into the system prompt (absolute path):
-    context_dir: /Users/hypawolf/code/hermes-trading-agent/hermes/context
-    enabled_toolsets: []       # [] = pure reasoning; the bridge executes the orders
-    skip_memory: true          # each bar is an independent decision
+    mode: cli                 # kept for reference; unused while client=claude
+    hermes_bin: hermes
+    model: ""
+    context_dir: hermes/context
+    enabled_toolsets: []
+    skip_memory: true
     quiet_mode: true
     timeout_s: 60
 
@@ -67,4 +76,8 @@ server:
 # NinjaScript strategy ALSO refuses non-Sim accounts unless its AllowLive is true.
 execution:
   allow_live: false
-  account: Sim101
+  account: Sim101              # your Sim account name -> override in config/trading.local.yaml
+  entry_freshness_s: 0.0       # 0 = auto: max(one bar interval, the agent's timeout_s) —
+                               # never silently tighter than the agent's budget. Set it
+                               # explicitly (e.g. 60) to drop ENTRIES whose decision took
+                               # >= this many seconds as stale. Exits always execute.

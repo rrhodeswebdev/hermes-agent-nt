@@ -8,6 +8,7 @@ use these to build the order-flow / price-action context that the LLM also sees.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from .models import Bar
 
@@ -87,6 +88,42 @@ def cumulative_delta(bars: list[Bar]) -> float:
     return sum(bar_delta(b) for b in bars)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _eastern_offset(dt_utc: datetime) -> timedelta:
+    """US Eastern offset from UTC (EST -5 / EDT -4), DST-correct without tzdata.
+
+    DST runs 2nd Sunday of March 02:00 -> 1st Sunday of November 02:00 (local time).
+    """
+    year = dt_utc.year
+
+    def nth_sunday(month: int, n: int) -> datetime:
+        first = datetime(year, month, 1, tzinfo=UTC)
+        day = 1 + (6 - first.weekday()) % 7 + (n - 1) * 7  # weekday(): Mon=0 .. Sun=6
+        return datetime(year, month, day, tzinfo=UTC)
+
+    # Boundaries in UTC: spring-forward 02:00 EST = 07:00 UTC; fall-back 02:00 EDT = 06:00 UTC.
+    dst_start = nth_sunday(3, 2).replace(hour=7)
+    dst_end = nth_sunday(11, 1).replace(hour=6)
+    return timedelta(hours=-4) if dst_start <= dt_utc < dst_end else timedelta(hours=-5)
+
+
+def session_for_ts(ts: float) -> str:
+    """'RTH' if the bar is in the CME equity-index regular session (09:30-16:00 ET,
+    Mon-Fri), else 'ETH' (overnight / extended -- typically a fraction of RTH volume).
+
+    Converts via epoch + timedelta rather than datetime.fromtimestamp, which raises
+    OSError on Windows for small / out-of-range timestamps.
+    """
+    dt_utc = _EPOCH + timedelta(seconds=ts)
+    et = dt_utc + _eastern_offset(dt_utc)
+    if et.weekday() >= 5:  # Saturday / Sunday
+        return "ETH"
+    minutes = et.hour * 60 + et.minute
+    return "RTH" if 570 <= minutes < 960 else "ETH"  # 09:30 = 570, 16:00 = 960
+
+
 @dataclass
 class MarketContext:
     """Deterministic features handed to the agent each bar (LLM or rules)."""
@@ -100,6 +137,8 @@ class MarketContext:
     recent_delta: float          # cumulative delta over the recent window
     trend: str                   # "up" | "down" | "flat"
     bars_count: int
+    session: str = "ETH"         # "RTH" | "ETH" -- RTH carries far heavier volume
+    delta_ratio: float = 0.0     # recent_delta / recent volume, ~[-1,1]; session-independent
 
     def to_dict(self) -> dict:
         return {
@@ -110,7 +149,9 @@ class MarketContext:
             "swing_high": _r(self.swing_high),
             "swing_low": _r(self.swing_low),
             "recent_delta": round(self.recent_delta, 2),
+            "delta_ratio": round(self.delta_ratio, 3),
             "trend": self.trend,
+            "session": self.session,
             "bars_count": self.bars_count,
         }
 
@@ -135,6 +176,9 @@ def build_context(
         trend = "up" if ef > es else "down" if ef < es else "flat"
     else:
         trend = "flat"
+    window = bars[-delta_window:]
+    rd = cumulative_delta(window)
+    vol = sum((b.volume or 0.0) for b in window)
     return MarketContext(
         last_close=closes[-1] if closes else 0.0,
         ema_fast=ef,
@@ -142,7 +186,9 @@ def build_context(
         atr=a,
         swing_high=swing_high(bars),
         swing_low=swing_low(bars),
-        recent_delta=cumulative_delta(bars[-delta_window:]),
+        recent_delta=rd,
         trend=trend,
         bars_count=len(bars),
+        session=session_for_ts(bars[-1].ts) if bars else "ETH",
+        delta_ratio=(rd / vol) if vol > 0 else 0.0,
     )

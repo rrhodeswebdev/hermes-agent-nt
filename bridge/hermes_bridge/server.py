@@ -21,9 +21,11 @@ from pydantic import BaseModel
 
 from . import __version__
 from .agent_client import build_agent_client
-from .config import BridgeConfig, load_config
-from .dashboard import DASHBOARD_HTML, render_text
+from .config import BridgeConfig, effective_entry_freshness_s, load_config
+from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
+from .journal import JournalStore
+from .memory import LearnedStore
 from .models import (
     AccountState,
     Action,
@@ -33,9 +35,23 @@ from .models import (
     Fill,
     OrderCommand,
 )
+from .reflect import Reflector
 from .risk import RiskGate
 from .session import SessionState
 from .store import BarStore
+
+
+def is_stale_entry(action: Action, elapsed_s: float, budget_s: float) -> bool:
+    """An ENTRY whose decision took >= budget is stale; exits/flatten are never stale."""
+    return (budget_s > 0 and elapsed_s >= budget_s
+            and action in (Action.ENTER_LONG, Action.ENTER_SHORT))
+
+
+# Below this many stored bars, every /ingest/bar response carries need_history=True so
+# NinjaTrader re-sends /ingest/history. Closes the bridge-restart gap: the strategy
+# pushes history once per ENABLE, so a bridge restarted mid-session would otherwise
+# compute EMAs/ATR/swings on a thin live-bar seed (2026-06-11 incident: 25 bars).
+HISTORY_MIN_BARS = 50
 
 
 class CommandQueue:
@@ -62,6 +78,8 @@ class CommandQueue:
 class AppState:
     def __init__(self, config: BridgeConfig) -> None:
         self.cfg = config
+        self.entry_freshness_s = effective_entry_freshness_s(config)
+        self.stale_drops = 0  # entries dropped by the freshness guard (shown on the panel)
         self.store = BarStore(config.instrument.symbol, config.instrument.timeframe)
         self.session = SessionState(
             instrument=config.instrument.symbol,
@@ -73,10 +91,30 @@ class AppState:
         )
         self.risk = RiskGate(config)
         self.agent = build_agent_client(config)
-        self.engine = TradingEngine(config, self.store, self.session, self.agent, self.risk)
+        self.journal = JournalStore(config.learning.journal_path)
+        self.reflector = Reflector(config, LearnedStore(config.learning.learned_dir), self.journal)
+        self.engine = TradingEngine(
+            config, self.store, self.session, self.agent, self.risk,
+            journal=self.journal, on_close=self._on_trade_closed)
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
+        # Server-side (true-UTC) arrival stamp of the latest realtime bar, so "data age"
+        # is correct regardless of the timezone the strategy stamps bar.ts in.
+        self.last_bar_received_at: float | None = None
+
+    def _on_trade_closed(self, trade) -> None:
+        lc = self.cfg.learning
+        if not (lc.reflect_enabled and lc.reflect_on_trade_close):
+            return
+        recent = self.journal.recent(lc.reflect_recent)
+
+        def _run() -> None:
+            applied = self.reflector.reflect_on_close(trade, recent)
+            if any(applied.values()):
+                print(f"[reflect] updated learned memory: {applied}", flush=True)
+
+        threading.Thread(target=_run, daemon=True).start()
 
 
 class AgentCommandRequest(BaseModel):
@@ -140,6 +178,22 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         return {"bars": [b.model_dump() for b in st.store.recent(n)]}
 
     # ---- dashboard -----------------------------------------------------------
+    def _levels(st: AppState) -> dict | None:
+        """The agent's current support/resistance + EMAs (from the last bar's context)."""
+        lc = st.engine.last_context
+        if lc is None:
+            return None
+        return {"swing_high": lc.swing_high, "swing_low": lc.swing_low,
+                "ema_fast": lc.ema_fast, "ema_slow": lc.ema_slow}
+
+    def _agent_model() -> str:
+        """Model label for the dashboard header (e.g. claude · sonnet · hermes-default)."""
+        if cfg.agent.client == "claude":
+            return cfg.agent.claude.model
+        if cfg.agent.client == "hermes":
+            return cfg.agent.hermes.model
+        return ""
+
     def _dashboard_payload(st: AppState) -> dict:
         last = st.store.last()
         acct = st.session.account_state(mark_price=last.close if last else None)
@@ -147,20 +201,27 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         recent = list(st.decisions)[-15:]
         return {
             "agent": cfg.agent.client,
+            "model": _agent_model(),
             "mode": cfg.agent.hermes.mode,
             "strategy_id": cfg.strategy_id,
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,
             "now": now,
             "last_bar": {"ts": last.ts, "close": last.close} if last else None,
-            "data_age_seconds": (now - last.ts) if last else None,
+            # Age from the bar's server arrival time (true UTC), not bar.ts — the strategy
+            # may stamp bar.ts in a different timezone, which would skew this readout.
+            "data_age_seconds": (
+                now - st.last_bar_received_at if st.last_bar_received_at is not None else None
+            ),
             "session": acct.model_dump(),
             "goal": {
                 "profit_target": cfg.daily_goal.profit_target,
                 "max_daily_loss": cfg.daily_goal.max_daily_loss,
             },
+            "stale_drops": st.stale_drops,
             "last_decision": recent[-1] if recent else None,
             "recent_decisions": list(reversed(recent)),
+            "levels": _levels(st),
         }
 
     @app.get("/dashboard")
@@ -171,6 +232,19 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     def dashboard_txt(request: Request) -> str:
         # Pre-formatted panel the NinjaScript indicator draws verbatim (no JSON parsing).
         return render_text(_dashboard_payload(_state(request)))
+
+    @app.get("/panel.txt", response_class=PlainTextResponse)
+    def panel_txt(request: Request) -> str:
+        # Structured key=value snapshot for the HermesDashboard card (no JSON in C#).
+        return render_panel(_dashboard_payload(_state(request)))
+
+    @app.get("/levels.txt", response_class=PlainTextResponse)
+    def levels_txt(request: Request) -> str:
+        # Machine-readable S/R + EMAs for the chart indicator (key=value lines, no JSON).
+        lv = _levels(_state(request))
+        if not lv:
+            return ""
+        return "\n".join(f"{k}={v}" for k, v in lv.items() if v is not None)
 
     @app.get("/", response_class=HTMLResponse)
     @app.get("/dashboard.html", response_class=HTMLResponse)
@@ -187,23 +261,45 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     @app.post("/ingest/bar", response_model=Decision)
     def ingest_bar(request: Request, payload: BarIngest) -> Decision:
         st = _state(request)
+        t0 = time.time()
+        st.last_bar_received_at = t0
+        # One-shot sanity check: bar.ts should be true UTC. A big skew means the
+        # strategy's timezone conversion is wrong and session (RTH/ETH) labels — in
+        # prompts AND the journal — are unreliable (2026-06-11: +3h PT-vs-ET skew).
+        skew = payload.bar.ts - t0
+        if abs(skew) > 1800 and not getattr(st, "ts_skew_warned", False):
+            st.ts_skew_warned = True
+            print(f"[warn] bar.ts is {skew / 3600:+.1f}h off server UTC — fix the "
+                  "strategy's EpochSeconds timezone conversion (session labels "
+                  "depend on it)", flush=True)
         with st.lock:
             result = st.engine.on_bar(payload.bar)
-            if result.command is not None:
-                st.queue.push(result.command)
-        d = result.decision
-        cmd = result.command
+            d = result.decision
+            cmd = result.command
+            elapsed = time.time() - t0
+            if cmd is not None and is_stale_entry(cmd.action, elapsed, st.entry_freshness_s):
+                st.stale_drops += 1
+                st.engine.entry_dropped(cmd.id)  # disarm journal attribution for this entry
+                d = Decision(action=Action.WAIT, rationale=(
+                    f"stale_entry:{elapsed:.0f}s>{st.entry_freshness_s:.0f}s "
+                    f"(dropped {cmd.action} — {d.rationale})"))
+                cmd = None
+            if cmd is not None:
+                st.queue.push(cmd)
+        if len(st.store) < HISTORY_MIN_BARS:
+            d = d.model_copy(update={"need_history": True})
         queued = f"QUEUED:{cmd.action} qty={cmd.qty}" if cmd is not None else "no-order"
-        # One line per bar so the decision + rationale is visible in the log.
+        why = f" reasons={result.risk_reasons}" if cmd is None and result.risk_reasons else ""
         print(f"[decision] close={payload.bar.close} {d.action} [{result.mode}] "
-              f"conf={d.confidence:.2f} -> {queued} | {d.rationale[:160]}", flush=True)
-        # Record for the dashboard feed.
+              f"conf={d.confidence:.2f} lat={elapsed:.1f}s -> {queued}{why} | {d.rationale[:160]}",
+              flush=True)
         st.decisions.append({
             "ts": payload.bar.ts,
             "close": payload.bar.close,
             "action": str(d.action),
             "confidence": round(d.confidence, 2),
             "mode": result.mode,
+            "latency_s": round(elapsed, 1),
             "rationale": d.rationale,
             "queued": f"{cmd.action}:{cmd.qty}" if cmd is not None else None,
         })
@@ -276,6 +372,21 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         with st.lock:
             st.session.resume()
         return {"ok": True, "halted": False}
+
+    @app.post("/control/reflect")
+    def control_reflect(request: Request) -> dict:
+        st = _state(request)
+        recent = st.journal.recent(st.cfg.learning.reflect_recent)
+        if not recent:
+            return {"ok": True, "applied": {"lessons": 0, "notes": 0, "profile": 0},
+                    "note": "no trades to reflect on"}
+        from .journal import ClosedTrade
+        applied = st.reflector.reflect_on_close(ClosedTrade(**recent[-1]), recent)
+        return {"ok": True, "applied": applied}
+
+    @app.post("/control/curate")
+    def control_curate(request: Request) -> dict:
+        return {"ok": True, "applied": _state(request).reflector.curate()}
 
     return app
 
