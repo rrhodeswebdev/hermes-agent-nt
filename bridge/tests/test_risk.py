@@ -28,6 +28,16 @@ def test_exit_always_approved_even_when_halted(cfg):
     assert rd.command.qty == 2  # filled in from position
 
 
+def test_cancel_entry_always_approved_even_when_halted(cfg):
+    # Cancelling a resting plan-entry order reduces risk — never blocked.
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    s.halt("manual_kill")
+    rd = gate.evaluate(_cmd(Action.CANCEL_ENTRY, qty=0), s)
+    assert rd.approved
+    assert rd.command is not None
+
+
 def test_entry_rejected_when_halted(cfg):
     gate = RiskGate(cfg)
     s = _session(cfg)

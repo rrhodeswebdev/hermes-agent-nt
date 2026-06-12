@@ -18,7 +18,7 @@ def _pos_str(position: int, avg_price: float) -> str:
     if position == 0:
         return "FLAT"
     side = "LONG" if position > 0 else "SHORT"
-    return f"{side} {abs(position)} @ {avg_price:g}"
+    return f"{side} {abs(position)} @ {avg_price:.10g}"
 
 
 def render_text(d: dict | None) -> str:
@@ -43,13 +43,81 @@ def render_text(d: dict | None) -> str:
     ]
     ld = d.get("last_decision")
     if ld:
-        lines.append(f"LAST: {ld['action']}  conf {ld['confidence']:.2f}  @ {ld['close']:g}")
+        lines.append(f"LAST: {ld['action']}  conf {ld['confidence']:.2f}  @ {ld['close']:.10g}")
         rat = ld.get("rationale", "")
         for chunk in _wrap(rat, 44):
             lines.append(f"  {chunk}")
     lines.append("recent:")
     for r in d.get("recent_decisions", [])[:6]:
-        lines.append(f"  {_hhmmss(r['ts'])}  {r['action']:<11} {r['confidence']:.2f}  @{r['close']:g}")
+        lines.append(
+            f"  {_hhmmss(r['ts'])}  {r['action']:<11} {r['confidence']:.2f}  @{r['close']:.10g}"
+        )
+    return "\n".join(lines)
+
+
+def _oneline(value: object) -> str:
+    """Collapse whitespace/newlines so a value stays on its key=value line."""
+    return " ".join(str(value).split())
+
+
+def render_panel(d: dict | None) -> str:
+    """Structured key=value snapshot for the HermesDashboard card indicator.
+
+    Same philosophy as /levels.txt: the NinjaScript side stays a dumb line parser —
+    no JSON in C#. One `key=value` per line; recent decisions are `row=` lines with
+    pipe-separated fields. `plan_*` keys are emitted only when the payload carries an
+    armed-plan object (forward-compat for the analysis/execution-split bridge).
+    """
+    if not d:
+        return "ok=0"
+    s = d["session"]
+    goal = d["goal"]
+    age = d.get("data_age_seconds")
+    lb = d.get("last_bar")
+    lines = [
+        "ok=1",
+        f"instrument={d['instrument']}",
+        f"timeframe={d['timeframe']}",
+        f"agent={d['agent']}",
+        f"model={d.get('model', '')}",
+        f"strategy_id={d['strategy_id']}",
+        f"age_s={age:.0f}" if age is not None else "age_s=",
+        # NB: prices use :.10g, not :g — :g truncates to 6 significant digits, which
+        # is wrong by a tick+ at MNQ levels (f"{21512.75:g}" -> "21512.8").
+        f"last_close={lb['close']:.10g}" if lb else "last_close=",
+        f"position={s['position']}",
+        f"avg_price={s['avg_price']:.10g}",
+        f"realized={s['realized_pnl']:.2f}",
+        f"unrealized={s['unrealized_pnl']:.2f}",
+        f"trades={s['trades_today']}",
+        f"halted={1 if s['halted'] else 0}",
+        f"halt_reason={_oneline(s['halt_reason'])}",
+        f"goal_hit={1 if s['daily_goal_hit'] else 0}",
+        f"goal_target={goal['profit_target']:.0f}",
+        f"goal_loss={goal['max_daily_loss']:.0f}",
+        f"stale_drops={d.get('stale_drops', 0)}",
+    ]
+    ld = d.get("last_decision")
+    if ld:
+        lines += [
+            f"ld_time={_hhmmss(ld['ts'])}",
+            f"ld_action={ld['action']}",
+            f"ld_conf={ld['confidence']:.2f}",
+            f"ld_close={ld['close']:.10g}",
+            f"ld_order={ld.get('queued') or ''}",
+            f"ld_rationale={_oneline(ld.get('rationale', ''))}",
+        ]
+    for r in d.get("recent_decisions", [])[:8]:
+        lines.append(
+            f"row={_hhmmss(r['ts'])}|{r['action']}|{r['confidence']:.2f}"
+            f"|{r['close']:.10g}|{r.get('queued') or ''}"
+        )
+    plan = d.get("plan")
+    if isinstance(plan, dict):
+        for key in ("status", "direction", "entry_high", "entry_low", "bars_left", "note"):
+            value = plan.get(key)
+            if value is not None:
+                lines.append(f"plan_{key}={_oneline(value)}")
     return "\n".join(lines)
 
 

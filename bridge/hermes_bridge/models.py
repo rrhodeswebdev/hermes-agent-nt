@@ -19,12 +19,28 @@ class Action(StrEnum):
     EXIT = "EXIT"          # close the current position (any side)
     FLATTEN = "FLATTEN"    # hard close everything (kill switch / goal hit)
     WAIT = "WAIT"          # do nothing this bar
+    ARM_PLAN = "ARM_PLAN"  # agent-only: arm an entry plan (engine converts to a limit ENTER_*)
+    CANCEL_ENTRY = "CANCEL_ENTRY"  # kill the resting plan-entry limit order in NinjaTrader
 
 
 class Side(StrEnum):
     LONG = "LONG"
     SHORT = "SHORT"
     FLAT = "FLAT"
+
+
+class PlanSpec(BaseModel):
+    """An armed-entry plan: enter via a limit resting inside [entry_low, entry_high].
+
+    The agent proposes it (action=ARM_PLAN); the engine validates, risk-gates the
+    underlying ENTER_* command, and manages TTL/invalidation deterministically.
+    """
+
+    direction: Side                      # LONG | SHORT only (engine validates)
+    entry_low: float
+    entry_high: float
+    ttl_bars: int = 5                    # bars the plan stays armed (engine caps 1..10)
+    note: str = ""
 
 
 class Bar(BaseModel):
@@ -66,6 +82,12 @@ class Decision(BaseModel):
     stop_price: float | None = None
     target_price: float | None = None
     rationale: str = ""
+    # Armed-plan proposal (only meaningful with action=ARM_PLAN and armed_plans on).
+    plan: PlanSpec | None = None
+    # Transport metadata, not a trading signal: True while the bridge's bar store is
+    # too thin to compute trustworthy context (e.g. the bridge restarted mid-session
+    # and never received /ingest/history). NinjaTrader reacts by re-sending history.
+    need_history: bool = False
 
 
 class OrderCommand(BaseModel):
@@ -79,6 +101,8 @@ class OrderCommand(BaseModel):
     target_ticks: int | None = None
     stop_price: float | None = None
     target_price: float | None = None
+    # Rest the entry as a LIMIT at this price (plan entries). None = market order.
+    limit_price: float | None = None
     reason: str = ""
 
 

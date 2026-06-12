@@ -47,8 +47,9 @@ class RiskGate:
         last_price: float | None = None,
         now_ts: float | None = None,
     ) -> RiskDecision:
-        # Risk-reducing actions are never blocked.
-        if command.action in (Action.EXIT, Action.FLATTEN):
+        # Risk-reducing actions are never blocked (CANCEL_ENTRY kills a resting
+        # plan-entry limit order — strictly reduces exposure).
+        if command.action in (Action.EXIT, Action.FLATTEN, Action.CANCEL_ENTRY):
             qty = abs(session.position) if command.qty <= 0 else command.qty
             return RiskDecision(True, command.model_copy(update={"qty": qty}), ["risk_reducing"])
 

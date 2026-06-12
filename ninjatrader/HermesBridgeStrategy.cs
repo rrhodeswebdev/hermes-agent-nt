@@ -41,9 +41,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
     public class HermesBridgeStrategy : Strategy
     {
-        private static readonly HttpClient Http = new HttpClient();
+        // Timeout is neutralized at construction (the only legal moment — it locks after
+        // the first request): the 100s default would silently cap any HttpTimeoutMs above
+        // 100000. The per-request CancellationTokenSource is the single timeout authority.
+        private static readonly HttpClient Http =
+            new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         private bool historySent;
         private bool tradingDisabled;
+        // The resting plan-entry limit order (armed-plan split). Touched ONLY on the
+        // strategy thread (ExecuteCommand / OnOrderUpdate run there).
+        private Order _entryOrder;
 
         private const string LongSignal = "HermesLong";
         private const string ShortSignal = "HermesShort";
@@ -65,11 +72,19 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         public bool AllowLive { get; set; } = false;
 
-        // Must exceed the agent's decision time. LLM decisions (e.g. Codex) take ~15s,
-        // far longer than a rules engine, so this defaults high. Keep it below your bar
-        // interval to avoid overlapping requests.
+        // Windows timezone id of the CHART's "Time zone" setting (what Time[0] is
+        // expressed in). "Eastern Standard Time" = US ET incl. DST. If the bridge logs
+        // a bar.ts skew warning, set this to match the chart.
         [NinjaScriptProperty]
-        public int HttpTimeoutMs { get; set; } = 45000;
+        public string BarTimeZoneId { get; set; } = "Eastern Standard Time";
+
+        // MUST exceed the agent's decision time, or the bar POST is abandoned before the
+        // bridge finishes deciding and the command isn't fetched until the NEXT bar (late /
+        // stale). Claude-on-subscription decisions run ~30-115s, so set this to your bridge's
+        // agent timeout (config: agent.claude.timeout_s) and keep it just BELOW your bar
+        // interval to avoid overlapping requests. 2m bar + 115s bridge timeout -> 115000.
+        [NinjaScriptProperty]
+        public int HttpTimeoutMs { get; set; } = 115000;
 
         private string BaseUrl => string.Format("http://{0}:{1}", BridgeHost, BridgePort);
         #endregion
@@ -122,7 +137,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 string body = string.Format(
                     "{{\"instrument\":\"{0}\",\"timeframe\":\"{1}\",\"bar\":{2}}}",
                     Escape(Instrument.FullName), Escape(BarsPeriodString()), barJson);
-                await PostAsync("/ingest/bar", body);
+                string resp = await PostAsync("/ingest/bar", body);
+
+                // Self-healing history handshake: history is normally pushed once per
+                // ENABLE, so a bridge restarted mid-session has an empty bar store (it
+                // then computes EMAs/ATR on a thin live seed — 2026-06-11 incident).
+                // The bridge flags need_history on every bar response until
+                // /ingest/history arrives; re-send it, throttled.
+                if (resp != null && resp.Contains("\"need_history\":true"))
+                    MaybeResendHistory();
             }
             catch (Exception ex)
             {
@@ -142,6 +165,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 Print("Hermes bridge command poll error: " + ex.Message);
             }
+        }
+
+        private DateTime _lastHistResendUtc = DateTime.MinValue;
+
+        private void MaybeResendHistory()
+        {
+            // The flag re-arrives with every bar until history lands; one push per
+            // 120s is plenty (the payload is the full loaded series).
+            if ((DateTime.UtcNow - _lastHistResendUtc).TotalSeconds < 120) return;
+            _lastHistResendUtc = DateTime.UtcNow;
+            Print("Hermes: bridge requested a history re-send (bridge restarted?) — pushing.");
+            // Build the payload on the strategy thread — series access (Bars.GetTime
+            // et al.) is not safe from the HTTP continuation's pool thread.
+            // A restarted bridge has lost its armed plan: a resting plan entry would be
+            // an orphan nobody manages or cancels — kill it.
+            TriggerCustomEvent(o =>
+            {
+                CancelTrackedEntry("bridge restarted (plan state lost)");
+                _ = PostHistoryAsync();
+            }, null);
         }
 
         private async Task PostHistoryAsync()
@@ -207,18 +250,74 @@ namespace NinjaTrader.NinjaScript.Strategies
                 case "ENTER_LONG":
                     if (Position.MarketPosition != MarketPosition.Flat) return;
                     SetBracket(LongSignal, cmd);
-                    EnterLong(cmd.Qty <= 0 ? 1 : cmd.Qty, LongSignal);
+                    if (cmd.LimitPrice.HasValue)
+                        // Armed-plan entry: rest a live-until-cancelled limit — NT8's
+                        // matching engine is the intra-bar trigger; the bridge owns
+                        // expiry/invalidation via CANCEL_ENTRY.
+                        _entryOrder = EnterLongLimit(0, true, cmd.Qty <= 0 ? 1 : cmd.Qty,
+                            cmd.LimitPrice.Value, LongSignal);
+                    else
+                        EnterLong(cmd.Qty <= 0 ? 1 : cmd.Qty, LongSignal);
                     break;
                 case "ENTER_SHORT":
                     if (Position.MarketPosition != MarketPosition.Flat) return;
                     SetBracket(ShortSignal, cmd);
-                    EnterShort(cmd.Qty <= 0 ? 1 : cmd.Qty, ShortSignal);
+                    if (cmd.LimitPrice.HasValue)
+                        _entryOrder = EnterShortLimit(0, true, cmd.Qty <= 0 ? 1 : cmd.Qty,
+                            cmd.LimitPrice.Value, ShortSignal);
+                    else
+                        EnterShort(cmd.Qty <= 0 ? 1 : cmd.Qty, ShortSignal);
+                    break;
+                case "CANCEL_ENTRY":
+                    CancelTrackedEntry("bridge cancel");
                     break;
                 case "EXIT":
                 case "FLATTEN":
+                    // The kill switch must also kill a resting plan entry.
+                    if (cmd.Action == "FLATTEN") CancelTrackedEntry("flatten");
                     if (Position.MarketPosition == MarketPosition.Long) ExitLong();
                     else if (Position.MarketPosition == MarketPosition.Short) ExitShort();
                     break;
+            }
+        }
+
+        private void CancelTrackedEntry(string why)
+        {
+            var order = _entryOrder;
+            _entryOrder = null;
+            if (order == null) return;
+            try
+            {
+                if (order.OrderState == OrderState.Working
+                    || order.OrderState == OrderState.Accepted
+                    || order.OrderState == OrderState.Submitted)
+                {
+                    Print("Hermes: cancelling resting plan entry (" + why + ").");
+                    CancelOrder(order);
+                }
+            }
+            catch (Exception ex)
+            {
+                Print("Hermes: cancel entry error: " + ex.Message);
+            }
+        }
+
+        protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice,
+            int quantity, int filled, double averageFillPrice, OrderState orderState,
+            DateTime time, ErrorCode error, string comment)
+        {
+            // Pitfall #21: never let an event-handler exception surface as a generic
+            // NT8 "Exception thrown by target of invocation" popup.
+            try
+            {
+                if (order == null || _entryOrder == null || order != _entryOrder) return;
+                if (orderState == OrderState.Filled || orderState == OrderState.Cancelled
+                    || orderState == OrderState.Rejected)
+                    _entryOrder = null;   // terminal — nothing left to cancel later
+            }
+            catch (Exception ex)
+            {
+                Print("Hermes: OnOrderUpdate error: " + ex.Message);
             }
         }
 
@@ -258,10 +357,31 @@ namespace NinjaTrader.NinjaScript.Strategies
             return 0;
         }
 
-        private static double EpochSeconds(DateTime t)
+        private TimeZoneInfo _barTz;
+
+        private double EpochSeconds(DateTime t)
         {
+            // Time[0] / fill times arrive in the CHART's display timezone with
+            // Kind=Unspecified. Neither ToUniversalTime() (assumes MACHINE tz) nor
+            // Globals.GeneralOptions.TimeZoneInfo (the GLOBAL option — Time[0] follows
+            // the per-chart Time zone, verified 2026-06-11: both skewed bar ts +3h on a
+            // PT box with ET charts) converts correctly. So the timezone is an explicit
+            // property (BarTimeZoneId, default ET). If it's ever wrong, the bridge logs
+            // "[warn] bar.ts is Xh off server UTC" within one bar — fix the property.
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            return Math.Floor((t.ToUniversalTime() - epoch).TotalSeconds);
+            DateTime utc;
+            try
+            {
+                if (_barTz == null)
+                    _barTz = TimeZoneInfo.FindSystemTimeZoneById(BarTimeZoneId);
+                utc = TimeZoneInfo.ConvertTimeToUtc(
+                    DateTime.SpecifyKind(t, DateTimeKind.Unspecified), _barTz);
+            }
+            catch
+            {
+                utc = t.ToUniversalTime();   // bad tz id / DST edge: old behavior
+            }
+            return Math.Floor((utc - epoch).TotalSeconds);
         }
 
         private string BarsPeriodString()
@@ -283,14 +403,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             return s == null ? "" : s.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
-        // Per-request timeout via CancellationToken. We never mutate Http.Timeout because
-        // Http is a shared static client: once it has sent a request its Timeout is locked,
-        // and setting it again (e.g. on a strategy re-enable) throws InvalidOperationException.
-        private async Task PostAsync(string path, string json)
+        // Per-request timeout via CancellationToken — the ONLY timeout in play: Http.Timeout
+        // is InfiniteTimeSpan since construction (mutating it later throws once the shared
+        // static client has sent a request; left at its 100s default it would race — and
+        // beat — any HttpTimeoutMs above 100000, aborting the POST while the bridge still
+        // queues the command for the NEXT bar's poll: a stale entry).
+        // Returns the response body (used for the need_history handshake; ignored elsewhere).
+        private async Task<string> PostAsync(string path, string json)
         {
             using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
             using (var cts = new CancellationTokenSource(HttpTimeoutMs))
-                await Http.PostAsync(BaseUrl + path, content, cts.Token);
+            using (var resp = await Http.PostAsync(BaseUrl + path, content, cts.Token))
+                return await resp.Content.ReadAsStringAsync();
         }
 
         private async Task<string> GetAsync(string path)
@@ -309,6 +433,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             public int? TargetTicks;
             public double? StopPrice;
             public double? TargetPrice;
+            public double? LimitPrice;   // armed-plan entry: rest a limit at this price
         }
 
         private static HermesCommand ParseCommand(string resp)
@@ -326,6 +451,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TargetTicks = MatchInt(resp, "target_ticks"),
                 StopPrice = MatchDouble(resp, "stop_price"),
                 TargetPrice = MatchDouble(resp, "target_price"),
+                LimitPrice = MatchDouble(resp, "limit_price"),
             };
         }
 

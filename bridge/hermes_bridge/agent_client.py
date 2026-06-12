@@ -126,29 +126,85 @@ class MockAgentClient(AgentClient):
 # --------------------------------------------------------------------------- #
 # Hermes Agent client (LLM judgment)                                          #
 # --------------------------------------------------------------------------- #
-DECISION_INSTRUCTION = """\
+def decision_instruction(armed_plans: bool) -> str:
+    """The task framing appended to the system prompt. With armed_plans on, the agent
+    may ARM an entry plan (zone + TTL, rested as a limit) instead of immediate entries."""
+    actions = "ENTER_LONG|ENTER_SHORT|EXIT|WAIT" + ("|ARM_PLAN" if armed_plans else "")
+    plan_field = (
+        ',\n "plan": {"direction": "LONG|SHORT", "entry_low": <price>, '
+        '"entry_high": <price>,\n          "ttl_bars": <int 1-10>, '
+        '"note": "<short>"}  // ARM_PLAN only'
+        if armed_plans else "")
+    plan_guidance = (
+        "\nARM_PLAN (PREFERRED for entries): your decision takes 25-115s to reach the "
+        "market — an immediate ENTER_* chases price and may be dropped as stale. "
+        "Instead, ARM a plan: a tight entry zone at the price you actually want (e.g. "
+        "the fast-EMA tag zone for a pullback), stop/target as usual, and ttl_bars of "
+        "patience (3-5 typical). The bridge rests a limit at the zone edge: it fills "
+        "at your price or not at all, and auto-cancels on TTL expiry, a bar close "
+        "through the far side of the zone, or a session halt. While your plan is "
+        "armed you are not consulted; normal decisions resume when it resolves.\n"
+        if armed_plans else "")
+    return f"""\
 === YOUR TASK ===
 Using the trading rules and knowledge above, decide ONE action for the CURRENT bar
 from the market state that follows. Reply with EXACTLY one fenced json block and
 nothing else:
 
 ```json
-{"action": "ENTER_LONG|ENTER_SHORT|EXIT|WAIT",
+{{"action": "{actions}",
  "confidence": 0.0-1.0,
  "qty": <int contracts>,
  "stop_ticks": <int or null>,
  "target_ticks": <int or null>,
- "rationale": "<one short sentence>"}
+ "rationale": "<one short sentence>"{plan_field}}}
 ```
-Most bars are WAIT — only act on a clean setup. If unsure, choose WAIT. The bridge
+{plan_guidance}Most bars are WAIT — only act on a clean setup. If unsure, choose WAIT. The bridge
 re-checks every order against the hard risk limits and may clamp or reject it.
 """
+
+
+DECISION_INSTRUCTION = decision_instruction(False)  # back-compat: the plans-off variant
 
 # Context files concatenated into the system prompt, in priority order.
 _CONTEXT_ORDER = [
     "HERMES.md", "strategy.md", "order-flow.md", "price-action.md",
     "risk-management.md", "daily-goal.md",
 ]
+
+
+def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
+    """Concatenate the *.md context files in priority order into one string."""
+    order = order or _CONTEXT_ORDER
+    d = Path(context_dir)
+    if not d.is_dir():
+        return ""
+    parts: list[str] = []
+    for name in order:
+        f = d / name
+        if f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    for f in sorted(d.glob("*.md")):
+        if f.name not in order and f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n\n---\n\n".join(parts)
+
+
+def build_user_prompt(req: AgentRequest) -> str:
+    """Frame the current market state as the agent's user message."""
+    bars = [
+        {"ts": b.ts, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
+        for b in req.recent_bars[-30:]
+    ]
+    payload = {
+        "mode": req.mode,
+        "instrument": req.account.instrument,
+        "timeframe": req.account.timeframe,
+        "context": req.context.to_dict(),
+        "account": req.account.model_dump(),
+        "recent_bars": bars,
+    }
+    return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
 
 
 class HermesAgentClient(AgentClient):
@@ -180,38 +236,15 @@ class HermesAgentClient(AgentClient):
         knowledge = self._load_context_files()
         if not knowledge:
             knowledge = self.cfg.agent.hermes.context_hint
-        self._system = f"{knowledge}\n\n{DECISION_INSTRUCTION}"
+        self._system = (
+            f"{knowledge}\n\n{decision_instruction(self.cfg.execution.armed_plans)}")
         return self._system
 
     def _load_context_files(self) -> str:
-        d = Path(self.cfg.agent.hermes.context_dir)
-        if not d.is_dir():
-            return ""
-        parts: list[str] = []
-        for name in _CONTEXT_ORDER:
-            f = d / name
-            if f.is_file():
-                parts.append(f.read_text())
-        # Include any other *.md not in the explicit order.
-        for f in sorted(d.glob("*.md")):
-            if f.name not in _CONTEXT_ORDER and f.is_file():
-                parts.append(f.read_text())
-        return "\n\n---\n\n".join(parts)
+        return load_context_files(self.cfg.agent.hermes.context_dir)
 
     def _user_prompt(self, req: AgentRequest) -> str:
-        bars = [
-            {"ts": b.ts, "o": b.open, "h": b.high, "l": b.low, "c": b.close, "v": b.volume}
-            for b in req.recent_bars[-30:]
-        ]
-        payload = {
-            "mode": req.mode,
-            "instrument": req.account.instrument,
-            "timeframe": req.account.timeframe,
-            "context": req.context.to_dict(),
-            "account": req.account.model_dump(),
-            "recent_bars": bars,
-        }
-        return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
+        return build_user_prompt(req)
 
     # ---- runtime call -------------------------------------------------------
     def _ask(self, system: str, user: str) -> str:
@@ -241,8 +274,8 @@ class HermesAgentClient(AgentClient):
         return self._agent
 
     def _ask_cli(self, system: str, user: str) -> str:
-        # Hermes oneshot: `hermes -z "<prompt>"`. Reuses Hermes' provider/auth resolution
-        # (e.g. OpenAI Codex OAuth), unlike a bare in-process AIAgent() construction.
+        # Hermes oneshot: `hermes -z "<prompt>"`. Reuses Hermes' own provider/auth
+        # resolution (its OAuth logins), unlike a bare in-process AIAgent() construction.
         h = self.cfg.agent.hermes
         out = subprocess.run(
             [h.hermes_bin, "-z", f"{system}\n\n{user}"],
@@ -281,4 +314,7 @@ def _extract_json(text: str) -> str | None:
 def build_agent_client(config: BridgeConfig) -> AgentClient:
     if config.agent.client == "hermes":
         return HermesAgentClient(config)
+    if config.agent.client == "claude":
+        from .claude_agent import ClaudeAgentClient  # lazy: avoid circular import
+        return ClaudeAgentClient(config)
     return MockAgentClient(config)

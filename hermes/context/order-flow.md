@@ -20,6 +20,21 @@ the move has force behind it*.
 - **Exhaustion** — a climactic surge of delta into a level that then fails to extend.
   A reason to NOT chase, and sometimes to exit.
 
+## Session matters — judge delta relative to volume
+
+`recent_delta` is **volume-weighted**, so the same conviction prints a much smaller number
+overnight. Each bar is tagged with `session`:
+
+- **RTH** (09:30–16:00 ET) — the regular cash session, heavy volume; deltas run large.
+- **ETH** — overnight / extended hours, often a *fraction* of RTH volume; deltas run small.
+
+**Do not demand RTH-sized delta in ETH** — a −100 overnight can mean what a −3,000 means
+midday. Use **`delta_ratio`** (net delta ÷ recent volume, ≈ −1…+1) as the session-independent
+read of force: it answers *"what fraction of recent flow was one-sided"* regardless of how
+much volume printed. Rough guide: |`delta_ratio`| ≳ 0.15–0.20 = genuine one-sided pressure;
+near 0 = balanced / absorptive. Lean on `delta_ratio` for **force**, and on `recent_delta` +
+`session` for raw magnitude and context.
+
 ## How you use it in this strategy
 
 You are a **with-trend pullback** trader, so you use order flow to confirm that the

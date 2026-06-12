@@ -43,6 +43,24 @@ closes back below it as a bearish bar, `recent_delta <= 0`, room to the downside
 - You may specify `stop_ticks` / `target_ticks` explicitly; if you omit a stop, the
   bridge injects a default — but you should always set one deliberately.
 
+## Armed plans (preferred entry mechanism, when ARM_PLAN is available)
+
+Your decision takes 25–115 s to reach the market. An immediate `ENTER_*` is a MARKET
+order sent after that delay — it chases price and may be dropped as stale. When the
+setup is valid, prefer **`ARM_PLAN`**:
+
+- `plan.direction` — LONG or SHORT (with the trend, as always).
+- `plan.entry_low` / `plan.entry_high` — a tight zone at the price you actually want
+  (for a long pullback: around the fast-EMA tag; the zone top is where you'd buy).
+- `plan.ttl_bars` — patience in bars (3–5 typical, 10 max).
+- `stop_ticks` / `target_ticks` — exactly as for a normal entry (the stop is mandatory).
+
+The bridge rests a **limit order at the zone edge** (long: `entry_high`, short:
+`entry_low`): it fills at your price or not at all — zero decision latency at the
+trigger. The plan auto-cancels on TTL expiry, on a bar CLOSE through the far side of
+the zone (thesis broken), or on a session halt. While a plan is armed you are not
+consulted; normal per-bar decisions resume once it resolves. One plan at a time.
+
 ## Trade management (when already in a position)
 
 - The resting bracket handles the normal stop-out and target. **Let it work.**
