@@ -77,6 +77,26 @@ def test_persistent_decide_uses_session_not_oneshot(monkeypatch):
     assert d.rationale == "session"
 
 
+def test_session_recycled_after_max_turns(monkeypatch):
+    # The conversation grows with every turn (and its latency with it): a session
+    # at the turn cap must be killed and replaced, not asked again.
+    spawned: list[_FakeProc] = []
+
+    def popen(*a, **k):
+        proc = _FakeProc([_result_line({"action": "WAIT", "rationale": "session"})])
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.Popen", popen)
+    c = make_claude_client()
+    c.cfg.agent.claude.persistent = True
+    c.cfg.agent.claude.max_session_turns = 1
+    c.decide(make_agent_request(c.cfg))
+    c.decide(make_agent_request(c.cfg))
+    assert len(spawned) == 2
+    assert spawned[0].killed
+
+
 def test_persistent_decide_falls_back_to_oneshot_on_dead_session(fake_claude, monkeypatch):
     # Session child answers nothing (EOF immediately) → client degrades to the
     # one-shot path for the same request.

@@ -44,6 +44,9 @@ def render_text(d: dict | None) -> str:
     if pl:
         detail = pl.get("conditions") or pl.get("last_error") or ""
         lines.append(f"plan[{pl['status']}]: {detail}"[:60])
+        if pl.get("session_error"):
+            # The pre-session study failed: every plan runs without the brief.
+            lines.append(f"session ERROR: {pl['session_error']}"[:60])
     lines.append("-" * 40)
     ld = d.get("last_decision")
     if ld:

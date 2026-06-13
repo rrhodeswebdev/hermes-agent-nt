@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from hermes_bridge.claude_cli import extract_structured, run_claude_oneshot
 from hermes_bridge.config import ClaudeClientConfig
 
@@ -34,6 +36,15 @@ def test_run_claude_oneshot_builds_command(fake_claude):
     assert "haiku" in cmd
     assert "--system-prompt-file" in cmd
     assert captured["input"] == "USR"
+
+
+def test_oneshot_nonzero_exit_raises_with_stderr(fake_claude):
+    # A hard CLI failure (auth expiry, bad flag) must surface the stderr text —
+    # empty stdout would otherwise read downstream as "model returned nothing".
+    fake_claude(stdout="", stderr="Invalid API key - please run claude login",
+                returncode=1)
+    with pytest.raises(RuntimeError, match="Invalid API key"):
+        run_claude_oneshot(ClaudeClientConfig(), "SYS", "USR")
 
 
 def test_oneshot_caps_thinking_via_env(fake_claude):

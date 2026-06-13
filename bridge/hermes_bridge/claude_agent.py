@@ -179,12 +179,17 @@ class ClaudeAgentClient(AgentClient):
 
     # ---- pre-armed plan cycle -------------------------------------------------
     def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
-        """Between-bars analysis. Parse failures return None (stay/become unarmed);
+        """Between-bars analysis. Parse failures return None (the Planner reports the
+        error; a previously armed plan stays live until staleness retires it);
         transport errors (incl. BrainTimeout) propagate for the Planner to report."""
         reply = self._ask(self._system_prompt(PLAN_INSTRUCTION), build_plan_prompt(preq),
                           PLAN_JSON_SCHEMA, timeout_s=self.cfg.planner.plan_timeout_s)
         data = extract_structured(reply)
-        if data is None:
+        if data is None or "triggers" not in data:
+            # JSON without the schema-required "triggers" key is scraped garbage, not
+            # a plan: every TradePlan field has a default, so it would validate into
+            # an all-defaults plan, arm, and could replace a real exit rule with
+            # "hold (bracket only)".
             return None
         try:
             return TradePlan.model_validate(data)
@@ -234,12 +239,20 @@ class ClaudeAgentClient(AgentClient):
 
     def _session_ask(self, system: str, user: str, json_schema: str,
                      timeout_s: float | None) -> str:
+        c = self.cfg.agent.claude
         key = (system, json_schema)
         sess = self._sessions.get(key)
-        if sess is None or not sess.alive():
-            if sess is not None:
-                sess.close()
-            sess = ClaudeSession(self.cfg.agent.claude, system, json_schema)
+        if sess is not None and (
+            not sess.alive()
+            or (c.max_session_turns is not None and sess.turns >= c.max_session_turns)
+        ):
+            # Dead, or at the turn cap: the conversation grows with every turn and
+            # its latency with it — recycle before it outgrows the plan budget.
+            sess.close()
+            self._sessions.pop(key, None)
+            sess = None
+        if sess is None:
+            sess = ClaudeSession(c, system, json_schema)
             self._sessions[key] = sess
         try:
             return sess.ask(user, timeout_s)

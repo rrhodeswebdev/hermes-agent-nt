@@ -22,7 +22,7 @@ from .config import BridgeConfig
 from .indicators import MarketContext, build_context
 from .levels import detect_levels
 from .models import AccountState, Action, Bar, Decision, Fill, Level, Mode, OrderCommand
-from .plan import Planner, PlanRequest, evaluate_plan
+from .plan import Planner, PlanRequest, TradePlan, evaluate_plan
 from .risk import RiskGate
 from .session import SessionState
 from .store import BarStore
@@ -88,8 +88,9 @@ class TradingEngine:
         if mode == "seek_entry" and self.session.halted:
             return EngineResult(Decision(action=Action.WAIT, rationale="halted"), None, mode)
 
+        armed = self.planner.current_plan() if self.planner is not None else None
         if self.planner is not None:
-            decision = self._evaluate_armed_plan(bar, mode)
+            decision = self._evaluate_armed_plan(armed, bar, mode)
         else:
             decision = self.agent.decide(
                 AgentRequest(mode=mode, context=ctx, recent_bars=bars, account=account)
@@ -108,6 +109,10 @@ class TradingEngine:
             rd = self.risk.evaluate(cmd, self.session, last_price=bar.close, now_ts=bar.ts)
             result = EngineResult(decision, rd.command if rd.approved else None, mode,
                                   rd.reasons)
+            if armed is not None and result.command is not None:
+                # The armed plan produced a queued order: a plan fires at most once,
+                # even if the fill (and the re-arming analysis) is still in flight.
+                self.planner.consume(armed)
         # Schedule the between-bars analysis AFTER the instant answer is known, so
         # the next plan can assume the optimistic post-fill position of anything
         # queued this close. With a synchronous planner this arms before we return.
@@ -116,8 +121,7 @@ class TradingEngine:
         return result
 
     # ---- pre-armed plan cycle -------------------------------------------------
-    def _evaluate_armed_plan(self, bar: Bar, mode: Mode) -> Decision:
-        plan = self.planner.current_plan()
+    def _evaluate_armed_plan(self, plan: TradePlan | None, bar: Bar, mode: Mode) -> Decision:
         if plan is None:
             return Decision(action=Action.WAIT, rationale="no_plan (analysis pending)")
         if plan.based_on_bar_ts >= bar.ts:
@@ -137,11 +141,13 @@ class TradingEngine:
             )
         return evaluate_plan(plan, bar, self.session.position)
 
-    def _plan_is_stale(self, plan) -> bool:
-        # Stale when the basis bar has scrolled out of the last max_age+1 closes.
+    def _plan_is_stale(self, plan: TradePlan) -> bool:
+        # Dead once the basis bar is max_plan_age_bars closes old — i.e. it has
+        # scrolled out of the last max_age closes. Matches the config promise: "a
+        # plan based on a bar this many closes old no longer fires".
         max_age = self.cfg.planner.max_plan_age_bars
-        recent = self.store.recent(max_age + 1)
-        return len(recent) > max_age and all(
+        recent = self.store.recent(max_age)
+        return len(recent) >= max_age and all(
             b.ts > plan.based_on_bar_ts for b in recent
         )
 

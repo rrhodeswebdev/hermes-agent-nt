@@ -1,4 +1,16 @@
+import pytest
+from pydantic import ValidationError
+
 from hermes_bridge.config import BridgeConfig, load_config
+
+
+def test_load_config_rejects_legacy_hermes_client(tmp_path):
+    # The Codex-era value must fail loudly at load — never silently fall back to
+    # the mock rules brain, which arms triggers and places orders on its own.
+    p = tmp_path / "trading.yaml"
+    p.write_text("agent:\n  client: hermes\n")
+    with pytest.raises(ValidationError):
+        load_config(str(p))
 
 
 def test_defaults_have_claude_block():

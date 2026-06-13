@@ -70,6 +70,13 @@ def run_claude_oneshot(c: ClaudeClientConfig, system: str, user: str,
             )
         except subprocess.TimeoutExpired as exc:
             raise BrainTimeout(budget) from exc
+        if out.returncode != 0:
+            # Surface the real CLI failure (auth expiry, bad flag, …); empty stdout
+            # would otherwise read downstream as "model returned nothing".
+            err = (out.stderr or "").strip()
+            msg = f"claude CLI exited {out.returncode}: {err[:400] or '(no stderr)'}"
+            print(f"[claude] {msg}", flush=True)
+            raise RuntimeError(msg)
         return out.stdout
     finally:
         try:
@@ -92,11 +99,17 @@ class ClaudeSession:
                  json_schema: str | None = None) -> None:
         self._c = c
         self._lock = threading.Lock()  # one in-flight turn at a time
+        self.turns = 0  # user turns asked; drives max_session_turns recycling
         tmp = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
                                           encoding="utf-8")
         tmp.write(system)
         tmp.close()
         self._prompt_path = tmp.name
+        # stderr goes to a temp file: DEVNULL would discard the actual CLI error
+        # (auth expiry, bad flag) and an undrained PIPE could deadlock the child.
+        err = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False,
+                                          encoding="utf-8")
+        self._stderr_path = err.name
         cmd = [
             c.claude_bin, "-p",
             "--model", c.model,
@@ -114,9 +127,10 @@ class ClaudeSession:
         cmd.extend(c.extra_args)
         self._proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            stderr=err, text=True, encoding="utf-8",
             errors="replace", env=_thinking_env(c),
         )
+        err.close()  # the child holds its own fd; ours is only for the path
         # stdout is drained by a thread so ask() can enforce a deadline.
         self._lines: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=self._read_loop, daemon=True,
@@ -152,23 +166,37 @@ class ClaudeSession:
                     self.close()
                     raise BrainTimeout(budget) from None
                 if line is None:
-                    raise RuntimeError("claude session closed mid-turn (EOF)")
+                    tail = self._stderr_tail()
+                    msg = ("claude session closed mid-turn (EOF)"
+                           + (f": {tail}" if tail else ""))
+                    print(f"[claude] {msg}", flush=True)
+                    raise RuntimeError(msg)
                 try:
                     obj = json.loads(line)
                 except Exception:  # noqa: BLE001 — skip any non-JSON noise
                     continue
                 if obj.get("type") == "result":
+                    self.turns += 1
                     return line
+
+    def _stderr_tail(self, limit: int = 400) -> str:
+        try:
+            text = Path(self._stderr_path).read_text(
+                encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        return text[-limit:]
 
     def close(self) -> None:
         try:
             self._proc.kill()
         except Exception:  # noqa: BLE001
             pass
-        try:
-            Path(self._prompt_path).unlink()
-        except OSError:
-            pass
+        for path in (self._prompt_path, self._stderr_path):
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
 
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)

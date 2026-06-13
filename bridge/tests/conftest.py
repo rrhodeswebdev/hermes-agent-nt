@@ -99,7 +99,8 @@ def fake_claude(monkeypatch):
     the last invocation (cmd/input/env/timeout). Pass `exc` to make the call raise.
     """
 
-    def install(stdout: str = "OUT", exc: Exception | None = None) -> dict:
+    def install(stdout: str = "OUT", exc: Exception | None = None,
+                returncode: int = 0, stderr: str = "") -> dict:
         captured: dict = {}
 
         def fake_run(cmd, **kwargs):
@@ -109,7 +110,8 @@ def fake_claude(monkeypatch):
             captured["timeout"] = kwargs.get("timeout")
             if exc is not None:
                 raise exc
-            return types.SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+            return types.SimpleNamespace(stdout=stdout, stderr=stderr,
+                                         returncode=returncode)
 
         monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
         return captured

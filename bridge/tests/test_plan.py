@@ -248,9 +248,77 @@ def test_stale_plan_is_discarded(cfg):
     bars = synthetic_bars(6)
     engine.on_bar(bars[0])                                   # arms (basis bar 0)
     assert "no_trigger" in engine.on_bar(bars[1]).decision.rationale   # age 1
-    assert "no_trigger" in engine.on_bar(bars[2]).decision.rationale   # age 2
-    r3 = engine.on_bar(bars[3])                                        # age 3 → stale
-    assert r3.decision.rationale.startswith("plan_stale")
+    # Config promise: "a plan based on a bar this many closes old no longer fires".
+    r2 = engine.on_bar(bars[2])                                        # age 2 → stale
+    assert r2.decision.rationale.startswith("plan_stale")
+
+
+def test_fired_trigger_is_consumed_never_refires_before_fill(cfg):
+    """The doubling bug: trigger fires, the fill is lost/delayed (position still 0)
+    and the follow-up analysis returns nothing — the SAME plan must not fire again
+    on the next close and queue a second entry."""
+    cfg.planner.max_plan_age_bars = 5  # keep the plan fresh so consume is what blocks
+
+    class OneShotFire(MockAgentClient):
+        def __init__(self, config):
+            super().__init__(config)
+            self.calls = 0
+
+        def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
+            self.calls += 1
+            if self.calls > 1:
+                return None  # analysis goes dark after arming once
+            return TradePlan(mode="seek_entry", triggers=[EntryTrigger(
+                direction="long", min_close=0.0, qty=1, stop_ticks=8,
+                target_ticks=16, confidence=0.9)])
+
+    engine, session, planner = _engine(cfg, OneShotFire(cfg))
+    bars = synthetic_bars(4)
+    engine.on_bar(bars[0])                       # arms (basis bar 0)
+    r1 = engine.on_bar(bars[1])
+    assert r1.command is not None and r1.command.action is Action.ENTER_LONG
+    r2 = engine.on_bar(bars[2])                  # no fill arrived; close still in band
+    assert r2.command is None
+    assert r2.decision.action is Action.WAIT
+
+
+def test_session_failure_survives_subsequent_arm(cfg):
+    """A failed pre-session study must stay visible after the inline plan arms
+    (arm() clears last_error): every plan that day runs without the brief."""
+
+    class BoomSession(MockAgentClient):
+        def analyze_session(self, preq, history):
+            raise RuntimeError("study blew up")
+
+    planner = Planner(cfg, BoomSession(cfg), synchronous=True)
+    bars = synthetic_bars(200)
+    planner.schedule_session_analysis(bars, _preq(cfg, bars=bars))
+    snap = planner.snapshot()
+    assert snap["status"] == "armed"             # the inline plan still armed
+    assert snap["last_error"] == ""              # ...and cleared the generic error
+    assert snap["session_error"].startswith("session_analysis:")
+
+
+def test_session_restudy_skipped_when_brief_exists(cfg):
+    """A mid-session reconnect re-posts history; the study must not re-run (it
+    would blind the plan cycle for minutes) — only the plan refreshes."""
+    calls = {"session": 0, "plan": 0}
+
+    class Counting(MockAgentClient):
+        def analyze_session(self, preq, history):
+            calls["session"] += 1
+            return super().analyze_session(preq, history)
+
+        def propose_plan(self, preq):
+            calls["plan"] += 1
+            return super().propose_plan(preq)
+
+    planner = Planner(cfg, Counting(cfg), synchronous=True)
+    bars = synthetic_bars(200)
+    planner.schedule_session_analysis(bars, _preq(cfg, bars=bars))
+    planner.schedule_session_analysis(bars, _preq(cfg, bars=bars))
+    assert calls["session"] == 1
+    assert calls["plan"] == 2                    # the reconnect still refreshes the plan
 
 
 def test_plan_based_on_current_bar_not_active_yet(cfg):
@@ -338,6 +406,15 @@ def test_claude_propose_plan_garbage_returns_none(fake_claude):
     assert c.propose_plan(_preq(c.cfg)) is None
 
 
+def test_claude_propose_plan_rejects_json_without_triggers(fake_claude):
+    # Scraped JSON lacking the schema-required "triggers" key must not validate
+    # into an all-defaults plan (which would arm — and in manage mode replace a
+    # real exit rule with "hold").
+    fake_claude(json.dumps({"is_error": False, "result": 'note: {"note":"hi"}'}))
+    c = make_claude_client()
+    assert c.propose_plan(_preq(c.cfg)) is None
+
+
 def test_claude_session_brief_is_free_text(fake_claude):
     captured = fake_claude(
         json.dumps({"is_error": False, "result": "Regime: trending up. Key levels..."}))
@@ -370,3 +447,13 @@ def test_build_agent_client_plans_are_optional_for_base(cfg):
     # Any AgentClient that doesn't implement planning degrades safely to None/"".
     agent = build_agent_client(cfg)
     assert isinstance(agent, MockAgentClient)
+
+
+def test_build_agent_client_rejects_unknown_client(cfg):
+    import pytest
+
+    # Assignment (the HERMES_BRIDGE_AGENT env override) bypasses config validation;
+    # a stale legacy value must error, never silently trade with the mock brain.
+    cfg.agent.client = "hermes"
+    with pytest.raises(ValueError, match="hermes"):
+        build_agent_client(cfg)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -74,6 +75,11 @@ class ClaudeClientConfig(BaseModel):
     # of a fresh process per decision. Falls back to one-shot calls on any session
     # failure. Saves the 1-3s CLI cold start on every analysis.
     persistent: bool = False
+    # A persistent session accumulates one conversation turn per analysis, so its
+    # context (and therefore latency) grows all session long. Recycle the child after
+    # this many turns — one cold start every N analyses instead of latency creeping
+    # past the plan budget. None = never recycle.
+    max_session_turns: int | None = 40
     extra_args: list[str] = Field(default_factory=list)  # appended verbatim to the claude argv
     # Directory of *.md context files loaded verbatim into the system prompt (this is
     # how the agent learns the strategy/order-flow/risk/goal). Absolute or relative to CWD.
@@ -86,7 +92,10 @@ class ClaudeClientConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    client: str = "mock"              # mock | claude
+    # Validated: a stale value (e.g. the legacy "hermes" brain, replaced by "claude")
+    # must fail loudly at load — never silently fall back to the mock rules brain,
+    # which arms triggers and places orders on its own.
+    client: Literal["mock", "claude"] = "mock"
     claude: ClaudeClientConfig = Field(default_factory=ClaudeClientConfig)
 
 

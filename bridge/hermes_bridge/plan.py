@@ -185,9 +185,11 @@ class Planner:
         self.synchronous = synchronous
         self._lock = threading.Lock()
         self._plan: TradePlan | None = None
+        self._consumed_ts: float | None = None  # basis ts of the last fired plan
         self._brief: str = ""
-        self._status: str = "idle"   # idle|analyzing_session|analyzing|armed|error
+        self._status: str = "idle"   # idle|analyzing_session|analyzing|armed|consumed|error
         self._last_error: str = ""
+        self._session_error: str = ""  # survives arm(); the brief failed for the day
         # background worker (lazy; latest-request-wins slots)
         self._cv = threading.Condition()
         self._pending_session: tuple[list[Bar], PlanRequest] | None = None
@@ -208,6 +210,7 @@ class Planner:
             return {
                 "status": self._status,
                 "last_error": self._last_error,
+                "session_error": self._session_error,
                 "session_brief_chars": len(self._brief),
                 "conditions": self._plan.describe_conditions() if self._plan else None,
                 "plan": self._plan.model_dump() if self._plan else None,
@@ -215,6 +218,12 @@ class Planner:
 
     # ---- scheduling ---------------------------------------------------------
     def schedule_session_analysis(self, history: list[Bar], preq: PlanRequest) -> None:
+        if self.session_brief():
+            # Mid-session reconnect (NinjaTrader re-enables and re-posts history):
+            # the study already ran, and re-deriving it would blind the plan cycle
+            # for minutes. Just refresh the plan from this snapshot.
+            self.schedule_plan_analysis(preq)
+            return
         if self.synchronous:
             self._run_session(history, preq)
             return
@@ -238,7 +247,10 @@ class Planner:
         try:
             brief = self.agent.analyze_session(preq, history) or ""
         except Exception as exc:  # noqa: BLE001 — analysis failure must never crash ingest
-            self._set_status("error", f"session_analysis:{describe_analysis_error(exc)}")
+            err = f"session_analysis:{describe_analysis_error(exc)}"
+            with self._lock:
+                self._session_error = err  # arm() clears last_error; this one persists
+            self._set_status("error", err)
             brief = ""
         with self._lock:
             self._brief = brief.strip()
@@ -252,7 +264,8 @@ class Planner:
                        prior_plan=self.current_plan())
         try:
             plan = self.agent.propose_plan(preq)
-        except Exception as exc:  # noqa: BLE001 — fail safe: stay/become unarmed
+        except Exception as exc:  # noqa: BLE001 — report it; any previously armed plan
+            # stays live until staleness retires it (graceful degradation, test-pinned)
             self._set_status("error", f"plan_analysis:{describe_analysis_error(exc)}")
             return
         if plan is None:
@@ -264,12 +277,28 @@ class Planner:
         self.arm(plan)
 
     def arm(self, plan: TradePlan) -> None:
-        """Install a plan — unless one based on a newer bar is already armed."""
+        """Install a plan — unless one based on a newer bar is already armed, or an
+        equally-new one already fired (a consumed plan must never re-arm and fire
+        twice)."""
         with self._lock:
+            if self._consumed_ts is not None and plan.based_on_bar_ts <= self._consumed_ts:
+                return
             if self._plan is None or plan.based_on_bar_ts >= self._plan.based_on_bar_ts:
                 self._plan = plan
                 self._status = "armed"
                 self._last_error = ""
+
+    def consume(self, plan: TradePlan) -> None:
+        """Disarm after the plan produced a queued order: a plan fires at most once.
+
+        Without this, the same trigger band fires again on the next close whenever
+        the fill (or the follow-up analysis, whose budget can exceed the bar period)
+        is still in flight — doubling the position."""
+        with self._lock:
+            if self._plan is plan:
+                self._plan = None
+                self._consumed_ts = plan.based_on_bar_ts
+                self._status = "consumed"
 
     def _set_status(self, status: str, error: str = "") -> None:
         with self._lock:

@@ -269,7 +269,16 @@ def build_user_prompt(req: AgentRequest) -> str:
 
 
 def build_agent_client(config: BridgeConfig) -> AgentClient:
-    if config.agent.client == "claude":
+    client = config.agent.client
+    if client == "claude":
         from .claude_agent import ClaudeAgentClient  # lazy: avoid circular import
         return ClaudeAgentClient(config)
-    return MockAgentClient(config)
+    if client == "mock":
+        return MockAgentClient(config)
+    # Config validation already rejects unknown values; this guards the env-override
+    # path (HERMES_BRIDGE_AGENT), which assigns after validation. An unknown brain
+    # must never silently downgrade to the mock rules brain, which trades on its own.
+    raise ValueError(
+        f"unknown agent.client {client!r}: expected 'claude' or 'mock' "
+        "(the legacy 'hermes' brain was replaced by 'claude')"
+    )
