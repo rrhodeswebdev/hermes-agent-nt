@@ -2,14 +2,8 @@ from fastapi.testclient import TestClient
 
 from hermes_bridge.config import BridgeConfig
 from hermes_bridge.levels import detect_levels
-from hermes_bridge.models import Bar
 from hermes_bridge.server import create_app
-from tests.conftest import synthetic_bars
-
-
-def _bar(ts: float, hi: float, lo: float) -> Bar:
-    mid = (hi + lo) / 2
-    return Bar(ts=ts, open=mid, high=hi, low=lo, close=mid, volume=1000.0)
+from tests.conftest import make_range_bar as _bar, synthetic_bars
 
 
 def test_no_pivots_returns_empty():
@@ -26,10 +20,10 @@ def test_detects_and_shapes_a_resistance_pivot():
     zones = detect_levels(bars, lookback=3, tick_size=0.25, merge_ticks=8, min_touches=1)
     assert len(zones) == 1
     z = zones[0]
-    assert set(z) == {"low", "high", "strength", "first_ts", "end_ts", "kind"}
-    assert z["kind"] == "resistance"
-    assert z["strength"] == 1
-    assert z["high"] == 20.0
+    assert set(z.model_dump()) == {"low", "high", "strength", "first_ts", "end_ts", "kind"}
+    assert z.kind == "resistance"
+    assert z.strength == 1
+    assert z.high == 20.0
 
 
 def test_nearby_pivots_merge_and_count_strength():
@@ -37,9 +31,9 @@ def test_nearby_pivots_merge_and_count_strength():
     highs = [90, 91, 92, 100, 92, 91, 90, 91, 92, 100.5, 92, 91, 90]
     bars = [_bar(float(i), float(h), float(h) - 2) for i, h in enumerate(highs)]
     zones = detect_levels(bars, lookback=3, tick_size=0.25, merge_ticks=8, min_touches=1)
-    merged = [z for z in zones if z["low"] <= 100 <= z["high"]]
-    assert merged and merged[0]["strength"] == 2
-    assert merged[0]["first_ts"] < merged[0]["end_ts"]
+    merged = [z for z in zones if z.low <= 100 <= z.high]
+    assert merged and merged[0].strength == 2
+    assert merged[0].first_ts < merged[0].end_ts
 
 
 def test_min_touches_filters_singletons():

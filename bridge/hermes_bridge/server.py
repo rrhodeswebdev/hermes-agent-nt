@@ -24,6 +24,7 @@ from .agent_client import build_agent_client
 from .config import BridgeConfig, load_config
 from .dashboard import DASHBOARD_HTML, render_text
 from .engine import TradingEngine
+from .levels import detect_levels
 from .models import (
     AccountState,
     Action,
@@ -33,6 +34,7 @@ from .models import (
     Fill,
     OrderCommand,
 )
+from .plan import Planner
 from .risk import RiskGate
 from .session import SessionState
 from .store import BarStore
@@ -73,7 +75,10 @@ class AppState:
         )
         self.risk = RiskGate(config)
         self.agent = build_agent_client(config)
-        self.engine = TradingEngine(config, self.store, self.session, self.agent, self.risk)
+        # Background worker: analyses run between bars, never on the ingest path.
+        self.planner = Planner(config, self.agent) if config.planner.enabled else None
+        self.engine = TradingEngine(config, self.store, self.session, self.agent, self.risk,
+                                    planner=self.planner)
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
@@ -139,6 +144,20 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         st = _state(request)
         return {"bars": [b.model_dump() for b in st.store.recent(n)]}
 
+    @app.get("/levels")
+    def levels(request: Request) -> dict:
+        """Swing-pivot S/R zones over the stored history, for the chart overlay."""
+        st = _state(request)
+        lc = cfg.levels
+        if not lc.enabled:
+            return {"levels": []}
+        zones = detect_levels(
+            st.store.all(), lookback=lc.lookback, tick_size=cfg.instrument.tick_size,
+            merge_ticks=lc.merge_ticks, min_touches=lc.min_touches,
+            max_levels=lc.max_levels,
+        )
+        return {"levels": [z.model_dump() for z in zones]}
+
     # ---- dashboard -----------------------------------------------------------
     def _dashboard_payload(st: AppState) -> dict:
         last = st.store.last()
@@ -147,7 +166,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         recent = list(st.decisions)[-15:]
         return {
             "agent": cfg.agent.client,
-            "mode": cfg.agent.claude.model,
+            "brain": st.engine.agent.describe(),
             "strategy_id": cfg.strategy_id,
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,
@@ -161,6 +180,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             },
             "last_decision": recent[-1] if recent else None,
             "recent_decisions": list(reversed(recent)),
+            "planner": st.planner.snapshot() if st.planner else None,
         }
 
     @app.get("/dashboard")
@@ -182,6 +202,9 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     def ingest_history(request: Request, batch: BarBatch) -> dict:
         st = _state(request)
         stored = st.store.replace_history(batch.bars)
+        # Kick off the one-time session study + initial plan in the background.
+        with st.lock:
+            st.engine.on_history(batch.bars)
         return {"ok": True, "stored": stored}
 
     @app.post("/ingest/bar", response_model=Decision)

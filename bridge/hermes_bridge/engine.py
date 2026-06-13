@@ -5,6 +5,11 @@ respect to I/O (no HTTP, no NinjaTrader): it consumes bars/fills and returns
 decisions and risk-approved commands. The server is responsible for queueing the
 commands and shipping them to NinjaTrader. This keeps the engine fully testable
 via the replay harness.
+
+With a Planner attached, the LLM never sits on the bar-close critical path: each
+close is answered instantly from the plan armed by the PREVIOUS between-bars
+analysis, and the follow-up analysis for the next close is scheduled afterwards.
+Without one, the legacy per-bar `agent.decide()` call is used.
 """
 
 from __future__ import annotations
@@ -14,8 +19,10 @@ from itertools import count
 
 from .agent_client import AgentClient, AgentRequest
 from .config import BridgeConfig
-from .indicators import build_context
-from .models import Action, Bar, Decision, Fill, OrderCommand
+from .indicators import MarketContext, build_context
+from .levels import detect_levels
+from .models import AccountState, Action, Bar, Decision, Fill, Level, Mode, OrderCommand
+from .plan import Planner, PlanRequest, evaluate_plan
 from .risk import RiskGate
 from .session import SessionState
 from .store import BarStore
@@ -39,12 +46,14 @@ class TradingEngine:
         session: SessionState,
         agent: AgentClient,
         risk: RiskGate,
+        planner: Planner | None = None,
     ) -> None:
         self.cfg = config
         self.store = store
         self.session = session
         self.agent = agent
         self.risk = risk
+        self.planner = planner if config.planner.enabled else None
         self._ids = count(1)
 
     def _new_id(self) -> str:
@@ -79,25 +88,110 @@ class TradingEngine:
         if mode == "seek_entry" and self.session.halted:
             return EngineResult(Decision(action=Action.WAIT, rationale="halted"), None, mode)
 
-        decision = self.agent.decide(
-            AgentRequest(mode=mode, context=ctx, recent_bars=bars, account=account)
-        )
+        if self.planner is not None:
+            decision = self._evaluate_armed_plan(bar, mode)
+        else:
+            decision = self.agent.decide(
+                AgentRequest(mode=mode, context=ctx, recent_bars=bars, account=account)
+            )
 
         # Gate entries by minimum confidence (exits always honored).
         if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
             if decision.confidence < self.cfg.strategy.min_confidence:
-                return EngineResult(
-                    Decision(action=Action.WAIT,
-                             rationale=f"low_confidence:{decision.confidence}"),
-                    None, mode,
-                )
+                decision = Decision(action=Action.WAIT,
+                                    rationale=f"low_confidence:{decision.confidence}")
 
         if decision.action == Action.WAIT:
-            return EngineResult(decision, None, mode)
+            result = EngineResult(decision, None, mode)
+        else:
+            cmd = self._to_command(decision)
+            rd = self.risk.evaluate(cmd, self.session, last_price=bar.close, now_ts=bar.ts)
+            result = EngineResult(decision, rd.command if rd.approved else None, mode,
+                                  rd.reasons)
+        # Schedule the between-bars analysis AFTER the instant answer is known, so
+        # the next plan can assume the optimistic post-fill position of anything
+        # queued this close. With a synchronous planner this arms before we return.
+        if self.planner is not None:
+            self._schedule_followup(bar, ctx, bars, account, result)
+        return result
 
-        cmd = self._to_command(decision)
-        rd = self.risk.evaluate(cmd, self.session, last_price=bar.close, now_ts=bar.ts)
-        return EngineResult(decision, rd.command if rd.approved else None, mode, rd.reasons)
+    # ---- pre-armed plan cycle -------------------------------------------------
+    def _evaluate_armed_plan(self, bar: Bar, mode: Mode) -> Decision:
+        plan = self.planner.current_plan()
+        if plan is None:
+            return Decision(action=Action.WAIT, rationale="no_plan (analysis pending)")
+        if plan.based_on_bar_ts >= bar.ts:
+            # The plan was made from this very bar (or newer); it can only apply to
+            # closes that happen after its basis.
+            return Decision(action=Action.WAIT, rationale="plan_not_yet_active")
+        if self._plan_is_stale(plan):
+            return Decision(
+                action=Action.WAIT,
+                rationale=f"plan_stale (basis_ts={plan.based_on_bar_ts:g}, "
+                          f"max_age={self.cfg.planner.max_plan_age_bars} bars)",
+            )
+        if plan.mode != mode:
+            return Decision(
+                action=Action.WAIT,
+                rationale=f"plan_mode_mismatch (armed={plan.mode}, actual={mode})",
+            )
+        return evaluate_plan(plan, bar, self.session.position)
+
+    def _plan_is_stale(self, plan) -> bool:
+        # Stale when the basis bar has scrolled out of the last max_age+1 closes.
+        max_age = self.cfg.planner.max_plan_age_bars
+        recent = self.store.recent(max_age + 1)
+        return len(recent) > max_age and all(
+            b.ts > plan.based_on_bar_ts for b in recent
+        )
+
+    def _schedule_followup(self, bar: Bar, ctx: MarketContext, bars: list[Bar],
+                           account: AccountState, result: EngineResult) -> None:
+        cmd = result.command
+        if cmd is not None and cmd.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
+            assumed = cmd.qty if cmd.action is Action.ENTER_LONG else -cmd.qty
+        elif cmd is not None and cmd.action in (Action.EXIT, Action.FLATTEN):
+            assumed = 0
+        else:
+            assumed = self.session.position
+        next_mode: Mode = "manage_position" if assumed != 0 else "seek_entry"
+        queued = f" queued={cmd.action}:{cmd.qty}" if cmd is not None else ""
+        outcome = f"{result.decision.action}: {result.decision.rationale}{queued}"
+        self.planner.schedule_plan_analysis(PlanRequest(
+            mode=next_mode, context=ctx, recent_bars=bars, account=account,
+            bar_ts=bar.ts, assumed_position=assumed, levels=self._levels(bars),
+            outcome=outcome,
+        ))
+
+    def on_history(self, bars: list[Bar]) -> None:
+        """Kick off the one-time session study (and the initial plan) after a
+        history bulk-load. No-op without a planner."""
+        if self.planner is None or not bars:
+            return
+        recent = bars[-_CONTEXT_WINDOW:]
+        ctx = build_context(
+            recent,
+            ema_fast=self.cfg.strategy.ema_fast,
+            ema_slow=self.cfg.strategy.ema_slow,
+            atr_period=self.cfg.strategy.atr_period,
+        )
+        account = self.session.account_state(mark_price=bars[-1].close)
+        mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
+        self.planner.schedule_session_analysis(bars, PlanRequest(
+            mode=mode, context=ctx, recent_bars=recent, account=account,
+            bar_ts=bars[-1].ts, assumed_position=self.session.position,
+            levels=self._levels(recent), outcome="session_start",
+        ))
+
+    def _levels(self, bars: list[Bar]) -> list[Level]:
+        lc = self.cfg.levels
+        if not lc.enabled:
+            return []
+        return detect_levels(
+            bars, lookback=lc.lookback, tick_size=self.cfg.instrument.tick_size,
+            merge_ticks=lc.merge_ticks, min_touches=lc.min_touches,
+            max_levels=lc.max_levels,
+        )
 
     # ---- fill handling ------------------------------------------------------
     def on_fill(self, fill: Fill) -> OrderCommand | None:

@@ -6,13 +6,10 @@ and the next analysis is scheduled off the critical path.
 """
 
 import json
-import types
 
 from hermes_bridge.agent_client import MockAgentClient, build_agent_client
-from hermes_bridge.claude_agent import ClaudeAgentClient
 from hermes_bridge.config import BridgeConfig
 from hermes_bridge.engine import TradingEngine
-from hermes_bridge.indicators import build_context
 from hermes_bridge.models import Action, Bar, Fill, Side
 from hermes_bridge.plan import (
     EntryTrigger,
@@ -24,26 +21,22 @@ from hermes_bridge.plan import (
 )
 from hermes_bridge.replay_sim import ReplaySimulator
 from hermes_bridge.risk import RiskGate
-from hermes_bridge.session import SessionState
 from hermes_bridge.store import BarStore
-from tests.conftest import synthetic_bars
-
-
-def _bar(ts: float, close: float) -> Bar:
-    return Bar(ts=ts, open=close - 1, high=close + 1, low=close - 2, close=close)
+from tests.conftest import (
+    make_agent_request,
+    make_claude_client,
+    make_close_bar as _bar,
+    make_session,
+    synthetic_bars,
+)
 
 
 def _preq(cfg: BridgeConfig, mode: str = "seek_entry", assumed: int = 0,
           bars: list[Bar] | None = None) -> PlanRequest:
     bars = bars or synthetic_bars(200)
-    ctx = build_context(bars, ema_fast=cfg.strategy.ema_fast,
-                        ema_slow=cfg.strategy.ema_slow, atr_period=cfg.strategy.atr_period)
-    sess = SessionState(cfg.instrument.symbol, cfg.instrument.timeframe,
-                        cfg.instrument.tick_size, cfg.instrument.tick_value,
-                        cfg.daily_goal.profit_target, cfg.daily_goal.max_daily_loss)
-    return PlanRequest(mode=mode, context=ctx, recent_bars=bars,
-                       account=sess.account_state(mark_price=bars[-1].close),
-                       bar_ts=bars[-1].ts, assumed_position=assumed)
+    req = make_agent_request(cfg, mode=mode, bars=bars)
+    return PlanRequest(mode=req.mode, context=req.context, recent_bars=req.recent_bars,
+                       account=req.account, bar_ts=bars[-1].ts, assumed_position=assumed)
 
 
 # --------------------------------------------------------------------------- #
@@ -131,13 +124,13 @@ def test_planner_failure_keeps_prior_plan(cfg):
 
 
 def test_planner_timeout_error_names_the_bridge_budget(cfg):
-    """A CLI timeout must surface the exceeded planner budget on the dashboard,
-    not a bare TimeoutExpired that reads like the NinjaTrader HTTP timeout."""
-    import subprocess
+    """A brain timeout must surface the exceeded planner budget on the dashboard,
+    not a bare exception name that reads like the NinjaTrader HTTP timeout."""
+    from hermes_bridge.models import BrainTimeout
 
     class Slow(MockAgentClient):
         def propose_plan(self, preq):
-            raise subprocess.TimeoutExpired(cmd=["claude", "-p"], timeout=75.0)
+            raise BrainTimeout(75.0)
 
     planner = Planner(cfg, Slow(cfg), synchronous=True)
     planner.schedule_plan_analysis(_preq(cfg))
@@ -168,8 +161,8 @@ class _StubAgent(MockAgentClient):
             confidence=0.9, rationale="always")])
 
 
-def _engine(cfg, agent) -> tuple[TradingEngine, SessionState, Planner]:
-    session = SessionState("ES", "5m", 0.25, 12.5, 500.0, 400.0)
+def _engine(cfg, agent):
+    session = make_session(cfg)
     planner = Planner(cfg, agent, synchronous=True)
     engine = TradingEngine(cfg, BarStore("ES", "5m"), session, agent,
                            RiskGate(cfg), planner=planner)
@@ -320,21 +313,7 @@ def test_replay_with_planner_finds_entries(cfg):
 # --------------------------------------------------------------------------- #
 # Claude client: plan parsing + session brief                                  #
 # --------------------------------------------------------------------------- #
-def _claude(monkeypatch, stdout: str, captured: dict | None = None) -> ClaudeAgentClient:
-    def fake_run(cmd, **kwargs):
-        if captured is not None:
-            captured["cmd"] = cmd
-            captured["input"] = kwargs.get("input")
-            captured["timeout"] = kwargs.get("timeout")
-        return types.SimpleNamespace(stdout=stdout, stderr="", returncode=0)
-
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
-    cfg = BridgeConfig()
-    cfg.agent.client = "claude"
-    return ClaudeAgentClient(cfg)
-
-
-def test_claude_propose_plan_parses_structured_output(monkeypatch):
+def test_claude_propose_plan_parses_structured_output(fake_claude):
     plan_obj = {
         "bias": "long",
         "triggers": [{"direction": "long", "min_close": 4000.5, "max_close": None,
@@ -343,9 +322,8 @@ def test_claude_propose_plan_parses_structured_output(monkeypatch):
         "exit": None,
         "rationale": "uptrend continuation",
     }
-    captured: dict = {}
-    c = _claude(monkeypatch, json.dumps({"is_error": False, "structured_output": plan_obj}),
-                captured)
+    captured = fake_claude(json.dumps({"is_error": False, "structured_output": plan_obj}))
+    c = make_claude_client()
     plan = c.propose_plan(_preq(c.cfg))
     assert plan is not None and plan.bias == "long"
     assert plan.triggers[0].min_close == 4000.5
@@ -354,16 +332,16 @@ def test_claude_propose_plan_parses_structured_output(monkeypatch):
     assert captured["timeout"] == c.cfg.planner.plan_timeout_s
 
 
-def test_claude_propose_plan_garbage_returns_none(monkeypatch):
-    c = _claude(monkeypatch, "totally not json")
+def test_claude_propose_plan_garbage_returns_none(fake_claude):
+    fake_claude("totally not json")
+    c = make_claude_client()
     assert c.propose_plan(_preq(c.cfg)) is None
 
 
-def test_claude_session_brief_is_free_text(monkeypatch):
-    captured: dict = {}
-    c = _claude(monkeypatch,
-                json.dumps({"is_error": False, "result": "Regime: trending up. Key levels..."}),
-                captured)
+def test_claude_session_brief_is_free_text(fake_claude):
+    captured = fake_claude(
+        json.dumps({"is_error": False, "result": "Regime: trending up. Key levels..."}))
+    c = make_claude_client()
     brief = c.analyze_session(_preq(c.cfg), synthetic_bars(120))
     assert brief.startswith("Regime: trending up")
     assert "--json-schema" not in captured["cmd"]
@@ -371,11 +349,11 @@ def test_claude_session_brief_is_free_text(monkeypatch):
     assert captured["timeout"] == c.cfg.planner.session_timeout_s
 
 
-def test_claude_session_study_uses_session_model(monkeypatch):
+def test_claude_session_study_uses_session_model(fake_claude):
     # The one-time history study runs on session_model; the per-bar plan
     # analysis stays on the (faster) decision model.
-    captured: dict = {}
-    c = _claude(monkeypatch, json.dumps({"is_error": False, "result": "brief"}), captured)
+    captured = fake_claude(json.dumps({"is_error": False, "result": "brief"}))
+    c = make_claude_client()
     c.cfg.agent.claude.model = "haiku"
     c.cfg.agent.claude.session_model = "sonnet"
 

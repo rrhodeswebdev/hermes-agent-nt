@@ -16,17 +16,16 @@ inline, which keeps the replay harness and the tests deterministic.
 
 from __future__ import annotations
 
-import subprocess
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
-from .indicators import MarketContext
-from .models import AccountState, Action, Bar, Decision
+from .agent_client import AgentRequest
+from .models import Action, Bar, BrainTimeout, Decision, Level, Mode
 
-if TYPE_CHECKING:  # avoid a runtime circular import with agent_client
+if TYPE_CHECKING:
     from .agent_client import AgentClient
     from .config import BridgeConfig
 
@@ -101,7 +100,7 @@ class TradePlan(BaseModel):
     the analysis last saw — used for the staleness check.
     """
 
-    mode: Literal["seek_entry", "manage_position"] = "seek_entry"
+    mode: Mode = "seek_entry"
     bias: Literal["long", "short", "neutral"] = "neutral"
     triggers: list[EntryTrigger] = Field(default_factory=list)
     exit: ExitRule | None = None
@@ -118,8 +117,8 @@ def describe_analysis_error(exc: Exception) -> str:
     """Dashboard-friendly error tag. Timeouts name the exceeded bridge-side budget
     (planner.plan_timeout_s / session_timeout_s) so they aren't mistaken for the
     NinjaTrader HttpTimeoutMs strategy setting."""
-    if isinstance(exc, subprocess.TimeoutExpired):
-        return f"timeout({exc.timeout:g}s bridge budget)"
+    if isinstance(exc, BrainTimeout):
+        return f"timeout({exc.budget_s:g}s bridge budget)"
     return type(exc).__name__
 
 
@@ -156,17 +155,16 @@ def evaluate_plan(plan: TradePlan, bar: Bar, position: int) -> Decision:
 
 
 @dataclass
-class PlanRequest:
-    """Snapshot handed to the between-bars analysis (built at bar close)."""
+class PlanRequest(AgentRequest):
+    """Snapshot handed to the between-bars analysis (built at bar close).
 
-    mode: str                       # mode the NEXT plan should be made for
-    context: MarketContext
-    recent_bars: list[Bar]
-    account: AccountState
+    Extends the per-bar `AgentRequest` (whose `mode` is the mode the NEXT plan
+    should be made for) with the plan-cycle context."""
+
     bar_ts: float                   # close ts of the bar the analysis is based on
     assumed_position: int           # position assumed at the next close (optimistic
                                     # post-fill when an entry/exit was just queued)
-    levels: list[dict] = field(default_factory=list)
+    levels: list[Level] = field(default_factory=list)
     prior_plan: TradePlan | None = None
     outcome: str = ""               # what just happened at this close
     session_brief: str = ""         # filled in by the Planner at analysis time
@@ -250,7 +248,8 @@ class Planner:
 
     def _run_plan(self, preq: PlanRequest) -> None:
         self._set_status("analyzing")
-        preq.session_brief = self.session_brief()
+        preq = replace(preq, session_brief=self.session_brief(),
+                       prior_plan=self.current_plan())
         try:
             plan = self.agent.propose_plan(preq)
         except Exception as exc:  # noqa: BLE001 — fail safe: stay/become unarmed
@@ -260,7 +259,7 @@ class Planner:
             self._set_status("error", "plan_analysis:no_plan_returned")
             return
         # The bridge is authoritative for mode + basis bar; never trust the LLM.
-        plan.mode = preq.mode  # type: ignore[assignment]
+        plan.mode = preq.mode
         plan.based_on_bar_ts = preq.bar_ts
         self.arm(plan)
 

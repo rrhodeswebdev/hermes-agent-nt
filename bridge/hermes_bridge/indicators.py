@@ -39,31 +39,52 @@ def atr(bars: list[Bar], period: int) -> float | None:
     return sum(trs) / period
 
 
+def _is_swing_high(bars: list[Bar], c: int, lookback: int) -> bool:
+    """Is bar `c` a confirmed swing-high pivot (a high with `lookback` lower highs each side)?"""
+    h = bars[c].high
+    return all(h > bars[c - j].high for j in range(1, lookback + 1)) and all(
+        h > bars[c + j].high for j in range(1, lookback + 1)
+    )
+
+
+def _is_swing_low(bars: list[Bar], c: int, lookback: int) -> bool:
+    low = bars[c].low
+    return all(low < bars[c - j].low for j in range(1, lookback + 1)) and all(
+        low < bars[c + j].low for j in range(1, lookback + 1)
+    )
+
+
 def swing_high(bars: list[Bar], lookback: int = 3) -> float | None:
-    """Most recent confirmed swing-high pivot (a high with `lookback` lower highs each side)."""
+    """Most recent confirmed swing-high pivot price."""
     n = len(bars)
     if n < 2 * lookback + 1:
         return None
     for c in range(n - lookback - 1, lookback - 1, -1):
-        pivot = bars[c].high
-        if all(bars[c].high > bars[c - j].high for j in range(1, lookback + 1)) and all(
-            bars[c].high > bars[c + j].high for j in range(1, lookback + 1)
-        ):
-            return pivot
+        if _is_swing_high(bars, c, lookback):
+            return bars[c].high
     return None
 
 
 def swing_low(bars: list[Bar], lookback: int = 3) -> float | None:
-    """Most recent confirmed swing-low pivot."""
+    """Most recent confirmed swing-low pivot price."""
     n = len(bars)
     if n < 2 * lookback + 1:
         return None
     for c in range(n - lookback - 1, lookback - 1, -1):
-        if all(bars[c].low < bars[c - j].low for j in range(1, lookback + 1)) and all(
-            bars[c].low < bars[c + j].low for j in range(1, lookback + 1)
-        ):
+        if _is_swing_low(bars, c, lookback):
             return bars[c].low
     return None
+
+
+def swing_pivots(bars: list[Bar], lookback: int = 3) -> list[tuple[float, float, str]]:
+    """All confirmed swing pivots, oldest first, as (price, ts, kind) with kind in {high, low}."""
+    out: list[tuple[float, float, str]] = []
+    for c in range(lookback, len(bars) - lookback):
+        if _is_swing_high(bars, c, lookback):
+            out.append((bars[c].high, bars[c].ts, "high"))
+        if _is_swing_low(bars, c, lookback):
+            out.append((bars[c].low, bars[c].ts, "low"))
+    return out
 
 
 def bar_delta(bar: Bar) -> float:

@@ -1,9 +1,10 @@
-"""Command-line entry point: `hermes-bridge serve` and `hermes-bridge replay`."""
+"""Command-line entry point: `hermes-bridge serve`, `replay`, `check`, `config-dump`."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import shlex
 import sys
 from pathlib import Path
 
@@ -73,6 +74,60 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Ping the configured brain through the SAME plumbing the bridge uses per bar
+    (--json-schema, --tools "", --safe-mode, system-prompt file, thinking cap), so a
+    pass here means real decisions can flow — not just that the CLI launches."""
+    cfg = load_config(args.config)
+    if cfg.agent.client != "claude":
+        print(f"agent={cfg.agent.client}: deterministic rules, no LLM to check")
+        return 0
+    from .claude_agent import DECISION_JSON_SCHEMA
+    from .claude_cli import extract_structured, run_claude_oneshot
+
+    c = cfg.agent.claude
+    try:
+        reply = run_claude_oneshot(
+            c,
+            'Connectivity check. Reply with action WAIT and rationale "pong".',
+            "ping",
+            json_schema=DECISION_JSON_SCHEMA,
+        )
+    except Exception as exc:  # noqa: BLE001 — a check should report, not traceback
+        print(f"claude check FAILED ({type(exc).__name__}): {exc}", file=sys.stderr)
+        return 1
+    data = extract_structured(reply)
+    if data is None:
+        print(f"claude check FAILED: no structured output in reply: {reply[:200]!r}",
+              file=sys.stderr)
+        return 1
+    print(f"claude check OK (model={c.model}): {data}")
+    return 0
+
+
+def _cmd_config_dump(args: argparse.Namespace) -> int:
+    """Resolved config (with env overrides) as shell-evalable KEY=VALUE lines.
+
+    start.sh evals this instead of duplicating config knowledge in shell."""
+    cfg = load_config(args.config)
+    c = cfg.agent.claude
+    pairs = {
+        "CLIENT": cfg.agent.client,
+        "CBIN": c.claude_bin,
+        "CMODEL": c.model,
+        "HOST": cfg.server.host,
+        "PORT": cfg.server.port,
+        "SID": cfg.strategy_id,
+        "SYM": cfg.instrument.symbol,
+        "TF": cfg.instrument.timeframe,
+        "ACCT": cfg.execution.account,
+        "LIVE": "1" if cfg.execution.allow_live else "0",
+    }
+    for key, value in pairs.items():
+        print(f"{key}={shlex.quote(str(value))}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hermes-bridge")
     default_cfg = str(Path("config/trading.yaml"))
@@ -94,6 +149,18 @@ def main(argv: list[str] | None = None) -> int:
     p_replay.add_argument("--warmup", type=int, default=50)
     p_replay.add_argument("--verbose", "-v", action="store_true")
     p_replay.set_defaults(func=_cmd_replay)
+
+    p_check = sub.add_parser(
+        "check", help="ping the configured decision brain through the real call path"
+    )
+    p_check.add_argument("--config", default=default_cfg)
+    p_check.set_defaults(func=_cmd_check)
+
+    p_dump = sub.add_parser(
+        "config-dump", help="print the resolved config as shell-evalable KEY=VALUE lines"
+    )
+    p_dump.add_argument("--config", default=default_cfg)
+    p_dump.set_defaults(func=_cmd_config_dump)
 
     args = parser.parse_args(argv)
     return args.func(args)

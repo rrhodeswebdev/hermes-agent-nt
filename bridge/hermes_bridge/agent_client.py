@@ -18,19 +18,22 @@
 from __future__ import annotations
 
 import json
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import BridgeConfig
 from .indicators import MarketContext
-from .models import AccountState, Action, Bar, Decision
+from .models import AccountState, Action, Bar, Decision, Mode
+
+if TYPE_CHECKING:  # plan.py imports this module at runtime; annotations only here
+    from .plan import PlanRequest, TradePlan
 
 
 @dataclass
 class AgentRequest:
-    mode: str  # "seek_entry" | "manage_position"
+    mode: Mode
     context: MarketContext
     recent_bars: list[Bar]
     account: AccountState
@@ -42,6 +45,20 @@ class AgentClient(ABC):
 
     @abstractmethod
     def decide(self, req: AgentRequest) -> Decision: ...
+
+    def describe(self) -> str:
+        """Short brain label for the dashboard header (model name or "rules")."""
+        return type(self).__name__
+
+    # Planning is optional: a client that doesn't implement it degrades safely to
+    # "no plan armed" / "no session brief", and the engine falls back to WAIT.
+    def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
+        """Between-bars analysis: arm explicit conditions for the NEXT bar close."""
+        return None
+
+    def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
+        """One-time history study at session start; returns the session brief."""
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -55,6 +72,9 @@ class MockAgentClient(AgentClient):
     are ATR-based. manage_position: exit early if the trend flips against us;
     otherwise let the resting bracket work.
     """
+
+    def describe(self) -> str:
+        return "rules"
 
     def decide(self, req: AgentRequest) -> Decision:
         if req.mode == "manage_position":
@@ -109,6 +129,59 @@ class MockAgentClient(AgentClient):
                             rationale="short invalidated: trend/delta flipped up")
         return Decision(action=Action.WAIT, rationale="hold; bracket protects position")
 
+    # ---- pre-armed plans (same rule math, expressed as next-close conditions) ----
+    def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
+        from .plan import EntryTrigger, ExitRule, TradePlan  # lazy: plan.py imports us
+
+        c = preq.context
+        if preq.mode == "manage_position":
+            pos = preq.assumed_position or preq.account.position
+            if c.ema_slow is None or pos == 0:
+                return TradePlan(mode="manage_position",
+                                 rationale="no structure; hold, bracket protects")
+            if pos > 0:
+                exit_rule = ExitRule(exit_below=c.ema_slow,
+                                     rationale="long invalidated: close through slow EMA")
+            else:
+                exit_rule = ExitRule(exit_above=c.ema_slow,
+                                     rationale="short invalidated: close through slow EMA")
+            return TradePlan(mode="manage_position", exit=exit_rule,
+                             rationale="exit on trend flip, else let the bracket work")
+        if c.ema_fast is None or c.atr is None:
+            return TradePlan(mode="seek_entry", rationale="insufficient_history")
+        p = self.cfg.strategy
+        tol = p.pullback_atr * c.atr
+        stop_ticks = self._ticks(c.atr * p.atr_stop_mult)
+        target_ticks = self._ticks(c.atr * p.atr_target_mult)
+        # The decide() rule "pullback tagged the fast EMA, then closed back beyond it"
+        # becomes a close band hugging the fast EMA: a close just beyond it is the
+        # resumption at value; a close far beyond is an extended bar (chasing).
+        if c.trend == "up" and c.recent_delta >= 0:
+            trigger = EntryTrigger(
+                direction="long", min_close=c.ema_fast, max_close=c.ema_fast + tol,
+                qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
+                confidence=self._confidence(c, +1),
+                rationale="uptrend pullback resuming above fast EMA, +delta",
+            )
+            return TradePlan(mode="seek_entry", bias="long", triggers=[trigger],
+                             rationale="uptrend pullback plan")
+        if c.trend == "down" and c.recent_delta <= 0:
+            trigger = EntryTrigger(
+                direction="short", min_close=c.ema_fast - tol, max_close=c.ema_fast,
+                qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
+                confidence=self._confidence(c, -1),
+                rationale="downtrend bounce resuming below fast EMA, -delta",
+            )
+            return TradePlan(mode="seek_entry", bias="short", triggers=[trigger],
+                             rationale="downtrend bounce plan")
+        return TradePlan(mode="seek_entry", rationale="no trend/flow alignment; no-trade")
+
+    def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
+        c = preq.context
+        return (f"rules brief: trend={c.trend} atr={c.atr} ema_fast={c.ema_fast} "
+                f"ema_slow={c.ema_slow} swing_high={c.swing_high} "
+                f"swing_low={c.swing_low} bars={len(history)}")
+
     def _confidence(self, c: MarketContext, direction: int) -> float:
         score = 0.5
         if c.ema_fast is not None and c.ema_slow is not None:
@@ -150,24 +223,30 @@ _CONTEXT_ORDER = [
 ]
 
 
-def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
-    """Concatenate the *.md context files in priority order into one string.
+def load_context_files(context_dir: str) -> str:
+    """Concatenate the context *.md files in priority order into one string.
 
+    Top-level files come first (the explicitly ordered ones, then the rest sorted),
+    then subdirectory files (the regime playbooks under strategies/) sorted by path —
+    the agent is tool-less, so anything the knowledge references must be inlined here.
     UTF-8 explicit so reading does not depend on the platform locale (Windows
     defaults to cp1252 and would crash on the em-dashes/arrows in the notes).
     """
-    order = order or _CONTEXT_ORDER
     d = Path(context_dir)
     if not d.is_dir():
         return ""
     parts: list[str] = []
-    for name in order:
+    for name in _CONTEXT_ORDER:
         f = d / name
         if f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
-    # Include any other *.md not in the explicit order.
+    # Any other top-level *.md not in the explicit order.
     for f in sorted(d.glob("*.md")):
-        if f.name not in order and f.is_file():
+        if f.name not in _CONTEXT_ORDER and f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    # Subdirectory files (e.g. strategies/trending/*.md), deterministic path order.
+    for f in sorted(d.rglob("*.md"), key=lambda p: p.as_posix()):
+        if f.parent != d and f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
     return "\n\n---\n\n".join(parts)
 
@@ -187,21 +266,6 @@ def build_user_prompt(req: AgentRequest) -> str:
         "recent_bars": bars,
     }
     return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
-
-
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
-
-def _extract_json(text: str) -> str | None:
-    m = _JSON_FENCE.search(text)
-    if m:
-        return m.group(1)
-    # Fallback: first balanced-looking object.
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        return text[start : end + 1]
-    return None
 
 
 def build_agent_client(config: BridgeConfig) -> AgentClient:

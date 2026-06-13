@@ -12,22 +12,8 @@ Pure functions over a list of `Bar`s — no I/O, fully testable.
 
 from __future__ import annotations
 
-from .models import Bar
-
-
-def _pivots(bars: list[Bar], lookback: int) -> list[tuple[float, float, str]]:
-    """Return confirmed swing pivots as (price, ts, kind) with kind in {high, low}."""
-    out: list[tuple[float, float, str]] = []
-    n = len(bars)
-    for c in range(lookback, n - lookback):
-        b = bars[c]
-        left = range(c - lookback, c)
-        right = range(c + 1, c + lookback + 1)
-        if all(b.high > bars[j].high for j in left) and all(b.high > bars[j].high for j in right):
-            out.append((b.high, b.ts, "high"))
-        if all(b.low < bars[j].low for j in left) and all(b.low < bars[j].low for j in right):
-            out.append((b.low, b.ts, "low"))
-    return out
+from .indicators import swing_pivots
+from .models import Bar, Level
 
 
 def detect_levels(
@@ -38,14 +24,13 @@ def detect_levels(
     merge_ticks: int = 8,
     min_touches: int = 1,
     max_levels: int = 12,
-) -> list[dict]:
+) -> list[Level]:
     """Cluster swing pivots into S/R zones, strongest first.
 
-    Each returned zone is ``{low, high, strength, first_ts, end_ts, kind}`` where
     ``kind`` is ``support`` / ``resistance`` (by the dominant pivot type) or ``pivot``
     when a level has acted as both. ``strength`` is the pivot (touch) count.
     """
-    pivots = _pivots(bars, lookback)
+    pivots = swing_pivots(bars, lookback)
     if not pivots:
         return []
     tol = max(tick_size, 0.0) * max(merge_ticks, 0)
@@ -60,7 +45,7 @@ def detect_levels(
         else:
             clusters.append([piv])
 
-    levels: list[dict] = []
+    levels: list[Level] = []
     for cl in clusters:
         if len(cl) < min_touches:
             continue
@@ -74,15 +59,15 @@ def detect_levels(
             kind = "support"
         else:
             kind = "pivot"
-        levels.append({
-            "low": round(min(prices), 6),
-            "high": round(max(prices), 6),
-            "strength": len(cl),
-            "first_ts": min(times),
-            "end_ts": max(times),
-            "kind": kind,
-        })
+        levels.append(Level(
+            low=round(min(prices), 6),
+            high=round(max(prices), 6),
+            strength=len(cl),
+            first_ts=min(times),
+            end_ts=max(times),
+            kind=kind,
+        ))
 
     # Strongest (most-touched) first; break ties by most recently respected.
-    levels.sort(key=lambda lv: (lv["strength"], lv["end_ts"]), reverse=True)
+    levels.sort(key=lambda lv: (lv.strength, lv.end_ts), reverse=True)
     return levels[:max_levels]

@@ -57,22 +57,7 @@ fi
 # 2. Read the resolved config authoritatively (same loader + env overrides).   #
 # --------------------------------------------------------------------------- #
 if [[ "$FORCE_MOCK" == "1" ]]; then export HERMES_BRIDGE_AGENT=mock; fi
-eval "$(cd "$BRIDGE_DIR" && "$VENV/bin/python" - "$CONFIG" <<'PY'
-import sys
-from hermes_bridge.config import load_config
-c = load_config(sys.argv[1])
-print(f"CLIENT={c.agent.client!s}")
-print(f"CBIN={c.agent.claude.claude_bin!s}")
-print(f"CMODEL={c.agent.claude.model!s}")
-print(f"HOST={c.server.host!s}")
-print(f"PORT={c.server.port:d}")
-print(f"SID={c.strategy_id!s}")
-print(f"SYM={c.instrument.symbol!s}")
-print(f"TF={c.instrument.timeframe!s}")
-print(f"ACCT={c.execution.account!s}")
-print(f"LIVE={'1' if c.execution.allow_live else '0'}")
-PY
-)"
+eval "$("$BRIDGE_DIR/.venv/bin/hermes-bridge" config-dump --config "$CONFIG")"
 
 # Health check always talks to loopback even when serving on 0.0.0.0.
 HEALTH_HOST="$HOST"; [[ "$HEALTH_HOST" == "0.0.0.0" ]] && HEALTH_HOST="127.0.0.1"
@@ -92,8 +77,9 @@ if [[ "$CLIENT" == "claude" ]]; then
    Install Claude Code, fix agent.claude.claude_bin in config/trading.yaml, or run with --mock."
   ok "Brain: Claude CLI (claude -p, model=$CMODEL) → $CBIN_PATH"
   if [[ "$CHECK_CLAUDE" == "1" ]]; then
-    say "Pinging Claude (this makes one real model call)…"
-    if printf 'Reply with the single word: pong' | "$CBIN" -p --model "$CMODEL" >/dev/null 2>&1; then
+    say "Pinging Claude through the bridge's real call path (one model call)…"
+    # `check` uses the same argv/schema/env as live decisions, so a pass is meaningful.
+    if "$SERVE_BIN" check --config "$CONFIG"; then
       ok "Claude responded."
     else
       warn "Claude ping failed — the bridge will fall back to WAIT on errors."

@@ -1,5 +1,4 @@
 import json
-import types
 
 from hermes_bridge.claude_cli import extract_structured, run_claude_oneshot
 from hermes_bridge.config import ClaudeClientConfig
@@ -24,15 +23,8 @@ def test_extract_structured_garbage_returns_none():
     assert extract_structured("not json") is None
 
 
-def test_run_claude_oneshot_builds_command(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["input"] = kwargs.get("input")
-        return types.SimpleNamespace(stdout="OUT", stderr="", returncode=0)
-
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
+def test_run_claude_oneshot_builds_command(fake_claude):
+    captured = fake_claude()
     c = ClaudeClientConfig()
     out = run_claude_oneshot(c, "SYS", "USR", json_schema='{"type":"object"}', model="haiku")
     assert out == "OUT"
@@ -44,27 +36,15 @@ def test_run_claude_oneshot_builds_command(monkeypatch):
     assert captured["input"] == "USR"
 
 
-def test_oneshot_caps_thinking_via_env(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return types.SimpleNamespace(stdout="OUT", stderr="", returncode=0)
-
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
+def test_oneshot_caps_thinking_via_env(fake_claude):
+    captured = fake_claude()
     run_claude_oneshot(ClaudeClientConfig(max_thinking_tokens=0), "SYS", "USR")
     assert captured["env"] is not None
     assert captured["env"]["MAX_THINKING_TOKENS"] == "0"
 
 
-def test_oneshot_uncapped_inherits_parent_env(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return types.SimpleNamespace(stdout="OUT", stderr="", returncode=0)
-
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
+def test_oneshot_uncapped_inherits_parent_env(fake_claude):
+    captured = fake_claude()
     # None → env=None so the subprocess inherits the parent environment unchanged.
     run_claude_oneshot(ClaudeClientConfig(max_thinking_tokens=None), "SYS", "USR")
     assert captured["env"] is None

@@ -66,6 +66,14 @@ class ClaudeClientConfig(BaseModel):
     # None = uncapped (slowest, most deliberation).
     max_thinking_tokens: int | None = 0
     timeout_s: float = 30.0
+    # Model for the one-time session study (planner). None = use `model`. The study
+    # reads a long history once and writes the brief the fast per-bar plans build on,
+    # so it can afford a bigger model (e.g. model: haiku, session_model: sonnet).
+    session_model: str | None = None
+    # Keep one `claude` child alive across requests (system prompt paid once) instead
+    # of a fresh process per decision. Falls back to one-shot calls on any session
+    # failure. Saves the 1-3s CLI cold start on every analysis.
+    persistent: bool = False
     extra_args: list[str] = Field(default_factory=list)  # appended verbatim to the claude argv
     # Directory of *.md context files loaded verbatim into the system prompt (this is
     # how the agent learns the strategy/order-flow/risk/goal). Absolute or relative to CWD.
@@ -80,6 +88,29 @@ class ClaudeClientConfig(BaseModel):
 class AgentConfig(BaseModel):
     client: str = "mock"              # mock | claude
     claude: ClaudeClientConfig = Field(default_factory=ClaudeClientConfig)
+
+
+class PlannerConfig(BaseModel):
+    """The pre-armed plan cycle (plan.py): analysis between bars, instant closes."""
+
+    enabled: bool = True
+    # Budgets for the background analyses. These are bridge-side limits (surfaced in
+    # dashboard error tags), unrelated to NinjaTrader's HttpTimeoutMs. The plan
+    # analysis runs between bars, so it can afford more than the per-bar timeout_s.
+    plan_timeout_s: float = 75.0
+    session_timeout_s: float = 180.0
+    # A plan armed from a bar this many closes old no longer fires (market moved on).
+    max_plan_age_bars: int = 2
+
+
+class LevelsConfig(BaseModel):
+    """Swing-pivot S/R detection (levels.py) for `GET /levels` + the plan prompt."""
+
+    enabled: bool = True
+    lookback: int = 3        # bars on each side that must be lower/higher to confirm a pivot
+    merge_ticks: int = 8     # pivots within this many ticks cluster into one zone
+    min_touches: int = 1     # zones with fewer pivots are dropped
+    max_levels: int = 12     # strongest-first cap on the returned zones
 
 
 class ServerConfig(BaseModel):
@@ -101,6 +132,8 @@ class BridgeConfig(BaseModel):
     daily_goal: DailyGoal = Field(default_factory=DailyGoal)
     session: SessionWindow = Field(default_factory=SessionWindow)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    planner: PlannerConfig = Field(default_factory=PlannerConfig)
+    levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 

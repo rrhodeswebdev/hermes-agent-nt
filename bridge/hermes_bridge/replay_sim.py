@@ -16,6 +16,7 @@ from .agent_client import build_agent_client
 from .config import BridgeConfig
 from .engine import TradingEngine
 from .models import Action, Bar, Fill, Side
+from .plan import Planner
 from .risk import RiskGate
 from .session import SessionState
 from .store import BarStore
@@ -59,9 +60,13 @@ class ReplaySimulator:
             profit_target=config.daily_goal.profit_target,
             max_daily_loss=config.daily_goal.max_daily_loss,
         )
+        agent = build_agent_client(config)
+        # synchronous=True: analyses run inline at each close so replays stay
+        # deterministic (live serving uses the background worker instead).
+        planner = Planner(config, agent, synchronous=True) if config.planner.enabled else None
         self.engine = TradingEngine(
-            config, self.store, self.session,
-            build_agent_client(config), RiskGate(config),
+            config, self.store, self.session, agent, RiskGate(config),
+            planner=planner,
         )
         self._bracket: _Bracket | None = None
 
@@ -69,6 +74,7 @@ class ReplaySimulator:
         report = ReplayReport()
         if warmup > 0:
             self.store.replace_history(bars[:warmup])
+            self.engine.on_history(bars[:warmup])
         for bar in bars[warmup:]:
             # 1) Resolve any resting bracket against this bar's range first.
             self._check_bracket(bar, report)

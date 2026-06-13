@@ -33,14 +33,18 @@ def render_text(d: dict | None) -> str:
     halt = f"HALTED:{s['halt_reason']}" if s["halted"] else "active"
 
     lines = [
-        f"HERMES  {d['instrument']} {d['timeframe']}  ({d['agent']}/{d['mode']})",
+        f"HERMES  {d['instrument']} {d['timeframe']}  ({d['agent']}/{d['brain']})",
         f"data age: {age_str}{delayed}",
         f"pos: {_pos_str(s['position'], s['avg_price'])}",
         f"realized: {s['realized_pnl']:+.2f}   unreal: {s['unrealized_pnl']:+.2f}"
         f"   trades: {s['trades_today']}",
         f"goal: +{goal['profit_target']:.0f} / -{goal['max_daily_loss']:.0f}   [{halt}]",
-        "-" * 40,
     ]
+    pl = d.get("planner")
+    if pl:
+        detail = pl.get("conditions") or pl.get("last_error") or ""
+        lines.append(f"plan[{pl['status']}]: {detail}"[:60])
+    lines.append("-" * 40)
     ld = d.get("last_decision")
     if ld:
         lines.append(f"LAST: {ld['action']}  conf {ld['confidence']:.2f}  @ {ld['close']:g}")
@@ -112,7 +116,7 @@ function cls(n){return n>0?'grn':n<0?'red':'dim'}
 async function tick(){
   try{
     const d=await (await fetch('/dashboard',{cache:'no-store'})).json();
-    document.getElementById('conn').textContent='● live · '+(d.agent)+'/'+(d.mode);
+    document.getElementById('conn').textContent='● live · '+(d.agent)+'/'+(d.brain);
     document.getElementById('conn').className='grn';
     document.getElementById('inst').textContent=d.instrument+' '+d.timeframe;
     const s=d.session;
