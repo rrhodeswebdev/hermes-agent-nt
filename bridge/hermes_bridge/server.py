@@ -94,6 +94,10 @@ class AppState:
         )
         self.risk = RiskGate(config)
         self.agent = build_agent_client(config)
+        # Strategy source NinjaTrader reports (UseAgentStrategies toggle), overriding the
+        # config default at runtime. None until the strategy first reports.
+        self.reported_strategy_source: str | None = None
+        self.agent.set_strategy_source(config.strategies.source)
         # Background worker: analyses run between bars, never on the ingest path.
         self.planner = Planner(config, self.agent) if config.planner.enabled else None
         self.journal = JournalStore(config.learning.journal_path)
@@ -116,6 +120,11 @@ class AppState:
     def effective_account(self) -> str:
         """Live NT account if the strategy has reported one, else the config default."""
         return self.reported_account or self.cfg.execution.account
+
+    def effective_strategy_source(self) -> str:
+        """NT-reported strategy source (UseAgentStrategies) if any, else the config
+        default. "agent" = brain authors its own playbook; "custom" = on-disk playbooks."""
+        return self.reported_strategy_source or self.cfg.strategies.source
 
     def _on_trade_closed(self, trade) -> None:
         lc = self.cfg.learning
@@ -178,6 +187,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "allow_live": cfg.execution.allow_live,
             "account": st.effective_account(),
             "nt_allow_live": st.reported_allow_live,
+            "strategy_source": st.effective_strategy_source(),
         }
 
     @app.get("/session/status", response_model=AccountState)
@@ -209,6 +219,26 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         )
         return {"levels": [z.model_dump() for z in zones]}
 
+    @app.get("/strategy")
+    def strategy(request: Request) -> dict:
+        """The active playbook so you can SEE what the agent invented (or which custom
+        files are loaded). In agent mode: the self-authored playbook + the file it was
+        persisted to. In custom mode: the concatenated on-disk playbooks (null if the
+        strategies/ dirs are empty)."""
+        st = _state(request)
+        source = st.effective_strategy_source()
+        if source == "agent":
+            playbook = st.agent.generated_strategy()
+            return {
+                "source": "agent",
+                "generated": playbook is not None,
+                "path": getattr(st.agent, "_generated_path", None),
+                "playbook": playbook,
+            }
+        from .agent_client import load_playbook_files
+        playbook = load_playbook_files(cfg.agent.claude.context_dir) or None
+        return {"source": "custom", "generated": False, "path": None, "playbook": playbook}
+
     # ---- dashboard -----------------------------------------------------------
     def _levels(st: AppState) -> dict | None:
         """The agent's current support/resistance + EMAs (from the last bar's context)."""
@@ -234,6 +264,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "brain": st.engine.agent.describe(),
             "model": _agent_model(),
             "strategy_id": cfg.strategy_id,
+            "strategy_source": st.effective_strategy_source(),
             "account": st.effective_account(),
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,
@@ -354,7 +385,18 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         if name:
             st.reported_account = name
         st.reported_allow_live = report.allow_live
-        return {"ok": True, "account": st.effective_account()}
+        # Strategy source toggle (UseAgentStrategies). Reported before history so the
+        # pre-session study authors (agent) or skips authoring (custom) correctly.
+        if report.use_agent_strategies is not None:
+            source = "agent" if report.use_agent_strategies else "custom"
+            if source != st.reported_strategy_source:
+                print(f"[hermes-bridge] strategy source is now '{source}' "
+                      f"(NinjaTrader UseAgentStrategies={report.use_agent_strategies})",
+                      flush=True)
+            st.reported_strategy_source = source
+            st.agent.set_strategy_source(source)
+        return {"ok": True, "account": st.effective_account(),
+                "strategy_source": st.effective_strategy_source()}
 
     @app.post("/ingest/fill")
     def ingest_fill(request: Request, fill: Fill) -> dict:

@@ -42,6 +42,10 @@ class AgentRequest:
 class AgentClient(ABC):
     def __init__(self, config: BridgeConfig) -> None:
         self.cfg = config
+        # Where the playbook comes from: "custom" (on-disk user playbooks) or "agent"
+        # (the brain authors its own). Seeded from config; the server overrides it at
+        # runtime from NinjaTrader's UseAgentStrategies toggle (set_strategy_source).
+        self._strategy_source: str = config.strategies.source
 
     @abstractmethod
     def decide(self, req: AgentRequest) -> Decision: ...
@@ -49,6 +53,21 @@ class AgentClient(ABC):
     def describe(self) -> str:
         """Short brain label for the dashboard header (model name or "rules")."""
         return type(self).__name__
+
+    # ---- strategy source (custom vs agent-authored) -------------------------
+    def set_strategy_source(self, source: str) -> None:
+        """Switch the playbook source at runtime. ``source`` is "custom" or "agent";
+        anything else is ignored (the current source stays)."""
+        if source in ("custom", "agent"):
+            self._strategy_source = source
+
+    def strategy_source(self) -> str:
+        return self._strategy_source
+
+    def generated_strategy(self) -> str | None:
+        """The playbook the agent authored this session, or None (custom mode / not yet
+        authored / authoring failed). Overridden by ClaudeAgentClient."""
+        return None
 
     # Planning is optional: a client that doesn't implement it degrades safely to
     # "no plan armed" / "no session brief", and the engine falls back to WAIT.
@@ -223,14 +242,20 @@ _CONTEXT_ORDER = [
 ]
 
 
-def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
+def load_context_files(context_dir: str, order: list[str] | None = None,
+                       include_subdirs: bool = True) -> str:
     """Concatenate the context *.md files in priority order into one string.
 
     Top-level files come first (the explicitly ordered ones, then the rest sorted),
-    then subdirectory files (the regime playbooks under strategies/) sorted by path —
-    the agent is tool-less, so anything the knowledge references must be inlined here.
-    UTF-8 explicit so reading does not depend on the platform locale (Windows
-    defaults to cp1252 and would crash on the em-dashes/arrows in the notes).
+    then — unless ``include_subdirs`` is False — the subdirectory files (the regime
+    playbooks under strategies/) sorted by path. The agent is tool-less, so anything
+    the knowledge references must be inlined here. UTF-8 explicit so reading does not
+    depend on the platform locale (Windows defaults to cp1252 and would crash on the
+    em-dashes/arrows in the notes).
+
+    ``include_subdirs=False`` loads the FRAMEWORK only (decision flow, regime, order
+    flow, risk, goal, hard rules) without the on-disk regime playbooks — used by agent
+    mode, which appends its OWN authored playbook instead (see claude_agent.py).
     """
     order = order or _CONTEXT_ORDER
     d = Path(context_dir)
@@ -246,9 +271,26 @@ def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
         if f.name not in order and f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
     # Subdirectory files (e.g. strategies/trending/*.md), deterministic path order.
-    for f in sorted(d.rglob("*.md"), key=lambda p: p.as_posix()):
-        if f.parent != d and f.is_file():
-            parts.append(f.read_text(encoding="utf-8"))
+    if include_subdirs:
+        for f in sorted(d.rglob("*.md"), key=lambda p: p.as_posix()):
+            if f.parent != d and f.is_file():
+                parts.append(f.read_text(encoding="utf-8"))
+    return "\n\n---\n\n".join(parts)
+
+
+def load_playbook_files(context_dir: str) -> str:
+    """Concatenate ONLY the regime playbooks under ``context_dir`` subdirectories
+    (e.g. strategies/trending/*.md), deterministic path order — the user's "custom
+    strategies". Empty (no subdir files) ⇒ "" so callers can detect an empty custom set.
+    """
+    d = Path(context_dir)
+    if not d.is_dir():
+        return ""
+    parts = [
+        f.read_text(encoding="utf-8")
+        for f in sorted(d.rglob("*.md"), key=lambda p: p.as_posix())
+        if f.parent != d and f.is_file()
+    ]
     return "\n\n---\n\n".join(parts)
 
 

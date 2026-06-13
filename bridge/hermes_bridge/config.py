@@ -148,6 +148,29 @@ class PlannerConfig(BaseModel):
     max_plan_age_bars: int = 2
 
 
+class StrategyAuthoringConfig(BaseModel):
+    """Where the regime playbooks (the swappable "strategy") come from.
+
+    - ``custom``: load the user's own playbooks from ``context_dir/strategies/**`` — the
+      brain invents nothing (the legacy behavior). Empty dirs ⇒ no playbook ⇒ WAIT.
+    - ``agent``: the brain AUTHORS its own playbook from the one-time session history
+      study and trades that instead of any on-disk playbook ("always use what it
+      invented"). The framework files (regime/order-flow/risk/goal + hard rules) are
+      still loaded in both modes; only the regime playbooks are swapped.
+
+    NinjaTrader's ``UseAgentStrategies`` toggle overrides ``source`` at runtime (reported
+    over ``/ingest/account``), exactly like the reported account name overrides
+    ``execution.account``. Failure to author / not-yet-authored degrades to WAIT.
+    """
+
+    source: Literal["custom", "agent"] = "agent"
+    # Authored playbooks are written here (one file per session) for review/audit, plus a
+    # stable ``latest.md``. Created on demand. Gitignored — they are session artifacts.
+    generated_dir: str = "hermes/generated"
+    # Cap on the authored playbook fed back into the system prompt (keeps it bounded).
+    max_chars: int = 6000
+
+
 class LevelsConfig(BaseModel):
     """Swing-pivot S/R detection (levels.py) for `GET /levels` + the plan prompt."""
 
@@ -198,6 +221,7 @@ class BridgeConfig(BaseModel):
     session: SessionWindow = Field(default_factory=SessionWindow)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     planner: PlannerConfig = Field(default_factory=PlannerConfig)
+    strategies: StrategyAuthoringConfig = Field(default_factory=StrategyAuthoringConfig)
     levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import UTC, datetime
+from pathlib import Path
 
 from .agent_client import (
     DECISION_INSTRUCTION,
@@ -120,6 +122,43 @@ per-bar plan analyses will rely on:
 Be concrete and quantitative; every line must be usable without re-reading history.
 """
 
+# JSON Schema for `--json-schema`: agent-mode pre-session study returns BOTH a self-
+# authored playbook (the "strategy", injected into later prompts) and the usual brief.
+AUTHOR_STRATEGY_JSON_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "playbook": {"type": "string"},
+            "brief": {"type": "string"},
+        },
+        "required": ["playbook", "brief"],
+    },
+    separators=(",", ":"),
+)
+
+AUTHOR_STRATEGY_INSTRUCTION = """\
+=== YOUR TASK: AUTHOR YOUR OWN PLAYBOOK, THEN BRIEF ===
+There is NO pre-written strategy for this instrument. Study the historical bars below
+and AUTHOR your own regime playbook — the concrete setups you will trade THIS session,
+derived from what actually happened in this data (the regimes present, the levels that
+mattered, the volatility character, what would have worked and what would have bled).
+
+Reply with one JSON object with two fields:
+- "playbook": Markdown (~20-50 lines). For each regime you found tradeable
+  (trending and/or ranging — omit a regime the data does not support), give a NAMED
+  setup with: the regime + evidence that selects it, exact ENTRY conditions, the
+  protective STOP (structural point where the setup is wrong) and TARGET, and the
+  INVALIDATION that kills the thesis. Obey the framework's hard rules above (always
+  bracket; never widen a stop; never flip in one step). If the history shows no clean
+  edge, say so and author a conservative WAIT-biased playbook — do not invent an edge.
+- "brief": ~10-20 lines of plain text, the same pre-session brief as usual (current
+  regime + evidence, key levels with prices, volatility vs ATR, what invalidates the
+  read). Your faster per-bar analyses rely on it.
+
+This playbook becomes your binding strategy for the session: every later decision is
+made against it. Be concrete and quantitative.
+"""
+
 
 def build_plan_prompt(preq: PlanRequest) -> str:
     """Frame a plan-analysis request: brief + cycle context + current market state."""
@@ -162,7 +201,13 @@ def build_session_prompt(preq: PlanRequest, history: list[Bar]) -> str:
 class ClaudeAgentClient(AgentClient):
     def __init__(self, config: BridgeConfig) -> None:
         super().__init__(config)
-        self._knowledge: str | None = None  # cached context files (rarely change)
+        self._knowledge: str | None = None  # cached context files, custom mode (rarely change)
+        # Agent mode: the framework-only context (no on-disk playbooks) is cached
+        # separately, and the brain's self-authored playbook is held here after the
+        # pre-session study runs (None until authored / if authoring failed → WAIT).
+        self._framework: str | None = None
+        self._generated_strategy: str | None = None
+        self._generated_path: str | None = None
         # Persistent sessions keyed by schema (≈ call kind): one for decide() and one
         # for propose_plan(); analyze_session stays one-shot (it may run on a different
         # model). The system prompt is deliberately NOT in the key — it embeds the
@@ -223,7 +268,13 @@ class ClaudeAgentClient(AgentClient):
 
     def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
         """One-time history study on `session_model` (falls back to `model`).
-        Free-text reply — no schema; the brief is prose for the plan prompts."""
+
+        In agent mode this ALSO authors the session playbook (see `_author_session`).
+        In custom mode it is the legacy free-text brief only (the on-disk playbooks are
+        the strategy). Returns the brief; any failure returns "" (no brief, never crash).
+        """
+        if self._strategy_source == "agent":
+            return self._author_session(preq, history)
         c = self.cfg.agent.claude
         reply = run_claude_oneshot(
             c, self._system_prompt(SESSION_INSTRUCTION),
@@ -240,19 +291,104 @@ class ClaudeAgentClient(AgentClient):
             return res if isinstance(res, str) else ""
         return ""
 
+    def _author_session(self, preq: PlanRequest, history: list[Bar]) -> str:
+        """Agent mode: one study call that authors the session playbook AND returns the
+        brief. The playbook becomes the active strategy for every later decision; a
+        failed/empty author leaves `_generated_strategy` None so the system prompt tells
+        the brain to WAIT until one exists (never auto-trades on a missing strategy)."""
+        c = self.cfg.agent.claude
+        reply = run_claude_oneshot(
+            c,
+            # Framework only — the task IS to author the playbook, so don't inject a
+            # (still-empty) "active strategy" block into the authoring prompt.
+            self._system_prompt(AUTHOR_STRATEGY_INSTRUCTION, include_active_strategy=False),
+            build_session_prompt(preq, history),
+            json_schema=AUTHOR_STRATEGY_JSON_SCHEMA,
+            model=c.session_model or c.model,
+            timeout_s=self.cfg.planner.session_timeout_s,
+        )
+        data = extract_structured(reply)
+        if not isinstance(data, dict):
+            return ""
+        playbook = (data.get("playbook") or "").strip()
+        brief = (data.get("brief") or "").strip()
+        if playbook:
+            self._set_generated_strategy(playbook, preq)
+        return brief
+
+    def generated_strategy(self) -> str | None:
+        return self._generated_strategy
+
+    def _set_generated_strategy(self, playbook: str, preq: PlanRequest) -> None:
+        """Install the authored playbook (capped) and persist it for review/audit:
+        one timestamped file per session plus a stable ``latest.md`` the dashboard /
+        ``GET /strategy`` read. Persistence failure is non-fatal (the in-memory playbook
+        still drives trading)."""
+        self._generated_strategy = playbook[: self.cfg.strategies.max_chars]
+        try:
+            d = Path(self.cfg.strategies.generated_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            stamp = (
+                datetime.fromtimestamp(preq.bar_ts, UTC).strftime("%Y%m%d-%H%M")
+                if preq.bar_ts else "session"
+            )
+            inst = (preq.account.instrument or "instrument").replace("/", "_")
+            header = (
+                f"# Agent-authored strategy — {inst} {preq.account.timeframe}\n"
+                f"# Generated {stamp} UTC from the pre-session history study. "
+                f"Auto-generated; safe to delete.\n\n"
+            )
+            body = header + self._generated_strategy + "\n"
+            path = d / f"{inst}-{stamp}.md"
+            path.write_text(body, encoding="utf-8")
+            (d / "latest.md").write_text(body, encoding="utf-8")
+            self._generated_path = str(path)
+        except OSError as exc:
+            print(f"[strategy] could not persist authored playbook: {exc}", flush=True)
+
     # ---- plumbing ---------------------------------------------------------------
-    def _system_prompt(self, instruction: str) -> str:
+    def _system_prompt(self, instruction: str, *, include_active_strategy: bool = True) -> str:
         # Rebuilt per call (cheaply): the learned block changes as reflection curates
         # lessons, so it must not be frozen in a cache. The static knowledge stays cached.
-        if self._knowledge is None:
-            c = self.cfg.agent.claude
-            self._knowledge = load_context_files(c.context_dir) or c.context_hint
-        parts = [self._knowledge]
+        parts = [self._strategy_knowledge(include_active_strategy=include_active_strategy)]
         learned = self._learned_block()
         if learned:
             parts.append(learned)
         parts.append(instruction)
         return "\n\n".join(parts)
+
+    def _strategy_knowledge(self, *, include_active_strategy: bool = True) -> str:
+        """The knowledge block: framework + the active strategy for the current source.
+
+        - custom: framework + the on-disk regime playbooks (one cached read).
+        - agent: framework only, then the brain's self-authored playbook appended (or a
+          WAIT instruction until one is authored). The authored playbook is NOT cached —
+          it is installed by the pre-session study and changes per session.
+        """
+        c = self.cfg.agent.claude
+        if self._strategy_source == "agent":
+            if self._framework is None:
+                self._framework = (
+                    load_context_files(c.context_dir, include_subdirs=False) or c.context_hint
+                )
+            if not include_active_strategy:
+                return self._framework
+            return self._framework + "\n\n---\n\n" + self._authored_playbook_block()
+        if self._knowledge is None:
+            self._knowledge = load_context_files(c.context_dir) or c.context_hint
+        return self._knowledge
+
+    def _authored_playbook_block(self) -> str:
+        if self._generated_strategy:
+            return (
+                "=== ACTIVE STRATEGY (you authored this from the pre-session history "
+                "study — it is binding for this session) ===\n" + self._generated_strategy
+            )
+        return (
+            "=== ACTIVE STRATEGY ===\n"
+            "No strategy has been authored yet (the pre-session study has not produced "
+            "one). Until one is in place, WAIT on every bar and arm NO entry triggers."
+        )
 
     def _learned_block(self) -> str:
         lc = self.cfg.learning

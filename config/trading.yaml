@@ -83,6 +83,18 @@ planner:
   session_timeout_s: 180       # budget for the one-time pre-session history study
   max_plan_age_bars: 2         # a plan based on a bar this many closes old no longer fires
 
+# Where the regime playbooks (the swappable "strategy") come from. NinjaTrader's
+# UseAgentStrategies toggle OVERRIDES `source` at runtime (reported over /ingest/account);
+# this is just the default until the strategy connects.
+strategies:
+  source: agent                # agent: the brain authors its own playbook from the chart's
+                               #   pre-session history and trades that ("always use what it
+                               #   invented"). custom: trade the user's own playbook files
+                               #   under context/strategies/** (empty dirs => the agent WAITs).
+  generated_dir: hermes/generated  # authored playbooks written here (per-session + latest.md)
+                                   # for review; gitignored runtime artifacts.
+  max_chars: 6000              # cap on the authored playbook fed back into the system prompt
+
 # Swing-pivot S/R zones — served at GET /levels for the chart overlay and included
 # in the plan-analysis prompt.
 levels:

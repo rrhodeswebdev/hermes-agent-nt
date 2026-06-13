@@ -2,18 +2,20 @@
 
 An automated futures trading agent that streams **NinjaTrader 8** chart data to the
 **Claude CLI** (Claude Code in headless print mode, on your subscription — no API key),
-which reasons about the market using a **specific trading style** — *trend-pullback with
-order-flow confirmation* — trades it on a **simulated account** with hard **risk
-management** and a **daily goal**, and runs a **self-improving loop** that learns from
-every closed trade.
+which reasons about the market using **order flow + price action**, trades on a
+**simulated account** with hard **risk management** and a **daily goal**, and runs a
+**self-improving loop** that learns from every closed trade.
 
-> The brain is *configured, not coded*: its trading knowledge, strategy, risk rules, and
-> daily goal live in **context files** (`hermes/context/`) that are loaded verbatim into
-> the system prompt. The brain is selectable in `config/trading.yaml`
-> (`agent.client: mock | claude`): **`claude`** (default — your subscription, no API key)
-> or **`mock`** (deterministic rules, no LLM). A Python **bridge** sits between NinjaTrader
-> and the brain and is the single, server-side **safety authority** that actually places
-> every order.
+> The brain is *configured, not coded*: its trading knowledge, risk rules, and daily goal
+> live in **context files** (`hermes/context/`) loaded verbatim into the system prompt.
+> **The strategy itself is toggleable** (NinjaTrader's `UseAgentStrategies`): the agent
+> can **author its own playbook** from the chart's history (default), or trade **your
+> own** playbooks under `hermes/context/strategies/`. The brain is selectable in
+> `config/trading.yaml` (`agent.client: mock | claude`): **`claude`** (default — your
+> subscription, no API key) or **`mock`** (deterministic rules, no LLM). A Python
+> **bridge** sits between NinjaTrader and the brain and is the single, server-side
+> **safety authority** that actually places every order — identically in both strategy
+> modes.
 
 ```
 NinjaTrader 8  ──bars──▶  hermes-bridge  ──asks──▶  Decision brain

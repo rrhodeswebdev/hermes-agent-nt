@@ -91,6 +91,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         public bool AllowLive { get; set; } = false;
 
+        // Strategy source toggle. TRUE (default): the agent AUTHORS its own playbook from
+        // this chart's historical bars and trades that. FALSE: the agent invents nothing
+        // and trades the user's own playbooks (hermes/context/strategies/**); empty dirs
+        // mean it simply WAITs. Reported to the bridge (/ingest/account) BEFORE history so
+        // the pre-session study knows which mode to run in. Safety (risk gate, brackets,
+        // the AllowLive account guard) is identical either way.
+        [NinjaScriptProperty]
+        public bool UseAgentStrategies { get; set; } = true;
+
         // Windows timezone id of the CHART's "Time zone" setting (what Time[0] is
         // expressed in). "Eastern Standard Time" = US ET incl. DST. If the bridge logs
         // a bar.ts skew warning, set this to match the chart.
@@ -262,12 +271,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // dashboard/logs follow the chart's account selection, not the static
                 // config default. Done unconditionally (even if SendHistory is off).
                 GuardAccount();
-                _ = ReportAccountAsync();
-                // Transitioned historical → realtime: ship the full history once.
+                // Transitioned historical → realtime: ship the full history once. The
+                // account report (which carries UseAgentStrategies) must land BEFORE the
+                // history POST, because the history triggers the bridge's pre-session
+                // study — and that study must already know whether to author a playbook
+                // (agent) or use the on-disk ones (custom). Build the payload here on the
+                // strategy thread (series access is unsafe from the HTTP continuation),
+                // then report-then-post.
                 if (SendHistory && !historySent)
                 {
                     historySent = true;
-                    _ = PostHistoryAsync();
+                    string histBody = BuildHistoryPayload();
+                    _ = ReportThenHistoryAsync(histBody);
+                }
+                else
+                {
+                    _ = ReportAccountAsync();
                 }
             }
             else if (State == State.Terminated)
@@ -361,31 +380,53 @@ namespace NinjaTrader.NinjaScript.Strategies
             Print("Hermes: bridge requested a history re-send (bridge restarted?) — pushing.");
             // Build the payload on the strategy thread — series access (Bars.GetTime
             // et al.) is not safe from the HTTP continuation's pool thread. A restarted
-            // bridge also lost the reported account, so re-send that too.
-            TriggerCustomEvent(o => { _ = ReportAccountAsync(); _ = PostHistoryAsync(); }, null);
+            // bridge also lost the reported account + strategy source, so re-send both
+            // (account first) before the history re-triggers the pre-session study.
+            TriggerCustomEvent(o =>
+            {
+                string histBody = BuildHistoryPayload();
+                _ = ReportThenHistoryAsync(histBody);
+            }, null);
         }
 
-        private async Task PostHistoryAsync()
+        private int _lastHistCount;   // bar count of the last BuildHistoryPayload (for logging)
+
+        // Build the /ingest/history JSON on the STRATEGY thread. Series access
+        // (Bars.GetTime et al.) is unsafe from an HTTP continuation's pool thread, so the
+        // payload is built synchronously here and the string handed to the async poster.
+        private string BuildHistoryPayload()
         {
+            var sb = new StringBuilder();
+            sb.Append("{\"instrument\":\"").Append(Escape(Instrument.FullName))
+              .Append("\",\"timeframe\":\"").Append(Escape(BarsPeriodString()))
+              .Append("\",\"bars\":[");
+            int last = CurrentBar; // last closed historical bar
+            bool first = true;
+            for (int i = 0; i <= last; i++)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append(BarJson(
+                    EpochSeconds(Bars.GetTime(i)), Bars.GetOpen(i), Bars.GetHigh(i),
+                    Bars.GetLow(i), Bars.GetClose(i), Bars.GetVolume(i)));
+            }
+            sb.Append("]}");
+            _lastHistCount = last + 1;
+            return sb.ToString();
+        }
+
+        // Report the account + strategy source, THEN post the pre-built history. The
+        // ordering matters: the bridge's pre-session study (triggered by the history)
+        // must already know the strategy source. Awaiting the account POST guarantees the
+        // bridge processed it before the history arrives.
+        private async Task ReportThenHistoryAsync(string histBody)
+        {
+            await ReportAccountAsync();
             try
             {
-                var sb = new StringBuilder();
-                sb.Append("{\"instrument\":\"").Append(Escape(Instrument.FullName))
-                  .Append("\",\"timeframe\":\"").Append(Escape(BarsPeriodString()))
-                  .Append("\",\"bars\":[");
-                int last = CurrentBar; // last closed historical bar
-                bool first = true;
-                for (int i = 0; i <= last; i++)
-                {
-                    if (!first) sb.Append(',');
-                    first = false;
-                    sb.Append(BarJson(
-                        EpochSeconds(Bars.GetTime(i)), Bars.GetOpen(i), Bars.GetHigh(i),
-                        Bars.GetLow(i), Bars.GetClose(i), Bars.GetVolume(i)));
-                }
-                sb.Append("]}");
-                await PostAsync("/ingest/history", sb.ToString());
-                Print(string.Format("Hermes: sent {0} historical bars to {1}", last + 1, BaseUrl));
+                await PostAsync("/ingest/history", histBody);
+                Print(string.Format("Hermes: sent {0} historical bars to {1}",
+                    _lastHistCount, BaseUrl));
             }
             catch (Exception ex)
             {
@@ -404,10 +445,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 string name = Account != null ? Account.Name : "";
                 string body = string.Format(
-                    "{{\"account\":\"{0}\",\"allow_live\":{1}}}",
-                    Escape(name), AllowLive ? "true" : "false");
+                    "{{\"account\":\"{0}\",\"allow_live\":{1},\"use_agent_strategies\":{2}}}",
+                    Escape(name), AllowLive ? "true" : "false",
+                    UseAgentStrategies ? "true" : "false");
                 await PostAsync("/ingest/account", body);
-                Print("Hermes: reported account '" + name + "' to bridge.");
+                Print("Hermes: reported account '" + name + "' to bridge (agent_strategies="
+                    + (UseAgentStrategies ? "on" : "off") + ").");
             }
             catch (Exception ex)
             {

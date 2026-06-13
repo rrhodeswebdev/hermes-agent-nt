@@ -1,0 +1,2 @@
+# Drop your own *.md playbook(s) here for "custom" strategy mode
+# (UseAgentStrategies = false). Empty = the agent has no playbook and WAITs.

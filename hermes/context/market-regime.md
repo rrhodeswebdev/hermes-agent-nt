@@ -27,7 +27,7 @@ overrides the label.
 - **Bars**: directional bars with bodies in the trend direction outnumber and out-size
   counter-trend bars; pullbacks are shallow (2–5 bars, overlapping, small bodies).
 - **Flow**: `recent_delta` persistently agrees with the direction.
-- → Open `strategies/trending/`.
+- → Apply the active playbook's **trending** setup(s) (strategy.md).
 
 ### Ranging
 
@@ -42,7 +42,7 @@ overrides the label.
   price progress (absorption).
 - **Tradeable only if the box is wide enough**: edge-to-edge ≳ 3 × ATR. A narrower box
   cannot pay for its stop — stand aside.
-- → Open `strategies/ranging/`.
+- → Apply the active playbook's **ranging** setup(s) (strategy.md).
 
 ### Transitional / unclear (no playbook — WAIT)
 
@@ -64,7 +64,7 @@ them as the historical anchor:
 
 - **Volatility context**: compare the last few bars' ranges to `atr` (the recent
   norm). Bars running well **below** ATR = compression — inside a range it often
-  precedes a breakout (be ready for the `failed-breakout` vs `breakout-continuation`
+  precedes a breakout (be ready for the failed-breakout vs breakout-continuation
   resolution). Bars suddenly running far **above** ATR = a volatility shock; after a
   long trend leg, expansion usually marks exhaustion, not acceleration.
 - **Location in the bigger picture**: where is `last_close` relative to `swing_high`
