@@ -15,6 +15,7 @@ study producing the session brief, optionally on a bigger `session_model`).
 from __future__ import annotations
 
 import json
+import threading
 
 from .agent_client import (
     DECISION_INSTRUCTION,
@@ -58,7 +59,7 @@ _TRIGGER_SCHEMA = {
         "direction": {"type": "string", "enum": ["long", "short"]},
         "min_close": {"type": ["number", "null"]},
         "max_close": {"type": ["number", "null"]},
-        "qty": {"type": "integer", "minimum": 0},
+        "qty": {"type": "integer", "minimum": 1},  # an entry buys >=1 contract
         "stop_ticks": {"type": ["integer", "null"]},
         "target_ticks": {"type": ["integer", "null"]},
         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
@@ -169,6 +170,10 @@ class ClaudeAgentClient(AgentClient):
         # key would orphan a live child on every change. _session_ask recycles the child
         # in place when the prompt changes instead.
         self._sessions: dict[str, ClaudeSession] = {}
+        # Guards the dict's get/recycle/spawn — NOT held during ask() (that would
+        # serialize every decision). Only matters when decide() runs on FastAPI's
+        # threadpool (planner disabled + persistent); the planner worker is single-thread.
+        self._sessions_lock = threading.Lock()
         # Learned knowledge (trader profile, notes, lessons) and the closed-trade
         # journal are read back into prompts so reflection actually feeds the brain.
         self._learned = LearnedStore(config.learning.learned_dir)
@@ -273,29 +278,33 @@ class ClaudeAgentClient(AgentClient):
                      timeout_s: float | None) -> str:
         c = self.cfg.agent.claude
         key = json_schema
-        sess = self._sessions.get(key)
-        if sess is not None and (
-            not sess.alive()
-            or sess.system != system
-            or (c.max_session_turns is not None and sess.turns >= c.max_session_turns)
-        ):
-            # Recycle the child (its system prompt is fixed at spawn) when it has died,
-            # the prompt changed (reflection rewrote the learned block — keeping the old
-            # child would orphan a live process AND serve a stale prompt), or it hit the
-            # turn cap (the conversation grows every turn and latency creeps with it).
-            sess.close()
-            self._sessions.pop(key, None)
-            sess = None
-        if sess is None:
-            sess = ClaudeSession(c, system, json_schema)
-            self._sessions[key] = sess
+        with self._sessions_lock:
+            sess = self._sessions.get(key)
+            if sess is not None and (
+                not sess.alive()
+                or sess.system != system
+                or (c.max_session_turns is not None and sess.turns >= c.max_session_turns)
+            ):
+                # Recycle the child (its system prompt is fixed at spawn) when it has
+                # died, the prompt changed (reflection rewrote the learned block —
+                # keeping the old child would orphan a live process AND serve a stale
+                # prompt), or it hit the turn cap (the conversation grows every turn and
+                # latency creeps with it).
+                sess.close()
+                self._sessions.pop(key, None)
+                sess = None
+            if sess is None:
+                sess = ClaudeSession(c, system, json_schema)
+                self._sessions[key] = sess
         try:
             return sess.ask(user, timeout_s)
         except Exception:
-            # ask() killed the child on timeout; make sure it's gone either way so
-            # the next request starts a fresh session.
+            # ask() killed the child on timeout; drop it so the next request starts
+            # fresh — but only if a concurrent caller hasn't already replaced it.
+            with self._sessions_lock:
+                if self._sessions.get(key) is sess:
+                    self._sessions.pop(key, None)
             sess.close()
-            self._sessions.pop(key, None)
             raise
 
     @staticmethod

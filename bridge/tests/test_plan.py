@@ -52,6 +52,15 @@ def test_entry_trigger_bounds():
     assert not EntryTrigger(direction="long").matches(4000.0)
 
 
+def test_zero_qty_trigger_never_fires():
+    # A trigger that would buy 0 contracts must not fire — otherwise _to_command
+    # coerces the 0 up to a surprise 1-lot order.
+    band = EntryTrigger(direction="long", min_close=4000.0, qty=0)
+    assert not band.matches(4000.0)
+    plan = TradePlan(mode="seek_entry", triggers=[band])
+    assert evaluate_plan(plan, _bar(1, 4000.0), position=0).action is Action.WAIT
+
+
 def test_exit_rule_bounds():
     rule = ExitRule(exit_below=3990.0, exit_above=4010.0)
     assert rule.matches(3990.0) and rule.matches(4010.0)

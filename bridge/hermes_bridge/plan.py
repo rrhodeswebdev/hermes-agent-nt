@@ -48,6 +48,8 @@ class EntryTrigger(BaseModel):
     rationale: str = ""
 
     def matches(self, close: float) -> bool:
+        if self.qty <= 0:
+            return False  # a trigger that would buy 0 contracts is not a trigger
         if self.min_close is None and self.max_close is None:
             return False  # unconditional entries are not allowed
         if self.min_close is not None and close < self.min_close:
