@@ -43,8 +43,8 @@ Two long-running programs, plus a short-lived brain the bridge spawns each bar:
 ## Decision loop (per closed bar)
 
 1. NinjaTrader closes a bar → `POST /ingest/bar`.
-2. The bridge stores it, builds market context (EMA/ATR/swings/delta), and asks the
-   decision engine for an action:
+2. The bridge stores it, builds market context (structure/regime, ATR, swings, delta), and
+   asks the decision engine for an action:
    - `agent.client: mock` → deterministic order-flow/price-action rules (no LLM).
    - `agent.client: claude` → the bridge runs `claude -p … --json-schema …` with the
      market state on stdin and reads back a validated `Decision` from `structured_output`.

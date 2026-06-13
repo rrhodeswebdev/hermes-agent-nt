@@ -20,11 +20,19 @@ from itertools import count
 
 from .agent_client import AgentClient, AgentRequest, MockAgentClient
 from .config import BridgeConfig, effective_entry_freshness_s, timeframe_seconds
-from .indicators import MarketContext, build_context
+from .indicators import MarketContext, atr, build_context
 from .journal import ClosedTrade, JournalStore, TradeTracker
 from .levels import detect_levels
 from .models import (
-    AccountState, Action, Bar, Decision, Fill, Level, Mode, OrderCommand, Side,
+    AccountState,
+    Action,
+    Bar,
+    Decision,
+    Fill,
+    Level,
+    Mode,
+    OrderCommand,
+    Side,
 )
 from .plan import Planner, PlanRequest, TradePlan, evaluate_plan
 from .risk import RiskGate
@@ -32,6 +40,33 @@ from .session import SessionState
 from .store import BarStore
 
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
+
+
+def reauthor_interval_bars(
+    cur_atr: float | None, baseline_atr: float | None,
+    base_bars: int, min_bars: int, max_bars: int,
+) -> float:
+    """Bars to wait before re-authoring, scaled **inversely** with volatility: at the
+    baseline norm the interval is ``base_bars``; twice as volatile (current ATR = 2×
+    baseline) halves it; half as volatile doubles it. Clamped to [min, max]. With no
+    volatility read (too little history) it falls back to ``base_bars``."""
+    if not cur_atr or not baseline_atr or baseline_atr <= 0:
+        return float(base_bars)
+    vol_ratio = cur_atr / baseline_atr
+    if vol_ratio <= 0:
+        return float(max_bars)
+    return max(float(min_bars), min(float(max_bars), base_bars / vol_ratio))
+
+
+def is_volatility_shock(
+    cur_atr: float | None, baseline_atr: float | None, shock_ratio: float
+) -> bool:
+    """An extreme volatility shift: current ATR is ``shock_ratio``× the baseline (a spike)
+    or ≤ 1/``shock_ratio`` of it (a collapse). Either way the regime read likely changed."""
+    if not cur_atr or not baseline_atr or baseline_atr <= 0 or shock_ratio <= 1:
+        return False
+    r = cur_atr / baseline_atr
+    return r >= shock_ratio or r <= 1.0 / shock_ratio
 
 
 @dataclass
@@ -66,7 +101,9 @@ class TradingEngine:
         self._ids = count(1)
         self.on_close = on_close
         self._prefilter = MockAgentClient(config) if config.agent.prefilter == "mock" else None
-        self.last_context: MarketContext | None = None  # agent S/R + EMAs for the dashboard
+        self.last_context: MarketContext | None = None  # agent regime / S/R for the dashboard
+        # Bars seen since the agent last authored — drives the volatility-adaptive re-author.
+        self._bars_since_author = 0
         # Last Claude-DECLINED prefilter candidate: {action, price, ts}. Near-identical
         # candidates are answered from this memo instead of burning another Claude call
         # (extended trends produce the same candidate bar after bar). See _duplicate_decline.
@@ -96,11 +133,11 @@ class TradingEngine:
         bars = self.store.recent(_CONTEXT_WINDOW)
         ctx = build_context(
             bars,
-            ema_fast=self.cfg.strategy.ema_fast,
-            ema_slow=self.cfg.strategy.ema_slow,
             atr_period=self.cfg.strategy.atr_period,
+            swing_lookback=self.cfg.strategy.swing_lookback,
         )
-        self.last_context = ctx  # expose current S/R + EMAs to the dashboard
+        self.last_context = ctx  # expose current regime / S/R to the dashboard
+        self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
         account = self.session.account_state(mark_price=bar.close)
         mode = "manage_position" if self.session.position != 0 else "seek_entry"
 
@@ -219,22 +256,51 @@ class TradingEngine:
     def on_history(self, bars: list[Bar]) -> None:
         """Kick off the one-time session study (and the initial plan) after a
         history bulk-load. No-op without a planner."""
+        self._trigger_session_study(bars, force=False, outcome="session_start")
+
+    def _trigger_session_study(self, bars: list[Bar], *, force: bool, outcome: str) -> None:
+        """Schedule the pre-session study (authors the playbook in agent mode) from ``bars``
+        and reset the re-author clock. ``force`` re-runs even when a brief already exists
+        (the volatility-adaptive re-author); the study overwrites the playbook in place."""
         if self.planner is None or not bars:
             return
         recent = bars[-_CONTEXT_WINDOW:]
         ctx = build_context(
             recent,
-            ema_fast=self.cfg.strategy.ema_fast,
-            ema_slow=self.cfg.strategy.ema_slow,
             atr_period=self.cfg.strategy.atr_period,
+            swing_lookback=self.cfg.strategy.swing_lookback,
         )
         account = self.session.account_state(mark_price=bars[-1].close)
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
+        self._bars_since_author = 0
         self.planner.schedule_session_analysis(bars, PlanRequest(
             mode=mode, context=ctx, recent_bars=recent, account=account,
             bar_ts=bars[-1].ts, assumed_position=self.session.position,
-            levels=self._levels(recent), outcome="session_start",
-        ))
+            levels=self._levels(recent), outcome=outcome,
+        ), force=force)
+
+    def _maybe_reauthor(self, ctx: MarketContext) -> None:
+        """Volatility-adaptive re-author (agent mode): once enough bars have passed for the
+        current volatility — sooner when volatile, later when calm — re-run the study so the
+        playbook tracks the market. An extreme volatility shift forces it early. The old
+        playbook keeps trading until the new one lands (seamless; never a WAIT gap)."""
+        rc = self.cfg.strategies.reauthor
+        if (not rc.enabled or self.planner is None
+                or self.agent.strategy_source() != "agent"
+                or self.agent.generated_strategy() is None        # nothing authored yet
+                or self.planner.is_analyzing_session()):          # one already in flight
+            return
+        self._bars_since_author += 1
+        baseline = atr(self.store.recent(rc.baseline_atr_period + 1), rc.baseline_atr_period)
+        interval = reauthor_interval_bars(
+            ctx.atr, baseline, rc.base_interval_bars, rc.min_interval_bars, rc.max_interval_bars)
+        shock = (self._bars_since_author >= rc.min_interval_bars
+                 and is_volatility_shock(ctx.atr, baseline, rc.shock_ratio))
+        if self._bars_since_author >= interval or shock:
+            why = "volatility_shock" if shock else f"interval({interval:.0f}b)"
+            print(f"[reauthor] re-authoring after {self._bars_since_author} bars "
+                  f"({why}; atr={ctx.atr} baseline={baseline})", flush=True)
+            self._trigger_session_study(self.store.all(), force=True, outcome=f"reauthor:{why}")
 
     def _levels(self, bars: list[Bar]) -> list[Level]:
         lc = self.cfg.levels

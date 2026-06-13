@@ -53,7 +53,7 @@ flowchart LR
         subgraph BR["hermes-bridge (Python / FastAPI) — the safety authority"]
             SRV["HTTP server<br/>+ CommandQueue"]
             STORE["BarStore<br/>(rolling history)"]
-            IND["Indicators<br/>EMA · ATR · delta · swings"]
+            IND["Indicators<br/>structure/regime · ATR · delta · swings"]
             ENG["TradingEngine<br/>(orchestrates the loop)"]
             SESS["SessionState<br/>position · P&amp;L · daily goal"]
             RISK["RiskGate<br/>HARD LIMITS"]
@@ -94,7 +94,7 @@ sequenceDiagram
     NT->>BR: POST /ingest/bar  (open,high,low,close,volume)
     BR->>EN: on_bar(bar)
     EN->>SS: new trading day? still halted?
-    EN->>EN: build context<br/>(EMA, ATR, delta, swings, trend)
+    EN->>EN: build context<br/>(regime/structure, ATR, delta, swings)
     EN->>BN: decide(context, account)
     BN-->>EN: Decision: ENTER / EXIT / WAIT (+ stop, target, confidence)
 
@@ -181,9 +181,11 @@ it are several cooperating parts:
 - **The bar store** (`store.py`) — remembers the recent price history (a rolling window) so
   the brain always sees the last N bars, not just the latest one.
 - **The indicators** (`indicators.py`) — turns raw bars into the numbers the brain reasons
-  about: the fast/slow moving averages (EMA), the Average True Range (ATR, "how much it
-  normally moves"), the swing highs/lows (structure), the trend direction, and
-  **order-flow delta** (a measure of whether buyers or sellers were more aggressive).
+  about: the **regime** (trending / ranging / transitional) and trend direction read from
+  **swing structure** (higher-highs/lows vs lower-highs/lows vs contained — no moving
+  averages), the swing highs/lows and recent pivots (structure), the Average True Range
+  (ATR, "how much it normally moves"), and **order-flow delta** (whether buyers or sellers
+  were more aggressive).
 - **The engine** (`engine.py`) — the conductor. Each bar it: stores the bar → builds the
   context → asks the brain → applies the confidence filter → runs the order through the
   safety gate → hands back the result. It also force-flattens you if the day's limit was
@@ -213,8 +215,9 @@ suggests a stop and target and a confidence score. You choose the brain in the c
   errors, times out, or replies with nonsense, the decision safely degrades to **WAIT** — it
   never guesses a trade on a broken answer.
 - **`mock` — deterministic rules** (`agent_client.py`, no LLM, free, instant). It encodes
-  the exact strategy: in an uptrend, when a bar dips to "tag" the fast EMA and then closes
-  back above it as an up-bar with non-negative order flow → go long (mirror for shorts).
+  the exact strategy: in a structural uptrend (higher-highs/higher-lows), when a bar dips to
+  "tag" the recent higher-low and then closes back above it as an up-bar with non-negative
+  order flow → go long (mirror for shorts).
   This is also the **safe fallback** and the engine used by the replay/test harness.
 
 Either way, the answer is just a *suggestion* until the risk gate approves it.
@@ -261,7 +264,7 @@ the order the brain reads them:
 | File | What it teaches the brain |
 |------|---------------------------|
 | `HERMES.md` | The operating loop and the non-negotiables ("always use a stop," "when unsure, WAIT," "one position at a time"). |
-| `strategy.md` | **The only setup it trades:** trend pullback that tags the moving average and resumes, confirmed by order flow, with ATR-based brackets. |
+| `strategy.md` | **The setups it trades:** structure-based plays (trend pullback to the higher-low, breakouts, range-edge fades) selected by the swing-structure regime, confirmed by order flow, with ATR-based brackets. |
 | `order-flow.md` | How to read buying vs. selling pressure (delta, absorption, exhaustion) — the *confirmation* layer. |
 | `price-action.md` | Trend, structure, and **location** ("the same candle is a great trade at one price and a terrible one at another") — the *context* layer. |
 | `risk-management.md` | The hard limits and the behavioral rules (no revenge trading, no chasing, think in "R"). |
@@ -341,8 +344,9 @@ Two views, same data, so you're never guessing what the robot is thinking:
 To make it concrete, here's what actually happens when the agent decides to go long:
 
 1. A 1-minute MNQ bar closes. NinjaTrader mails it to the bridge.
-2. The bridge stores it and computes: trend is **up**, this bar dipped to the 9-EMA and
-   closed back above it, delta is positive. Looks like the setup.
+2. The bridge stores it and computes: structure is a clean **uptrend** (higher-highs/
+   higher-lows), this bar dipped to the recent higher-low and closed back above it, delta
+   is positive. Looks like the setup.
 3. The brain returns **ENTER_LONG**, confidence 0.62, with a stop ≈ 1.5×ATR and target ≈
    2.0×ATR below/above entry.
 4. Confidence (0.62) clears `min_confidence` (0.40), so it's actionable.
@@ -428,7 +432,8 @@ To return to the stricter behavior, revert those tagged lines in `config/trading
 ## 8. Mini-glossary
 
 - **Bar / candle** — one time slice of price: open, high, low, close, volume.
-- **EMA** — exponential moving average; the fast vs. slow relationship defines the trend.
+- **Regime** — trending / ranging / transitional, read from swing **structure** (higher-
+  highs/lows vs lower-highs/lows vs contained/overlapping); the master switch for setups.
 - **ATR** — Average True Range; "how much this market normally moves," used to size stops.
 - **Delta / order flow** — whether aggressive buyers or sellers dominated; the confirmation.
 - **Pullback** — a small counter-trend pause inside a trend; what this strategy buys/sells.

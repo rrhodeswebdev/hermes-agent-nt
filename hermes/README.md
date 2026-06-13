@@ -25,8 +25,17 @@ The setups the brain trades come from the **active playbook**, chosen by NinjaTr
 
 - **Agent (`UseAgentStrategies` on / `source: agent`)** — at session start the brain
   studies the chart's historical bars and **authors its own playbook**, then trades it for
-  the session. Nothing to pre-write. Each authored playbook is saved to `../hermes/generated/`
-  (gitignored) and served at `GET /strategy` so you can see exactly what it invented.
+  the session. Nothing to pre-write. It writes its setups as **named strategies** (each with
+  a regime + one-line summary); the dashboard / chart card **lists them all and highlights
+  the active one** — the setup the brain says it's trading in its current plan, falling back
+  to the one matching the live regime (read from swing **structure** — higher-highs/lows vs
+  lower-highs/lows vs contained) — so a glance tells you what's active right now. Each authored
+  playbook is saved to `../hermes/generated/` (gitignored) and served at `GET /strategy`
+  (`list` of setups + active index + full `playbook`) so you can see exactly what it invented.
+  The brain **re-authors automatically on a volatility-adaptive cadence** (`strategies.reauthor`):
+  more often when volatility rises, less when calm, and immediately on an extreme volatility
+  shift — the old playbook keeps trading until the new one lands. You can also force one
+  anytime via the dashboard **Re-author** button or `POST /control/reauthor`.
 - **Custom (`UseAgentStrategies` off / `source: custom`)** — the brain trades **your** own
   playbooks, dropped as `*.md` into `context/strategies/trending/` and
   `context/strategies/ranging/`. These dirs ship **empty** (just a `.gitkeep`); an empty

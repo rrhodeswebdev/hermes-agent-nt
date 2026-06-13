@@ -31,15 +31,15 @@ def test_delta_ratio_is_volume_independent():
         return [Bar(ts=float(i), open=100.0, high=101.0, low=100.0, close=101.0, volume=vol)
                 for i in range(30)]
 
-    light = build_context(_bars(50), ema_fast=9, ema_slow=21, atr_period=14)
-    heavy = build_context(_bars(50000), ema_fast=9, ema_slow=21, atr_period=14)
+    light = build_context(_bars(50), atr_period=14)
+    heavy = build_context(_bars(50000), atr_period=14)
     assert abs(light.recent_delta) < abs(heavy.recent_delta)          # raw magnitude scales
     assert abs(light.delta_ratio - heavy.delta_ratio) < 1e-6          # ratio does not
     assert light.delta_ratio > 0.9
 
 
 def test_context_exposes_session_and_delta_ratio():
-    ctx = build_context(synthetic_bars(60), ema_fast=9, ema_slow=21, atr_period=14)
+    ctx = build_context(synthetic_bars(60), atr_period=14)
     d = ctx.to_dict()
     assert d["session"] in ("RTH", "ETH")
     assert "delta_ratio" in d

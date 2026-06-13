@@ -69,6 +69,15 @@ class AgentClient(ABC):
         authored / authoring failed). Overridden by ClaudeAgentClient."""
         return None
 
+    def generated_strategies(self) -> list[dict] | None:
+        """The named setups the agent authored this session as ``{name, regime, summary}``
+        dicts (the dashboard lists them all), or None. Overridden by ClaudeAgentClient."""
+        return None
+
+    def clear_generated_strategy(self) -> None:  # noqa: B027 — intentional no-op default
+        """Forget the authored playbook so the system prompt instructs WAIT until a fresh one
+        is authored (used by /control/reauthor). Base no-op; overridden by ClaudeAgentClient."""
+
     # Planning is optional: a client that doesn't implement it degrades safely to
     # "no plan armed" / "no session brief", and the engine falls back to WAIT.
     def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
@@ -84,12 +93,14 @@ class AgentClient(ABC):
 # Deterministic rules client (no LLM)                                         #
 # --------------------------------------------------------------------------- #
 class MockAgentClient(AgentClient):
-    """Trend-pullback with order-flow confirmation.
+    """Structure-based trend-pullback with order-flow confirmation.
 
-    seek_entry: in an EMA up/down trend, take a pullback toward the fast EMA that
-    is confirmed by cumulative delta and a same-direction bar close. Stops/targets
-    are ATR-based. manage_position: exit early if the trend flips against us;
-    otherwise let the resting bracket work.
+    seek_entry: in a structural up/down trend (higher-highs+higher-lows / lower-highs+
+    lower-lows — see ``classify_regime``), take a pullback to the most recent swing that
+    defines the trend (the higher-low in an uptrend, the lower-high in a downtrend),
+    confirmed by cumulative delta and a same-direction bar close. Stops/targets are
+    ATR-based. manage_position: exit early if structure flips against us (or the close
+    breaks the protective swing with adverse delta); otherwise let the resting bracket work.
     """
 
     def describe(self) -> str:
@@ -100,52 +111,58 @@ class MockAgentClient(AgentClient):
             return self._manage(req)
         return self._seek_entry(req)
 
+    def _recent_sr(self, bars: list[Bar]) -> tuple[float, float]:
+        """Immediate support/resistance = the lowest low / highest high over the last
+        ``2*swing_lookback+1`` bars — the local higher-low / lower-high a pullback returns
+        to, near price (the structural stand-in for the old fast-EMA "value" line)."""
+        window = bars[-(2 * self.cfg.strategy.swing_lookback + 1):]
+        return min(b.low for b in window), max(b.high for b in window)
+
     def _seek_entry(self, req: AgentRequest) -> Decision:
         c = req.context
         p = self.cfg.strategy
-        if c.ema_fast is None or c.ema_slow is None or c.atr is None or not req.recent_bars:
-            return Decision(action=Action.WAIT, rationale="insufficient_history")
+        if c.atr is None or len(req.recent_bars) < 2 or c.regime != "trending":
+            return Decision(action=Action.WAIT, rationale="no trending structure")
 
         last = req.recent_bars[-1]
         atr = c.atr
-        ef = c.ema_fast
-        tol = p.pullback_atr * atr  # how far past the EMA still counts as a "tag"
+        tol = p.pullback_atr * atr  # how close to the local swing still counts as a "tag"
         stop_ticks = self._ticks(atr * p.atr_stop_mult)
         target_ticks = self._ticks(atr * p.atr_target_mult)
+        support, resistance = self._recent_sr(req.recent_bars)
 
-        # Long: uptrend, the bar pulled back to TAG the fast EMA (low reached it),
-        # then closed back above it on a bullish bar with non-negative order-flow.
-        long_tag = last.low <= ef + tol
-        if (c.trend == "up" and long_tag and last.close > ef
+        # Long: structural uptrend, the bar pulled back to TAG the immediate higher-low
+        # support and closed back above it on a bullish bar with non-negative order-flow.
+        if (c.trend == "up" and last.low <= support + tol and last.close > support
                 and last.close > last.open and c.recent_delta >= 0):
             return Decision(
                 action=Action.ENTER_LONG, confidence=self._confidence(c, +1), qty=1,
                 stop_ticks=stop_ticks, target_ticks=target_ticks,
-                rationale="uptrend pullback tagged fast EMA, closed back above, +delta",
+                rationale="uptrend pullback held the higher-low, closed back up, +delta",
             )
-        # Short: mirror image.
-        short_tag = last.high >= ef - tol
-        if (c.trend == "down" and short_tag and last.close < ef
+        # Short: mirror at the immediate lower-high resistance.
+        if (c.trend == "down" and last.high >= resistance - tol and last.close < resistance
                 and last.close < last.open and c.recent_delta <= 0):
             return Decision(
                 action=Action.ENTER_SHORT, confidence=self._confidence(c, -1), qty=1,
                 stop_ticks=stop_ticks, target_ticks=target_ticks,
-                rationale="downtrend pullback tagged fast EMA, closed back below, -delta",
+                rationale="downtrend pullback held the lower-high, closed back down, -delta",
             )
         return Decision(action=Action.WAIT, rationale="no setup")
 
     def _manage(self, req: AgentRequest) -> Decision:
         c = req.context
         pos = req.account.position
-        below_slow = c.ema_slow is not None and c.last_close < c.ema_slow
-        above_slow = c.ema_slow is not None and c.last_close > c.ema_slow
-        # Exit early when momentum/trend flips against the open position.
-        if pos > 0 and (c.trend == "down" or (c.recent_delta < 0 and below_slow)):
+        broke_low = c.swing_low is not None and c.last_close < c.swing_low
+        broke_high = c.swing_high is not None and c.last_close > c.swing_high
+        # Exit early when structure flips against the open position (trend turned, or the
+        # close broke the protective swing with adverse delta).
+        if pos > 0 and (c.trend == "down" or (c.recent_delta < 0 and broke_low)):
             return Decision(action=Action.EXIT, confidence=0.6,
-                            rationale="long invalidated: trend/delta flipped down")
-        if pos < 0 and (c.trend == "up" or (c.recent_delta > 0 and above_slow)):
+                            rationale="long invalidated: structure/delta flipped down")
+        if pos < 0 and (c.trend == "up" or (c.recent_delta > 0 and broke_high)):
             return Decision(action=Action.EXIT, confidence=0.6,
-                            rationale="short invalidated: trend/delta flipped up")
+                            rationale="short invalidated: structure/delta flipped up")
         return Decision(action=Action.WAIT, rationale="hold; bracket protects position")
 
     # ---- pre-armed plans (same rule math, expressed as next-close conditions) ----
@@ -155,57 +172,57 @@ class MockAgentClient(AgentClient):
         c = preq.context
         if preq.mode == "manage_position":
             pos = preq.assumed_position or preq.account.position
-            if c.ema_slow is None or pos == 0:
+            if pos > 0 and c.swing_low is not None:
+                exit_rule = ExitRule(exit_below=c.swing_low,
+                                     rationale="long invalidated: close below the higher-low")
+            elif pos < 0 and c.swing_high is not None:
+                exit_rule = ExitRule(exit_above=c.swing_high,
+                                     rationale="short invalidated: close above the lower-high")
+            else:
                 return TradePlan(mode="manage_position",
                                  rationale="no structure; hold, bracket protects")
-            if pos > 0:
-                exit_rule = ExitRule(exit_below=c.ema_slow,
-                                     rationale="long invalidated: close through slow EMA")
-            else:
-                exit_rule = ExitRule(exit_above=c.ema_slow,
-                                     rationale="short invalidated: close through slow EMA")
             return TradePlan(mode="manage_position", exit=exit_rule,
-                             rationale="exit on trend flip, else let the bracket work")
-        if c.ema_fast is None or c.atr is None:
-            return TradePlan(mode="seek_entry", rationale="insufficient_history")
+                             rationale="exit on a structural break, else let the bracket work")
+        if c.atr is None or c.regime != "trending" or len(preq.recent_bars) < 2:
+            return TradePlan(mode="seek_entry", rationale="no trending structure; no-trade")
         p = self.cfg.strategy
         tol = p.pullback_atr * c.atr
         stop_ticks = self._ticks(c.atr * p.atr_stop_mult)
         target_ticks = self._ticks(c.atr * p.atr_target_mult)
-        # The decide() rule "pullback tagged the fast EMA, then closed back beyond it"
-        # becomes a close band hugging the fast EMA: a close just beyond it is the
-        # resumption at value; a close far beyond is an extended bar (chasing).
+        support, resistance = self._recent_sr(preq.recent_bars)
+        # The decide() rule "pullback tagged the immediate higher-low, then closed back"
+        # becomes a close band hugging that local support (long) / resistance (short).
         if c.trend == "up" and c.recent_delta >= 0:
             trigger = EntryTrigger(
-                direction="long", min_close=c.ema_fast, max_close=c.ema_fast + tol,
+                direction="long", min_close=support, max_close=support + tol,
                 qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
                 confidence=self._confidence(c, +1),
-                rationale="uptrend pullback resuming above fast EMA, +delta",
+                rationale="uptrend pullback resuming off the higher-low, +delta",
             )
             return TradePlan(mode="seek_entry", bias="long", triggers=[trigger],
                              rationale="uptrend pullback plan")
         if c.trend == "down" and c.recent_delta <= 0:
             trigger = EntryTrigger(
-                direction="short", min_close=c.ema_fast - tol, max_close=c.ema_fast,
+                direction="short", min_close=resistance - tol, max_close=resistance,
                 qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
                 confidence=self._confidence(c, -1),
-                rationale="downtrend bounce resuming below fast EMA, -delta",
+                rationale="downtrend pullback resuming off the lower-high, -delta",
             )
             return TradePlan(mode="seek_entry", bias="short", triggers=[trigger],
-                             rationale="downtrend bounce plan")
+                             rationale="downtrend pullback plan")
         return TradePlan(mode="seek_entry", rationale="no trend/flow alignment; no-trade")
 
     def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
         c = preq.context
-        return (f"rules brief: trend={c.trend} atr={c.atr} ema_fast={c.ema_fast} "
-                f"ema_slow={c.ema_slow} swing_high={c.swing_high} "
-                f"swing_low={c.swing_low} bars={len(history)}")
+        return (f"rules brief: regime={c.regime} trend={c.trend} atr={c.atr} "
+                f"swing_high={c.swing_high} swing_low={c.swing_low} bars={len(history)}")
 
     def _confidence(self, c: MarketContext, direction: int) -> float:
         score = 0.5
-        if c.ema_fast is not None and c.ema_slow is not None:
-            spread = abs(c.ema_fast - c.ema_slow)
-            score += min(0.25, spread / (c.atr or 1.0) * 0.1)
+        # Wider swing structure (relative to ATR) = a cleaner, roomier trend.
+        if c.swing_high is not None and c.swing_low is not None and c.atr:
+            span = abs(c.swing_high - c.swing_low)
+            score += min(0.25, span / c.atr * 0.05)
         score += min(0.2, abs(c.recent_delta) / 10000.0)
         return round(min(0.95, max(0.5, score)), 3)
 

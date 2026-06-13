@@ -37,20 +37,29 @@ near 0 = balanced / absorptive. Lean on `delta_ratio` for **force**, and on `rec
 
 ## How you use it in this strategy
 
-You are a **with-trend pullback** trader, so you use order flow to confirm that the
-**resumption** of the trend is real:
+Whatever setup you take — a pullback resuming, a breakout, a level reclaim, a
+failed-breakout fade, a range-edge rejection — order flow is the gate that confirms real
+participation is behind the trade. The delta you want depends on whether you are JOINING a
+move or FADING one:
 
-- **Buying a pullback (long)**: you want `recent_delta >= 0` and ideally turning up as
-  price reclaims the fast EMA. Buyers stepping back in on the dip is the green light.
-  If delta is firmly negative while price ticks up, the bounce is weak — **WAIT**.
-- **Selling a bounce (short)**: mirror — you want `recent_delta <= 0`, sellers
-  re-engaging as price fails back below the fast EMA.
+- **Joining a move (long)** — a pullback resuming up, a breakout above resistance, a
+  reclaim of a level: you want `recent_delta >= 0` (ideally turning up / expanding) as
+  price pushes your way. Aggressive buyers showing up on your trigger is the green light;
+  firmly negative delta while price ticks up is a weak move — **WAIT**.
+- **Joining a move (short)**: mirror — you want `recent_delta <= 0`, sellers engaging.
+- **Fading a move** (a failed breakout, a range edge holding): you want the pushing side
+  to be **absorbed or exhausted** — a delta surge into the level that fails to extend, or
+  divergence — confirming the aggressors are trapped. Never fade a move that delta still
+  backs with force.
 
 ## Confirmation checklist (long; mirror for short)
 
-1. Trend up and price has pulled back to the fast EMA (location — see price-action.md).
-2. `recent_delta >= 0` — buyers present, not absent.
-3. The trigger bar closes back up through the EMA (resumption).
+1. The setup has clean **location/structure** (see price-action.md): a pullback to value,
+   a breakout level with room, a reclaimed level, or a range edge.
+2. Delta agrees with the trade — present in your direction when **joining** a move;
+   absorbed / exhausted / divergent against the move when **fading** one. Read force with
+   `delta_ratio`, magnitude with `recent_delta` + `session`.
+3. The **trigger bar** confirms — a decisive close in your direction at/through the level.
 4. No obvious **absorption/exhaustion** against you at the level you're entering.
 
 ## Red flags (reasons to WAIT or EXIT)
@@ -59,5 +68,5 @@ You are a **with-trend pullback** trader, so you use order flow to confirm that 
 - **Flat/contrary delta** on your entry trigger — the move lacks force.
 - A **delta spike into a level** that immediately stalls (absorption) — don't chase.
 
-Order flow is confirmation, not a standalone signal. No trend + location setup ⇒ no
+Order flow is confirmation, not a standalone signal. No structure/location setup ⇒ no
 trade, regardless of delta.

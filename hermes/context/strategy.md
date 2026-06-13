@@ -27,12 +27,15 @@ you WAIT. Most bars are WAIT.
 
 ## Definitions (provided to you each bar in `context`)
 
-- `trend` — `up` when fast EMA > slow EMA, `down` when fast EMA < slow EMA. A crude
-  filter only; your structural read overrides it (see market-regime.md).
-- `ema_fast`, `ema_slow` — the moving averages (defaults 9 / 21).
+- `regime` — `trending` / `ranging` / `transitional`, read from swing **structure**
+  (HH+HL vs LH+LL vs contained/mixed), not moving averages (see market-regime.md).
+- `trend` — `up` / `down` / `flat`, the structural direction (flat unless trending).
+  A mechanical first read; confirm it against the bars and `recent_pivots`.
+- `recent_pivots` — the recent confirmed swing pivots `(price, "high"/"low")`, oldest
+  first — the structure the regime read is based on.
 - `atr` — Average True Range; your unit of "normal" movement.
 - `recent_delta` — cumulative order-flow delta over the recent window (order-flow.md).
-- `swing_high`, `swing_low` — the last confirmed pivots (structure).
+- `swing_high`, `swing_low` — the last confirmed pivots (structure / nearest S/R).
 
 ## Hard rules (apply to EVERY playbook; never relaxed)
 

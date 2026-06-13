@@ -21,8 +21,9 @@ On each closed bar you are asked to decide ONE action. The bridge gives you the
 market context and your account/session state, and you have tools to look closer
 and to act:
 
-1. **Assess location & trend** (price-action.md): are we in a clean trend? Where is
-   price relative to the fast/slow EMAs and the last swing?
+1. **Assess regime, location & trend** (price-action.md, market-regime.md): is the swing
+   structure a clean trend, a range, or transitional? Where is price relative to the last
+   swings (`swing_high`/`swing_low`, `recent_pivots`)?
 2. **Wait for your setup** (strategy.md): only act when a setup from the active playbook
    is fully present. Most bars are **WAIT**. Patience is the edge.
 3. **Confirm with order flow** (order-flow.md): is delta/pressure supporting the

@@ -378,7 +378,7 @@ def test_mock_manage_plan_arms_trend_flip_exit(cfg):
     plan = MockAgentClient(cfg).propose_plan(preq)
     assert plan.mode == "manage_position"
     assert plan.triggers == []
-    assert plan.exit is not None and plan.exit.exit_below == preq.context.ema_slow
+    assert plan.exit is not None and plan.exit.exit_below == preq.context.swing_low
 
 
 def test_replay_with_planner_finds_entries(cfg):

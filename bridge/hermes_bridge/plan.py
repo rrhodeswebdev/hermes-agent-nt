@@ -45,6 +45,10 @@ class EntryTrigger(BaseModel):
     stop_ticks: int | None = None
     target_ticks: int | None = None
     confidence: float = Field(0.5, ge=0.0, le=1.0)
+    # The authored setup this trigger implements (agent mode). The bridge validates it
+    # against the roster and derives the plan's active_strategy from the trigger that fires,
+    # so the dashboard highlights the setup actually traded. Display only — never gates firing.
+    setup: str | None = None
     rationale: str = ""
 
     def matches(self, close: float) -> bool:
@@ -76,6 +80,7 @@ class ExitRule(BaseModel):
 
     exit_below: float | None = None  # exit if close <= this
     exit_above: float | None = None  # exit if close >= this
+    setup: str | None = None         # authored setup the open position is managed under
     rationale: str = ""
 
     def matches(self, close: float) -> bool:
@@ -104,6 +109,11 @@ class TradePlan(BaseModel):
 
     mode: Mode = "seek_entry"
     bias: Literal["long", "short", "neutral"] = "neutral"
+    # The authored setup this plan is trading. NOT taken from the LLM directly: the bridge
+    # derives it from the armed trigger's (validated) `setup` so it always names a real setup
+    # and matches the condition that actually fires. The dashboard highlights it. Display
+    # only — never gates trading; None when no armed condition maps to a named setup.
+    active_strategy: str | None = None
     triggers: list[EntryTrigger] = Field(default_factory=list)
     exit: ExitRule | None = None
     rationale: str = ""
@@ -207,6 +217,19 @@ class Planner:
         with self._lock:
             return self._brief
 
+    def clear_session(self) -> None:
+        """Drop the session brief + armed plan so the NEXT ``schedule_session_analysis``
+        re-runs the pre-session study (which re-authors the playbook in agent mode) instead
+        of short-circuiting. Used by ``/control/reauthor`` to refresh without a bridge
+        restart. ``_consumed_ts`` is intentionally kept so a just-fired plan cannot re-arm
+        and fire twice across the re-author."""
+        with self._lock:
+            self._brief = ""
+            self._plan = None
+            self._status = "idle"
+            self._last_error = ""
+            self._session_error = ""
+
     def snapshot(self) -> dict:
         with self._lock:
             return {
@@ -219,11 +242,20 @@ class Planner:
             }
 
     # ---- scheduling ---------------------------------------------------------
-    def schedule_session_analysis(self, history: list[Bar], preq: PlanRequest) -> None:
-        if self.session_brief():
+    def is_analyzing_session(self) -> bool:
+        """True while the pre-session study is running — used to avoid stacking a second
+        re-author on top of one already in flight."""
+        with self._lock:
+            return self._status == "analyzing_session"
+
+    def schedule_session_analysis(self, history: list[Bar], preq: PlanRequest,
+                                  *, force: bool = False) -> None:
+        if not force and self.session_brief():
             # Mid-session reconnect (NinjaTrader re-enables and re-posts history):
             # the study already ran, and re-deriving it would blind the plan cycle
-            # for minutes. Just refresh the plan from this snapshot.
+            # for minutes. Just refresh the plan from this snapshot. ``force=True``
+            # (volatility-adaptive re-author / manual reauthor) bypasses this and
+            # re-runs the study, overwriting the brief + playbook in place.
             self.schedule_plan_analysis(preq)
             return
         if self.synchronous:

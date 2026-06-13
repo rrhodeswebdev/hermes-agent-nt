@@ -343,7 +343,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Self-healing history handshake: history is normally pushed once per
                 // ENABLE, so a bridge restarted mid-session has an empty bar store (it
-                // then computes EMAs/ATR on a thin live seed — 2026-06-11 incident).
+                // then reads swing structure / ATR on a thin live seed — 2026-06-11 incident).
                 // The bridge flags need_history on every bar response until
                 // /ingest/history arrives; re-send it, throttled.
                 if (resp != null && resp.Contains("\"need_history\":true"))
@@ -710,6 +710,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             public bool Ok;
             public string Instrument = "", Timeframe = "", Agent = "", Model = "", StrategyId = "";
+            // Agent-authored strategy: source ("agent"/"custom"), the headline name/summary
+            // (= the active setup), how the active setup was chosen ("declared" by the brain
+            // vs "regime" fallback), and every authored setup as name|regime|summary|active.
+            public string StrategySource = "", StrategyName = "", StrategySummary = "", StrategyActiveSource = "";
+            public List<string[]> StrategyRows = new List<string[]>();  // name|regime|summary|active
             public double AgeS = double.NaN, LastClose = double.NaN;
             public int Position, Trades;
             public double AvgPrice = double.NaN, Realized, Unrealized;
@@ -742,7 +747,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                     case "timeframe":    p.Timeframe = v; break;
                     case "agent":        p.Agent = v; break;
                     case "model":        p.Model = v; break;
-                    case "strategy_id":  p.StrategyId = v; break;
+                    case "strategy_id":      p.StrategyId = v; break;
+                    case "strategy_source":         p.StrategySource = v; break;
+                    case "strategy_name":           p.StrategyName = v; break;
+                    case "strategy_summary":        p.StrategySummary = v; break;
+                    case "strategy_active_source":  p.StrategyActiveSource = v; break;
+                    case "strategy_row":
+                        var sp = v.Split('|');               // name|regime|summary|active
+                        if (sp.Length >= 4) p.StrategyRows.Add(sp);
+                        break;
                     case "age_s":        p.AgeS = Num(v); break;
                     case "last_close":   p.LastClose = Num(v); break;
                     case "position":     p.Position = (int)NumOr(v, 0); break;
@@ -1229,7 +1242,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             float s = Math.Max(0.5f, FontSize / 12f);
             _s = s;
             float x0 = ChartPanel.X + 12f, y0 = ChartPanel.Y + 12f;
-            float w = 340f * s, pad = 14f * s;
+            float w = 420f * s, pad = 14f * s;
             float xL = x0 + pad, xR = x0 + w - pad, innerW = xR - xL;
             float y = y0 + pad;
 
@@ -1283,6 +1296,37 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             AddText(Join(" · ", p.Agent, p.Model, p.StrategyId), _fSub, xL, y, ColDim);
             y += 20f * s;
+
+            // ---- agent-authored strategies (every setup; the live-regime one highlighted) ---
+            AddText("STRATEGY", _fLabel, xL, y, ColDim);
+            y += 17f * s;
+            if (p.StrategyRows.Count > 0)
+            {
+                foreach (var sr in p.StrategyRows)   // name|regime|summary|active
+                {
+                    string nm = sr[0], regime = sr[1], summary = sr[2];
+                    bool active = sr.Length > 3 && sr[3] == "1";
+                    string head = (active ? "▸ " : "· ") + nm
+                        + (regime.Length > 0 ? "  (" + regime + ")" : "");
+                    AddText(head, _fBodyB, xL, y, active ? ColGreen : ColText);
+                    if (active)   // "TRADING" when the brain named this setup; else regime match
+                        AddTextRight(p.StrategyActiveSource == "declared" ? "TRADING" : "ACTIVE",
+                            _fLabel, xR, y + 1f * s, ColGreen);
+                    y += 16f * s;
+                    if (summary.Length > 0)
+                    {
+                        AddText(summary, _fRat, xL + 12f * s, y, ColMuted, innerW - 12f * s);
+                        y += 15f * s;   // one ellipsized line per setup
+                    }
+                }
+            }
+            else
+            {
+                string fb = p.StrategySource == "agent" ? "authoring…"
+                          : p.StrategySource == "custom" ? "custom playbooks" : "—";
+                AddText(fb, _fBody, xL, y, ColMuted);
+                y += 16f * s;
+            }
             Divider(xL, xR, ref y);
 
             // ---- position + last price ------------------------------------------
@@ -1383,8 +1427,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             Divider(xL, xR, ref y);
 
             // ---- recent decisions table -----------------------------------------
-            float cTime = xL, cAct = xL + 62f * s, cConf = xL + 148f * s,
-                  cClose = xL + 192f * s, cOrd = xL + 258f * s;
+            // Columns are anchored to innerW (fractions, not fixed px) so the ORDER
+            // column — drawn left-aligned and unbounded — always lands inside the card
+            // and can't run off the right edge if the card width changes again.
+            float cTime = xL, cAct = xL + innerW * 0.17f, cConf = xL + innerW * 0.44f,
+                  cClose = xL + innerW * 0.57f, cOrd = xL + innerW * 0.79f;
             AddText("TIME", _fLabel, cTime, y, ColDim);
             AddText("ACTION", _fLabel, cAct, y, ColDim);
             AddText("CONF", _fLabel, cConf, y, ColDim);

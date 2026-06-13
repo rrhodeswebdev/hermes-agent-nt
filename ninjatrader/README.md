@@ -35,9 +35,11 @@ card + S/R levels directly on the chart** — the dashboard is built into the st
      from this chart's historical bars (the pre-session study) and trades that. **false**:
      it trades **your own** playbooks under `hermes/context/strategies/{trending,ranging}/`
      and invents nothing — if those dirs are empty it simply WAITs. The toggle is reported
-     to the bridge before history so the study runs in the right mode; see the authored
-     playbook anytime at `GET /strategy` (also written to `hermes/generated/`). Risk limits
-     are identical either way.
+     to the bridge before history so the study runs in the right mode. The agent names each
+     setup it authors; the chart card's **STRATEGY** section (and the browser dashboard) lists
+     them all and highlights the one matching the live regime. See the full authored playbook
+     anytime at `GET /strategy` (also written to `hermes/generated/`). Risk limits are identical
+     either way.
    - `AllowLive` → leave **false**; the strategy refuses to trade a live (brokerage)
      account unless this is explicitly true. Simulated **Sim*** and **Playback** accounts
      always trade with it off.

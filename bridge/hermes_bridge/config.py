@@ -53,12 +53,11 @@ class InstrumentConfig(BaseModel):
 
 
 class StrategyParams(BaseModel):
-    ema_fast: int = 9
-    ema_slow: int = 21
     atr_period: int = 14
+    swing_lookback: int = 3        # bars each side of a pivot to confirm a swing high/low
     atr_stop_mult: float = 1.5
     atr_target_mult: float = 2.0
-    pullback_atr: float = 0.5      # how deep a pullback to the fast EMA counts as a setup
+    pullback_atr: float = 0.5      # how close (in ATR) to the swing still counts as a pullback
     min_confidence: float = 0.55   # engine ignores Decisions below this confidence
 
 
@@ -148,6 +147,25 @@ class PlannerConfig(BaseModel):
     max_plan_age_bars: int = 2
 
 
+class ReauthorConfig(BaseModel):
+    """Volatility-adaptive re-authoring (agent mode): how often the brain re-runs the
+    pre-session study to refresh its playbook WHILE a session is live.
+
+    The cadence scales **inversely with volatility** — current ATR vs a longer-window
+    baseline ATR. Calm market (current < baseline) ⇒ longer interval; volatile (current >
+    baseline) ⇒ shorter; an extreme shift either way (ratio crosses ``shock_ratio``)
+    forces an immediate re-author once past ``min_interval_bars``. Re-authoring is seamless:
+    the old playbook keeps trading until the new one lands (no WAIT gap). All intervals are
+    in BARS, so they auto-scale with the chart timeframe."""
+
+    enabled: bool = True
+    base_interval_bars: int = 60     # cadence at the baseline volatility norm
+    min_interval_bars: int = 15      # floor — never re-author more often than this
+    max_interval_bars: int = 240     # ceiling — re-author at least this often even when calm
+    baseline_atr_period: int = 100   # longer-window ATR = the "normal" volatility reference
+    shock_ratio: float = 2.0         # |current/baseline ATR| past this (or its inverse) = a shock
+
+
 class StrategyAuthoringConfig(BaseModel):
     """Where the regime playbooks (the swappable "strategy") come from.
 
@@ -169,6 +187,8 @@ class StrategyAuthoringConfig(BaseModel):
     generated_dir: str = "hermes/generated"
     # Cap on the authored playbook fed back into the system prompt (keeps it bounded).
     max_chars: int = 6000
+    # Volatility-adaptive re-authoring cadence (agent mode).
+    reauthor: ReauthorConfig = Field(default_factory=ReauthorConfig)
 
 
 class LevelsConfig(BaseModel):

@@ -21,6 +21,23 @@ def _pos_str(position: int, avg_price: float) -> str:
     return f"{side} {abs(position)} @ {avg_price:.10g}"
 
 
+def _strategy_view(d: dict) -> tuple[str, list[dict]]:
+    """(label, setups) for the strategy section: ``label`` is a short status word and
+    ``setups`` is the list of ``{name, regime, summary, active}`` the agent authored.
+    Falls back to "authoring…" (agent mode, none yet) / "custom playbooks" / source when
+    the list is empty."""
+    strat = d.get("strategy") or {}
+    source = strat.get("source") or d.get("strategy_source") or "?"
+    setups = strat.get("list") or []
+    if setups:
+        return source, setups
+    if source == "agent":
+        return "authoring…", []
+    if source == "custom":
+        return "custom playbooks", []
+    return source, []
+
+
 def render_text(d: dict | None) -> str:
     """Pre-formatted monospace panel. The NinjaScript indicator draws this verbatim."""
     if not d:
@@ -32,9 +49,20 @@ def render_text(d: dict | None) -> str:
     delayed = "  [DELAYED]" if (age is not None and age > 120) else ""
     halt = f"HALTED:{s['halt_reason']}" if s["halted"] else "active"
 
+    slabel, setups = _strategy_view(d)
     lines = [
         f"HERMES  {d['instrument']} {d['timeframe']}  ({d['agent']}/{d['brain']})",
-        f"account: {d.get('account', '?')}   strategy: {d.get('strategy_source', '?')}",
+        f"account: {d.get('account', '?')}   strategy: {slabel}",
+    ]
+    for it in setups:  # list every authored setup; ▸ marks the one active for the regime
+        mark = "▸" if it.get("active") else "·"
+        reg = f" [{it['regime']}]" if it.get("regime") else ""
+        lines.append(f"  {mark} {it.get('name', '')}{reg}"[:58])
+    _active = next((it for it in setups if it.get("active")), None)
+    _sum_of = _active or (setups[0] if len(setups) == 1 else None)
+    if _sum_of and _sum_of.get("summary"):
+        lines.append(f"    ↳ {_sum_of['summary']}"[:58])
+    lines += [
         f"data age: {age_str}{delayed}",
         f"pos: {_pos_str(s['position'], s['avg_price'])}",
         f"realized: {s['realized_pnl']:+.2f}   unreal: {s['unrealized_pnl']:+.2f}"
@@ -107,6 +135,23 @@ def render_panel(d: dict | None) -> str:
         f"goal_loss={goal['max_daily_loss']:.0f}",
         f"stale_drops={d.get('stale_drops', 0)}",
     ]
+    # Agent-authored strategy. The headline name/summary (= the active setup) feed the
+    # folded card / legacy fallback; one `strategy_row=` line per setup feeds the card's
+    # list (pipe-separated name|regime|summary|active, `|` stripped from the free text).
+    strat = d.get("strategy") or {}
+    if strat.get("name"):
+        lines.append(f"strategy_name={_oneline(strat['name'])}")
+    if strat.get("summary"):
+        lines.append(f"strategy_summary={_oneline(strat['summary'])}")
+    if strat.get("active_source"):
+        # "declared" = the brain named this setup in its plan; "regime" = regime fallback.
+        lines.append(f"strategy_active_source={strat['active_source']}")
+    for it in (strat.get("list") or []):
+        name = _oneline(it.get("name", "")).replace("|", "/")
+        regime = _oneline(it.get("regime", "")).replace("|", "/")
+        summary = _oneline(it.get("summary", "")).replace("|", "/")
+        active = "1" if it.get("active") else "0"
+        lines.append(f"strategy_row={name}|{regime}|{summary}|{active}")
     ld = d.get("last_decision")
     if ld:
         lines += [
@@ -170,10 +215,34 @@ DASHBOARD_HTML = """<!doctype html>
   tr:last-child td{border-bottom:none}
   .grn{color:var(--grn)} .red{color:var(--red)} .amber{color:var(--amber)} .blue{color:var(--blue)} .dim{color:var(--dim)}
   .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600}
+  .strat{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:12px 14px;margin-bottom:16px}
+  .strat .shead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .strat .slabel{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .sbtn{font:inherit;font-size:11px;color:var(--dim);background:#21262d;border:1px solid var(--line);
+    border-radius:6px;padding:3px 9px;cursor:pointer}
+  .sbtn:hover{color:var(--fg);border-color:var(--blue)}
+  .sbtn:disabled{opacity:.5;cursor:default}
+  .srow{border:1px solid var(--line);border-left:3px solid var(--line);border-radius:6px;
+    padding:8px 10px;margin-top:6px}
+  .srow.active{border-left-color:var(--grn);background:rgba(63,185,80,.08)}
+  .srow .sname{font-size:15px;font-weight:600;color:var(--fg)}
+  .srow.active .sname{color:var(--grn)}
+  .srow .ssum{color:var(--dim);margin-top:3px;line-height:1.35;font-size:13px}
+  .schip{display:inline-block;padding:0 7px;border-radius:10px;font-size:10px;font-weight:600;
+    margin-left:8px;background:#21262d;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
+  .srow.active .schip{background:rgba(63,185,80,.18);color:var(--grn)}
 </style></head>
 <body>
 <header><h1>HERMES · <span id="inst">—</span></h1><div id="conn">connecting…</div></header>
 <div class="wrap">
+  <div class="strat" id="strat" style="display:none">
+    <div class="shead">
+      <span class="slabel" id="slabel">Agent strategies</span>
+      <button class="sbtn" id="reauthor" title="Discard the current playbook and author a fresh one from history" style="display:none">Re-author</button>
+    </div>
+    <div id="slist"></div>
+  </div>
   <div class="cards">
     <div class="card"><div class="label">Position</div><div class="val" id="pos">—</div></div>
     <div class="card"><div class="label">Realized P&L</div><div class="val" id="rpnl">—</div></div>
@@ -193,6 +262,36 @@ async function tick(){
     document.getElementById('conn').textContent='● live · '+(d.agent)+'/'+(d.brain)+(d.account?' · '+d.account:'')+(d.strategy_source?' · '+d.strategy_source:'');
     document.getElementById('conn').className='grn';
     document.getElementById('inst').textContent=d.instrument+' '+d.timeframe;
+    // Agent-authored strategies: list every setup the agent wrote, highlight the one
+    // whose regime matches the live market. Built with textContent (agent-authored text).
+    const strat=d.strategy||{}; const se=document.getElementById('strat');
+    const setups=strat.list||[]; const sl=document.getElementById('slist');
+    document.getElementById('reauthor').style.display=strat.source==='agent'?'':'none';
+    if(setups.length){
+      // The active setup is the one the brain declared in its plan (active_source
+      // 'declared') or, failing that, the one matching the live regime ('regime').
+      const declared=strat.active_source==='declared';
+      const aname=(strat.active_index!=null&&setups[strat.active_index])?setups[strat.active_index].name:null;
+      const ctx=declared&&aname?' · trading '+aname:(strat.regime?' · '+strat.regime+' now':'');
+      document.getElementById('slabel').textContent='Agent strategies'+ctx;
+      sl.innerHTML='';
+      setups.forEach(it=>{
+        const row=document.createElement('div'); row.className='srow'+(it.active?' active':'');
+        const head=document.createElement('div');
+        const nm=document.createElement('span'); nm.className='sname'; nm.textContent=it.name||''; head.appendChild(nm);
+        if(it.regime){const c=document.createElement('span'); c.className='schip'; c.textContent=it.regime; head.appendChild(c);}
+        if(it.active){const a=document.createElement('span'); a.className='schip'; a.textContent=declared?'trading':'active'; head.appendChild(a);}
+        row.appendChild(head);
+        if(it.summary){const su=document.createElement('div'); su.className='ssum'; su.textContent=it.summary; row.appendChild(su);}
+        sl.appendChild(row);
+      });
+      se.style.display='';
+    }else if(strat.source==='agent'){
+      document.getElementById('slabel').textContent='Agent strategies';
+      sl.innerHTML='<div class="srow"><div class="sname dim">authoring…</div>'
+        +'<div class="ssum">waiting for the pre-session study to write the playbook</div></div>';
+      se.style.display='';
+    }else{ se.style.display='none'; }
     const s=d.session;
     const pos=s.position===0?'FLAT':(s.position>0?'LONG ':'SHORT ')+Math.abs(s.position)+' @'+s.avg_price;
     const pe=document.getElementById('pos'); pe.textContent=pos;
@@ -215,6 +314,15 @@ async function tick(){
     document.getElementById('rows').innerHTML=rows;
   }catch(e){const c=document.getElementById('conn');c.textContent='● disconnected';c.className='red';}
 }
+document.getElementById('reauthor').addEventListener('click',async function(){
+  const b=this; if(!confirm('Discard the current playbook and author a fresh one from history?'))return;
+  b.disabled=true; const was=b.textContent; b.textContent='re-authoring…';
+  try{
+    const r=await (await fetch('/control/reauthor',{method:'POST'})).json();
+    if(!r.ok) alert('Re-author: '+(r.note||'failed'));
+  }catch(e){ alert('Re-author failed: '+e); }
+  finally{ setTimeout(()=>{b.disabled=false; b.textContent=was;}, 1500); tick(); }
+});
 tick(); setInterval(tick,3000);
 </script>
 </body></html>"""

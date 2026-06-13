@@ -22,7 +22,7 @@ def test_on_close_fires_with_closed_trade(cfg, tmp_path):
     bars = synthetic_bars(60)
     for b in bars:
         eng.store.append(b)
-    ctx = build_context(bars, ema_fast=9, ema_slow=21, atr_period=14)
+    ctx = build_context(bars, atr_period=14)
     px = bars[-1].close
     eng._pending_entry = {"cmd_id": "test-1", "ts": bars[-1].ts, "side": Side.LONG,
                           "context": ctx, "rationale": "r"}

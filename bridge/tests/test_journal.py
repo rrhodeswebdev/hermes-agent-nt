@@ -30,7 +30,7 @@ def test_journal_recent_on_missing_file(tmp_path):
 
 
 def _ctx(trend_bars):
-    return build_context(trend_bars, ema_fast=9, ema_slow=21, atr_period=14)
+    return build_context(trend_bars, atr_period=14)
 
 
 def test_tracker_long_lifecycle_mae_mfe():

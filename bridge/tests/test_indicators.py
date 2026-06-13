@@ -2,25 +2,11 @@ from hermes_bridge.indicators import (
     atr,
     bar_delta,
     build_context,
-    ema,
+    classify_regime,
     swing_high,
     swing_low,
 )
 from tests.conftest import make_bar, synthetic_bars
-
-
-def test_ema_constant_series():
-    assert ema([5.0] * 30, 9) == 5.0
-
-
-def test_ema_requires_enough_data():
-    assert ema([1.0, 2.0], 9) is None
-
-
-def test_ema_tracks_rising_series():
-    vals = [float(i) for i in range(50)]
-    e = ema(vals, 9)
-    assert e is not None and 40 < e < 49  # lags the latest value
 
 
 def test_atr_positive():
@@ -54,10 +40,41 @@ def test_bar_delta_uses_real_orderflow_when_present():
 def test_build_context_uptrend(cfg):
     ctx = build_context(
         synthetic_bars(120),
-        ema_fast=cfg.strategy.ema_fast,
-        ema_slow=cfg.strategy.ema_slow,
         atr_period=cfg.strategy.atr_period,
+        swing_lookback=cfg.strategy.swing_lookback,
     )
-    assert ctx.trend == "up"
-    assert ctx.ema_fast is not None and ctx.ema_slow is not None
-    assert ctx.ema_fast > ctx.ema_slow
+    # Regime is read from swing structure, not EMAs.
+    assert ctx.regime == "trending" and ctx.trend == "up"
+    assert ctx.swing_high is not None and ctx.swing_low is not None
+    assert ctx.recent_pivots  # the structure the read was based on is surfaced
+
+
+def _pivots(highs_lows):
+    """Helper: build a (price, ts, kind) pivot list from [(price, 'high'|'low'), ...]."""
+    return [(p, float(i), k) for i, (p, k) in enumerate(highs_lows)]
+
+
+def test_classify_regime_uptrend_from_structure():
+    # Higher highs AND higher lows → trending up.
+    pivots = _pivots([(100, "high"), (95, "low"), (110, "high"), (104, "low")])
+    assert classify_regime(pivots, atr_value=1.0, last_close=108) == ("trending", "up")
+
+
+def test_classify_regime_downtrend_from_structure():
+    pivots = _pivots([(110, "high"), (104, "low"), (100, "high"), (95, "low")])
+    assert classify_regime(pivots, atr_value=1.0, last_close=96) == ("trending", "down")
+
+
+def test_classify_regime_range_when_swings_flat():
+    # Highs ~flat AND lows ~flat (within tolerance) → ranging.
+    pivots = _pivots([(100, "high"), (90, "low"), (100.1, "high"), (89.9, "low")])
+    assert classify_regime(pivots, atr_value=2.0, last_close=95) == ("ranging", "flat")
+
+
+def test_classify_regime_transitional_when_mixed_or_sparse():
+    # Higher high but lower low (expanding) → transitional, not a clean trend.
+    mixed = _pivots([(100, "high"), (95, "low"), (110, "high"), (90, "low")])
+    assert classify_regime(mixed, atr_value=1.0, last_close=105)[0] == "transitional"
+    # Too few confirmed pivots to read structure.
+    assert classify_regime(_pivots([(100, "high")]), atr_value=1.0, last_close=100) == (
+        "transitional", "flat")
