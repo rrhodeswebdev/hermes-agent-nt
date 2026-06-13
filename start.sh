@@ -14,7 +14,7 @@
 # Usage:
 #   ./start.sh                 # start the bridge using config/trading.yaml
 #   ./start.sh --mock          # force the deterministic mock brain (no LLM)
-#   ./start.sh --check-hermes  # also do a live `hermes -z` ping before serving
+#   ./start.sh --check-claude  # also do a live `claude -p` ping before serving
 #   HERMES_BRIDGE_PORT=9000 ./start.sh   # env overrides are honored
 #
 # Ctrl-C cleanly stops the bridge.
@@ -25,16 +25,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRIDGE_DIR="$REPO_ROOT/bridge"
 CONFIG="$REPO_ROOT/config/trading.yaml"
 VENV="$BRIDGE_DIR/.venv"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-HERMES_REPO="$HERMES_HOME/hermes-agent"
 
 FORCE_MOCK=0
-CHECK_HERMES=0
+CHECK_CLAUDE=0
 PASSTHRU=()
 for arg in "$@"; do
   case "$arg" in
     --mock)         FORCE_MOCK=1 ;;
-    --check-hermes) CHECK_HERMES=1 ;;
+    --check-claude) CHECK_CLAUDE=1 ;;
     *)              PASSTHRU+=("$arg") ;;
   esac
 done
@@ -59,22 +57,7 @@ fi
 # 2. Read the resolved config authoritatively (same loader + env overrides).   #
 # --------------------------------------------------------------------------- #
 if [[ "$FORCE_MOCK" == "1" ]]; then export HERMES_BRIDGE_AGENT=mock; fi
-eval "$(cd "$BRIDGE_DIR" && "$VENV/bin/python" - "$CONFIG" <<'PY'
-import sys
-from hermes_bridge.config import load_config
-c = load_config(sys.argv[1])
-print(f"CLIENT={c.agent.client!s}")
-print(f"HMODE={c.agent.hermes.mode!s}")
-print(f"HBIN={c.agent.hermes.hermes_bin!s}")
-print(f"HOST={c.server.host!s}")
-print(f"PORT={c.server.port:d}")
-print(f"SID={c.strategy_id!s}")
-print(f"SYM={c.instrument.symbol!s}")
-print(f"TF={c.instrument.timeframe!s}")
-print(f"ACCT={c.execution.account!s}")
-print(f"LIVE={'1' if c.execution.allow_live else '0'}")
-PY
-)"
+eval "$("$BRIDGE_DIR/.venv/bin/hermes-bridge" config-dump --config "$CONFIG")"
 
 # Health check always talks to loopback even when serving on 0.0.0.0.
 HEALTH_HOST="$HOST"; [[ "$HEALTH_HOST" == "0.0.0.0" ]] && HEALTH_HOST="127.0.0.1"
@@ -88,31 +71,19 @@ say "Config:   agent=$CLIENT  instrument=$SYM $TF  account=$ACCT  strategy_id=$S
 SERVE_BIN="$VENV/bin/hermes-bridge"
 SERVE_ENV=()
 
-if [[ "$CLIENT" == "hermes" ]]; then
-  if [[ "$HMODE" == "cli" ]]; then
-    [[ -x "$HBIN" ]] || die "hermes binary not executable at: $HBIN
-   Fix agent.hermes.hermes_bin in config/trading.yaml, or run with --mock."
-    ok "Brain: Hermes oneshot CLI (hermes -z) → $HBIN"
-    if [[ "$CHECK_HERMES" == "1" ]]; then
-      say "Pinging Hermes (this makes one real model call)…"
-      if "$HBIN" -z "Reply with the single word: pong" >/dev/null 2>&1; then
-        ok "Hermes responded."
-      else
-        warn "Hermes ping failed — the bridge will fall back to WAIT on errors."
-      fi
+if [[ "$CLIENT" == "claude" ]]; then
+  CBIN_PATH="$(command -v "$CBIN" 2>/dev/null || true)"
+  [[ -n "$CBIN_PATH" ]] || die "claude CLI not found on PATH (agent.claude.claude_bin=$CBIN).
+   Install Claude Code, fix agent.claude.claude_bin in config/trading.yaml, or run with --mock."
+  ok "Brain: Claude CLI (claude -p, model=$CMODEL) → $CBIN_PATH"
+  if [[ "$CHECK_CLAUDE" == "1" ]]; then
+    say "Pinging Claude through the bridge's real call path (one model call)…"
+    # `check` uses the same argv/schema/env as live decisions, so a pass is meaningful.
+    if "$SERVE_BIN" check --config "$CONFIG"; then
+      ok "Claude responded."
+    else
+      warn "Claude ping failed — the bridge will fall back to WAIT on errors."
     fi
-  else
-    # in_process: the bridge must import run_agent from the Hermes venv.
-    HVENV="$HERMES_REPO/venv"
-    [[ -d "$HVENV" ]] || die "Hermes venv not found at $HVENV (mode: in_process).
-   Install Hermes (scripts/install_hermes.sh --install-hermes), set mode: cli, or use --mock."
-    if [[ ! -x "$HVENV/bin/hermes-bridge" ]]; then
-      say "Installing hermes-bridge into the Hermes venv…"
-      uv pip install --python "$HVENV" -e "$BRIDGE_DIR"
-    fi
-    SERVE_BIN="$HVENV/bin/hermes-bridge"
-    SERVE_ENV=(env "PYTHONPATH=$HERMES_REPO${PYTHONPATH:+:$PYTHONPATH}")
-    ok "Brain: Hermes in-process (AIAgent) via $HVENV"
   fi
 else
   ok "Brain: deterministic mock rules (no LLM)."

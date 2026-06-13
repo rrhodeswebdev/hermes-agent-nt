@@ -1,31 +1,9 @@
 import json
 import subprocess
-import types
 
-from hermes_bridge.agent_client import AgentRequest
 from hermes_bridge.claude_agent import ClaudeAgentClient
-from hermes_bridge.config import BridgeConfig
-from hermes_bridge.indicators import build_context
 from hermes_bridge.models import Action
-from hermes_bridge.session import SessionState
-from tests.conftest import synthetic_bars
-
-
-def _client() -> ClaudeAgentClient:
-    cfg = BridgeConfig()
-    cfg.agent.client = "claude"
-    return ClaudeAgentClient(cfg)
-
-
-def _req(cfg: BridgeConfig) -> AgentRequest:
-    bars = synthetic_bars(120)
-    ctx = build_context(bars, ema_fast=cfg.strategy.ema_fast,
-                        ema_slow=cfg.strategy.ema_slow, atr_period=cfg.strategy.atr_period)
-    sess = SessionState(cfg.instrument.symbol, cfg.instrument.timeframe,
-                        cfg.instrument.tick_size, cfg.instrument.tick_value,
-                        cfg.daily_goal.profit_target, cfg.daily_goal.max_daily_loss)
-    return AgentRequest(mode="seek_entry", context=ctx, recent_bars=bars,
-                        account=sess.account_state(mark_price=bars[-1].close))
+from tests.conftest import make_agent_request, make_claude_client
 
 
 def test_parse_structured_result_object():
@@ -54,19 +32,11 @@ def test_parse_garbage_waits():
     assert ClaudeAgentClient._parse("not json at all").action is Action.WAIT
 
 
-def test_decide_builds_isolated_command(monkeypatch):
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["input"] = kwargs.get("input")
-        return types.SimpleNamespace(
-            stdout=json.dumps({"is_error": False, "result": {"action": "WAIT"}}),
-            stderr="", returncode=0)
-
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
-    c = _client()
-    d = c.decide(_req(c.cfg))
+def test_decide_builds_isolated_command(fake_claude):
+    captured = fake_claude(
+        stdout=json.dumps({"is_error": False, "result": {"action": "WAIT"}}))
+    c = make_claude_client()
+    d = c.decide(make_agent_request(c.cfg))
     assert d.action is Action.WAIT
     cmd = captured["cmd"]
     assert cmd[0] == "claude"
@@ -81,19 +51,17 @@ def test_decide_builds_isolated_command(monkeypatch):
     assert captured["input"].startswith("CURRENT MARKET STATE:")
 
 
-def test_decide_failsafe_on_timeout(monkeypatch):
-    def boom(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1))
-
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", boom)
-    c = _client()
-    d = c.decide(_req(c.cfg))
+def test_decide_failsafe_on_timeout(fake_claude):
+    fake_claude(exc=subprocess.TimeoutExpired(["claude"], 1))
+    c = make_claude_client()
+    d = c.decide(make_agent_request(c.cfg))
     assert d.action is Action.WAIT
     assert d.rationale.startswith("claude_error:")
 
 
 def test_build_agent_client_returns_claude():
     from hermes_bridge.agent_client import build_agent_client
+    from hermes_bridge.config import BridgeConfig
     cfg = BridgeConfig()
     cfg.agent.client = "claude"
     assert isinstance(build_agent_client(cfg), ClaudeAgentClient)

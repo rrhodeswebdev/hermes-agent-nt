@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -28,8 +29,6 @@ def agent_timeout_s(cfg: BridgeConfig) -> float:
     """Decision-latency ceiling of the ACTIVE agent client (0 for the mock/rules client)."""
     if cfg.agent.client == "claude":
         return cfg.agent.claude.timeout_s
-    if cfg.agent.client == "hermes":
-        return cfg.agent.hermes.timeout_s
     return 0.0
 
 
@@ -84,40 +83,35 @@ class SessionWindow(BaseModel):
     timezone: str = "America/New_York"
 
 
-class HermesClientConfig(BaseModel):
-    # `mode` selects how HermesAgentClient reaches the runtime.
-    mode: str = "in_process"            # in_process | cli
-    # OpenRouter-style "provider/model"; "" → use Hermes' own config.yaml model.default.
-    model: str = ""
+class ClaudeClientConfig(BaseModel):
+    # The decision brain via the Claude Code CLI in headless print mode, on your
+    # subscription (no ANTHROPIC_API_KEY / metered API).
+    claude_bin: str = "claude"          # path/name of the claude launcher
+    model: str = "sonnet"               # sonnet | haiku | opus | full model id (haiku = fastest)
+    safe_mode: bool = True              # --safe-mode: isolate from CLAUDE.md/hooks/MCP/skills
+    # Latency lever. Extended-"thinking" tokens dominate decision latency: uncapped, one
+    # decision can emit thousands of tokens (~30–50s) and even blow past timeout_s → WAIT.
+    # Threaded into the subprocess as MAX_THINKING_TOKENS. 0 = minimal thinking (fastest,
+    # ~10s); raise (e.g. 1024) if decisions show a WAIT bias from too little reasoning;
+    # None = uncapped (slowest, most deliberation).
+    max_thinking_tokens: int | None = 0
+    timeout_s: float = 30.0
+    # Model for the one-time session study (planner). None = use `model`. The study
+    # reads a long history once and writes the brief the fast per-bar plans build on,
+    # so it can afford a bigger model (e.g. model: haiku, session_model: sonnet).
+    session_model: str | None = None
+    # Keep one `claude` child alive across requests (system prompt paid once) instead
+    # of a fresh process per decision. Falls back to one-shot calls on any session
+    # failure. Saves the 1-3s CLI cold start on every analysis.
+    persistent: bool = False
+    # A persistent session accumulates one conversation turn per analysis, so its
+    # context (and therefore latency) grows all session long. Recycle the child after
+    # this many turns — one cold start every N analyses instead of latency creeping
+    # past the plan budget. None = never recycle.
+    max_session_turns: int | None = 40
+    extra_args: list[str] = Field(default_factory=list)  # appended verbatim to the claude argv
     # Directory of *.md context files loaded verbatim into the system prompt (this is
     # how the agent learns the strategy/order-flow/risk/goal). Absolute or relative to CWD.
-    context_dir: str = "hermes/context"
-    # Toolsets exposed to the agent. [] = pure reasoning (the bridge executes orders);
-    # e.g. ["ninjatrader"] to let the agent call the nt_* tools itself.
-    enabled_toolsets: list[str] = Field(default_factory=list)
-    skip_memory: bool = True           # per-bar decisions are stateless
-    quiet_mode: bool = True
-    timeout_s: float = 60.0
-    # CLI mode (mode == "cli"): shell out to Hermes' non-interactive oneshot
-    # (`hermes -z "<prompt>"`). This reuses Hermes' full provider/auth resolution —
-    # including its OAuth logins — so it works where a bare in-process AIAgent() does
-    # not. Recommended for OAuth-based providers.
-    hermes_bin: str = "hermes"         # path to the `hermes` launcher
-    # Used only if context_dir is missing/empty.
-    context_hint: str = (
-        "You are Hermes, a disciplined futures day-trader. Trade a trend-pullback "
-        "strategy with order-flow confirmation, ATR brackets, and strict risk limits."
-    )
-
-
-class ClaudeClientConfig(BaseModel):
-    # The brain via the Claude Code CLI in headless print mode, on your subscription.
-    claude_bin: str = "claude"          # path/name of the claude launcher
-    model: str = "sonnet"               # sonnet | haiku | opus | full model id
-    safe_mode: bool = True              # --safe-mode: isolate from CLAUDE.md/hooks/MCP
-    timeout_s: float = 30.0
-    extra_args: list[str] = Field(default_factory=list)  # appended verbatim to the claude argv
-    # Trading knowledge loaded verbatim into the system prompt (relative to CWD or absolute).
     context_dir: str = "hermes/context"
     # Used only if context_dir is missing/empty.
     context_hint: str = (
@@ -127,7 +121,10 @@ class ClaudeClientConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    client: str = "mock"              # mock | hermes | claude
+    # Validated: a stale value (e.g. the legacy "hermes" brain, replaced by "claude")
+    # must fail loudly at load — never silently fall back to the mock rules brain,
+    # which arms triggers and places orders on its own.
+    client: Literal["mock", "claude"] = "mock"
     prefilter: str = "none"           # none | mock (mock rules screen entries before Claude)
     # After Claude DECLINES a prefilter candidate, near-identical candidates (same
     # direction, close within dedup_atr × ATR of the declined close) are answered
@@ -135,8 +132,30 @@ class AgentConfig(BaseModel):
     # extended trends otherwise produce the same candidate bar after bar. 0 disables.
     prefilter_dedup_bars: int = 5
     prefilter_dedup_atr: float = 0.5
-    hermes: HermesClientConfig = Field(default_factory=HermesClientConfig)
     claude: ClaudeClientConfig = Field(default_factory=ClaudeClientConfig)
+
+
+class PlannerConfig(BaseModel):
+    """The pre-armed plan cycle (plan.py): analysis between bars, instant closes."""
+
+    enabled: bool = True
+    # Budgets for the background analyses. These are bridge-side limits (surfaced in
+    # dashboard error tags), unrelated to NinjaTrader's HttpTimeoutMs. The plan
+    # analysis runs between bars, so it can afford more than the per-bar timeout_s.
+    plan_timeout_s: float = 75.0
+    session_timeout_s: float = 180.0
+    # A plan armed from a bar this many closes old no longer fires (market moved on).
+    max_plan_age_bars: int = 2
+
+
+class LevelsConfig(BaseModel):
+    """Swing-pivot S/R detection (levels.py) for `GET /levels` + the plan prompt."""
+
+    enabled: bool = True
+    lookback: int = 3        # bars on each side that must be lower/higher to confirm a pivot
+    merge_ticks: int = 8     # pivots within this many ticks cluster into one zone
+    min_touches: int = 1     # zones with fewer pivots are dropped
+    max_levels: int = 12     # strongest-first cap on the returned zones
 
 
 class ServerConfig(BaseModel):
@@ -178,6 +197,8 @@ class BridgeConfig(BaseModel):
     daily_goal: DailyGoal = Field(default_factory=DailyGoal)
     session: SessionWindow = Field(default_factory=SessionWindow)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    planner: PlannerConfig = Field(default_factory=PlannerConfig)
+    levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)

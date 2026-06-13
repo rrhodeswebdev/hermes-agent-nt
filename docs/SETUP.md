@@ -1,14 +1,16 @@
 # Setup
 
-Three things to stand up: the **bridge**, the **Hermes** customization, and the
+Three things to stand up: the **bridge**, the **decision brain** (the Claude CLI), and the
 **NinjaScript** strategy. Validate the whole loop with the mock engine first (no LLM,
-no NinjaTrader), then wire in Hermes, then connect NinjaTrader on a **Sim** account.
+no NinjaTrader), then switch on the Claude brain, then connect NinjaTrader on a **Sim**
+account.
 
 ## 0. Prerequisites
 
 - `uv` (Python manager) — https://docs.astral.sh/uv/
 - NinjaTrader 8 (Windows) for live/sim chart trading
-- A Hermes Agent install (macOS/Linux/WSL2) — optional until step 3
+- The **Claude Code CLI**, logged in on your Claude subscription (no API key) — optional
+  until step 2. Install: https://claude.com/claude-code. Verify with `claude --version`.
 
 ## 1. Bridge — verify the loop with the mock engine
 
@@ -17,9 +19,9 @@ cd bridge
 uv venv --python 3.11 .venv
 uv pip install --python .venv -e ".[dev]"
 
-.venv/bin/pytest                       # 37 tests should pass
+.venv/bin/pytest                       # 60 tests should pass
 # Full enter→manage→exit→daily-goal loop on synthetic bars, no LLM:
-.venv/bin/hermes-bridge replay replay/sample_bars.csv -v --config ../config/trading.yaml
+.venv/bin/hermes-bridge replay replay/sample_bars.csv -v --agent mock --config ../config/trading.yaml
 ```
 
 Then run the server:
@@ -31,32 +33,38 @@ Then run the server:
 
 Edit `config/trading.yaml` for your instrument, risk limits, and daily goal.
 
-## 2. Hermes — install and customize
+## 2. Claude brain — log in and switch it on
+
+The brain is the `claude` CLI in headless print mode. It runs on your Claude
+subscription (no `ANTHROPIC_API_KEY`) and is isolated from your global CLAUDE.md, hooks,
+MCP, and skills via `--safe-mode`.
 
 ```bash
-# Install the Hermes runtime (review it first), then copy our customization:
-scripts/install_hermes.sh --install-hermes
-# or, if Hermes is already installed, just copy customization:
-scripts/install_hermes.sh
+# Make sure the CLI is installed and logged in:
+claude --version          # confirms it's on PATH
+claude                    # if it prompts, run /login (Claude subscription) once, then exit
 ```
 
-Then (see `hermes/README.md` for detail):
-
-- Point your Hermes **project context** at `hermes/context/*.md`.
-- Enable the **`ninjatrader`** toolset for the agent.
-- Set env: `HERMES_BRIDGE_URL=http://127.0.0.1:8787`,
-  `HERMES_STRATEGY_ID=hermes-default` (match `config/trading.yaml`).
-
-Switch the engine to the LLM when ready:
+Switch the engine to the LLM in `config/trading.yaml`:
 
 ```yaml
-# config/trading.yaml
 agent:
-  client: hermes
+  client: claude
+  claude:
+    model: haiku          # haiku = fastest decisions; sonnet/opus for more deliberation
+    max_thinking_tokens: 0  # speed lever: 0 ≈ 10s/decision; raise (e.g. 1024) for more reasoning
+    context_dir: /absolute/path/to/hermes/context
 ```
 
-Restart the bridge. If Hermes is unreachable or replies unparseably, the bridge safely
-falls back to `WAIT` (no trade).
+The trading knowledge in `hermes/context/*.md` is loaded verbatim into Claude's system
+prompt, so the agent trades the configured way. Restart the bridge after any config or
+context change. If Claude errors, times out, or replies unparseably, the bridge safely
+falls back to `WAIT` (no trade) — open positions stay protected by the resting bracket in
+NinjaTrader.
+
+> Latency note: extended "thinking" tokens dominate decision time. `max_thinking_tokens: 0`
+> keeps a decision around ~10s; leaving it uncapped can run 30–50s (and risk hitting
+> `timeout_s`). On a 1-minute chart, prefer `haiku` + a capped budget.
 
 ## 3. NinjaTrader — install the strategy (Sim)
 
@@ -68,16 +76,20 @@ See `ninjatrader/README.md`. Summary:
    **HermesBridgeStrategy**.
 3. Set `BridgeHost`/`BridgePort` (e.g. `127.0.0.1` / `8787`), `StrategyId`
    (= `strategy_id`), `SendHistory: true`, **`AllowLive: false`**.
-4. Select the **Sim101** account and enable the strategy.
+4. Select your account — a **Sim** (e.g. `Sim101`) or **Playback** account — and enable the
+   strategy. The selected account is auto-detected and reported to the bridge (shown on
+   `/health` and the dashboard); the `execution.account` config value is only a fallback
+   until the strategy connects.
 
 On enable it bulk-uploads history, then streams each closed bar; approved orders appear
 on the chart with their stop/target bracket.
 
 ## 4. Daily operation
 
-- Start the bridge, then enable the strategy on the chart.
-- Watch `scripts/healthcheck.sh` / the bridge logs.
-- Kill switch any time: `curl -X POST $HERMES_BRIDGE_URL/control/flatten`
+- Start the bridge (`./start.sh` or `scripts/run_bridge.sh`), then enable the strategy on
+  the chart.
+- Watch `scripts/healthcheck.sh` / the bridge logs / the dashboard at `http://localhost:8787/`.
+- Kill switch any time: `curl -X POST http://127.0.0.1:8787/control/flatten`
   (flattens + halts for the day). `POST /control/resume` clears the halt.
 
 See `docs/SAFETY.md` before going anywhere near a live account.

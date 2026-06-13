@@ -33,14 +33,22 @@ def render_text(d: dict | None) -> str:
     halt = f"HALTED:{s['halt_reason']}" if s["halted"] else "active"
 
     lines = [
-        f"HERMES  {d['instrument']} {d['timeframe']}  ({d['agent']}/{d['mode']})",
+        f"HERMES  {d['instrument']} {d['timeframe']}  ({d['agent']}/{d['brain']})",
+        f"account: {d.get('account', '?')}",
         f"data age: {age_str}{delayed}",
         f"pos: {_pos_str(s['position'], s['avg_price'])}",
         f"realized: {s['realized_pnl']:+.2f}   unreal: {s['unrealized_pnl']:+.2f}"
         f"   trades: {s['trades_today']}",
         f"goal: +{goal['profit_target']:.0f} / -{goal['max_daily_loss']:.0f}   [{halt}]",
-        "-" * 40,
     ]
+    pl = d.get("planner")
+    if pl:
+        detail = pl.get("conditions") or pl.get("last_error") or ""
+        lines.append(f"plan[{pl['status']}]: {detail}"[:60])
+        if pl.get("session_error"):
+            # The pre-session study failed: every plan runs without the brief.
+            lines.append(f"session ERROR: {pl['session_error']}"[:60])
+    lines.append("-" * 40)
     ld = d.get("last_decision")
     if ld:
         lines.append(f"LAST: {ld['action']}  conf {ld['confidence']:.2f}  @ {ld['close']:.10g}")
@@ -81,6 +89,7 @@ def render_panel(d: dict | None) -> str:
         f"agent={d['agent']}",
         f"model={d.get('model', '')}",
         f"strategy_id={d['strategy_id']}",
+        f"account={d.get('account', '')}",
         f"age_s={age:.0f}" if age is not None else "age_s=",
         # NB: prices use :.10g, not :g — :g truncates to 6 significant digits, which
         # is wrong by a tick+ at MNQ levels (f"{21512.75:g}" -> "21512.8").
@@ -180,7 +189,7 @@ function cls(n){return n>0?'grn':n<0?'red':'dim'}
 async function tick(){
   try{
     const d=await (await fetch('/dashboard',{cache:'no-store'})).json();
-    document.getElementById('conn').textContent='● live · '+(d.agent)+'/'+(d.mode);
+    document.getElementById('conn').textContent='● live · '+(d.agent)+'/'+(d.brain)+(d.account?' · '+d.account:'');
     document.getElementById('conn').className='grn';
     document.getElementById('inst').textContent=d.instrument+' '+d.timeframe;
     const s=d.session;

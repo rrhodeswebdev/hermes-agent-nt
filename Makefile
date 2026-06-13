@@ -37,7 +37,7 @@ lint:
 	cd $(BRIDGE) && .venv/bin/ruff check .
 
 replay:
-	cd $(BRIDGE) && .venv/bin/hermes-bridge replay replay/sample_bars.csv -v --config ../$(CONFIG)
+	cd $(BRIDGE) && .venv/bin/hermes-bridge replay replay/sample_bars.csv -v --agent mock --config ../$(CONFIG)
 
 serve:
 	cd $(BRIDGE) && .venv/bin/hermes-bridge serve --config ../$(CONFIG)

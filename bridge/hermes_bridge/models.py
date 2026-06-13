@@ -7,8 +7,25 @@ Hermes `nt_*` tools serialize/deserialize against these shapes.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+# The engine's two decision contexts: hunting an entry vs managing an open position.
+Mode = Literal["seek_entry", "manage_position"]
+
+
+class BrainTimeout(Exception):
+    """The decision brain exceeded a bridge-side time budget.
+
+    Raised instead of transport-specific timeout exceptions so client-agnostic code
+    (the Planner's dashboard error tags) can name the exceeded budget — these are the
+    bridge's own `timeout_s` / `planner.*_timeout_s` settings, NOT NinjaTrader's
+    HttpTimeoutMs."""
+
+    def __init__(self, budget_s: float) -> None:
+        super().__init__(f"brain timed out after {budget_s:g}s")
+        self.budget_s = budget_s
 
 
 class Action(StrEnum):
@@ -96,6 +113,31 @@ class Fill(BaseModel):
     ts: float
     position_after: int = 0           # signed: + long, - short, 0 flat
     realized_pnl_delta: float = 0.0   # realized P&L produced by this fill
+
+
+class AccountReport(BaseModel):
+    """NinjaTrader tells the bridge which account its strategy is actually trading on,
+    and whether live trading is permitted there. The bridge uses this for display /
+    logging only (NinjaTrader's own account guard is the execution interlock), so the
+    dashboard and /health reflect the live account instead of the config default."""
+
+    account: str = ""
+    allow_live: bool = False
+
+
+class Level(BaseModel):
+    """One support/resistance zone from swing-pivot clustering (levels.py).
+
+    Served by `GET /levels` for the chart overlay and fed into the plan-analysis
+    prompt; `strength` is the pivot (touch) count, `first_ts`/`end_ts` the span the
+    zone has been respected."""
+
+    low: float
+    high: float
+    strength: int
+    first_ts: float
+    end_ts: float
+    kind: Literal["support", "resistance", "pivot"]
 
 
 class AccountState(BaseModel):

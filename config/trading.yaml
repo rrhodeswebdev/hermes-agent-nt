@@ -48,24 +48,49 @@ session:
   end: "16:00"
   timezone: America/New_York
 
-# Decision brain: mock (rules, no LLM) | hermes (installed Hermes) | claude (Claude CLI).
+# Decision brain: mock (rules, no LLM) or claude (the `claude` CLI on your subscription).
 agent:
-  client: claude              # Claude Code CLI on your subscription (no metered API)
+  client: claude               # mock (rules, no LLM) | claude (`claude -p` oneshot)
+  prefilter: none              # none | mock (mock rules screen entries before Claude is asked)
   claude:
-    claude_bin: claude        # on PATH; or an absolute path to claude.exe
-    model: sonnet             # sonnet | haiku | opus
-    safe_mode: true           # isolate from your CLAUDE.md/OMC/hooks/MCP; keep subscription auth
-    timeout_s: 90             # was 60; Sonnet can take ~25-65s, so 90s avoids timeouts
-    context_dir: hermes/context
-  hermes:
-    mode: cli                 # kept for reference; unused while client=claude
-    hermes_bin: hermes
-    model: ""
-    context_dir: hermes/context
-    enabled_toolsets: []
-    skip_memory: true
-    quiet_mode: true
-    timeout_s: 60
+    claude_bin: claude         # path/name of the claude launcher (must be on PATH)
+    model: haiku               # sonnet | haiku | opus | full model id (haiku = fastest decisions)
+    safe_mode: true            # --safe-mode: isolate from your CLAUDE.md/hooks/MCP/skills
+    max_thinking_tokens: 0     # SPEED: cap extended thinking (the main latency cost). 0 = fastest
+                               # (~10s); raise to ~1024 if you see too many WAITs; null = uncapped.
+    # Trading knowledge loaded verbatim into the system prompt (absolute path):
+    context_dir: /Users/hypawolf/code/hermes-trading-agent/hermes/context
+    timeout_s: 30
+    session_model: sonnet      # one-time pre-session study model (null = same as model);
+                               # the study runs once off the hot path, so it can afford
+                               # a bigger model than the per-bar plan analyses.
+    persistent: true           # keep one claude child alive across analyses: the CLI
+                               # cold start + system-prompt upload are paid once
+                               # (measured ~9s saved per call); any session failure
+                               # degrades to the one-shot path automatically.
+    max_session_turns: 40      # recycle the persistent child after this many analyses —
+                               # the conversation grows every turn and latency creeps up
+                               # with it (null = never recycle).
+    extra_args: []             # appended verbatim to the claude argv (advanced)
+
+# Pre-armed plan cycle: the analysis runs BETWEEN bars and arms explicit close
+# conditions; each bar close is then answered instantly from the armed plan (the LLM
+# is never on the bar-close critical path). Timeouts are bridge-side budgets — the
+# dashboard error tags name them — unrelated to NinjaTrader's HttpTimeoutMs.
+planner:
+  enabled: true
+  plan_timeout_s: 75           # budget for each between-bars plan analysis
+  session_timeout_s: 180       # budget for the one-time pre-session history study
+  max_plan_age_bars: 2         # a plan based on a bar this many closes old no longer fires
+
+# Swing-pivot S/R zones — served at GET /levels for the chart overlay and included
+# in the plan-analysis prompt.
+levels:
+  enabled: true
+  lookback: 3                  # bars each side that must be lower/higher to confirm a pivot
+  merge_ticks: 8               # pivots within this many ticks cluster into one zone
+  min_touches: 1               # zones with fewer pivots are dropped
+  max_levels: 12               # strongest-first cap
 
 # HTTP server the NinjaScript strategy connects to.
 server:

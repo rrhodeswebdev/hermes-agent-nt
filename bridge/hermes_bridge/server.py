@@ -25,8 +25,10 @@ from .config import BridgeConfig, effective_entry_freshness_s, load_config
 from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
 from .journal import JournalStore
+from .levels import detect_levels
 from .memory import LearnedStore
 from .models import (
+    AccountReport,
     AccountState,
     Action,
     BarBatch,
@@ -35,6 +37,7 @@ from .models import (
     Fill,
     OrderCommand,
 )
+from .plan import Planner
 from .reflect import Reflector
 from .risk import RiskGate
 from .session import SessionState
@@ -91,17 +94,28 @@ class AppState:
         )
         self.risk = RiskGate(config)
         self.agent = build_agent_client(config)
+        # Background worker: analyses run between bars, never on the ingest path.
+        self.planner = Planner(config, self.agent) if config.planner.enabled else None
         self.journal = JournalStore(config.learning.journal_path)
         self.reflector = Reflector(config, LearnedStore(config.learning.learned_dir), self.journal)
         self.engine = TradingEngine(
             config, self.store, self.session, self.agent, self.risk,
-            journal=self.journal, on_close=self._on_trade_closed)
+            planner=self.planner, journal=self.journal, on_close=self._on_trade_closed)
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
         # Server-side (true-UTC) arrival stamp of the latest realtime bar, so "data age"
         # is correct regardless of the timezone the strategy stamps bar.ts in.
         self.last_bar_received_at: float | None = None
+        # The account NinjaTrader's strategy reports it is actually trading on (and
+        # whether live is permitted there). None until the strategy first reports;
+        # effective_account() falls back to the static config default until then.
+        self.reported_account: str | None = None
+        self.reported_allow_live: bool | None = None
+
+    def effective_account(self) -> str:
+        """Live NT account if the strategy has reported one, else the config default."""
+        return self.reported_account or self.cfg.execution.account
 
     def _on_trade_closed(self, trade) -> None:
         lc = self.cfg.learning
@@ -144,22 +158,26 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     # account guard is the real interlock), so this flag is an advisory posture that
     # we surface in logs and /health rather than a silent default.
     posture = "LIVE-ENABLED" if cfg.execution.allow_live else "sim-only (allow_live=false)"
-    print(f"[hermes-bridge] execution posture: {posture}; account={cfg.execution.account}; "
-          f"strategy_id={cfg.strategy_id}; agent={cfg.agent.client}")
+    print(f"[hermes-bridge] execution posture: {posture}; "
+          f"account(config default)={cfg.execution.account}; "
+          f"strategy_id={cfg.strategy_id}; agent={cfg.agent.client} "
+          f"(NinjaTrader reports its live account on connect)")
     if cfg.execution.allow_live:
         print("[hermes-bridge] WARNING: allow_live=true — real-money orders permitted. "
               "Confirm this is intended and that NinjaTrader's AllowLive is set deliberately.")
 
     # ---- health / status ------------------------------------------------------
     @app.get("/health")
-    def health() -> dict:
+    def health(request: Request) -> dict:
+        st = _state(request)
         return {
             "ok": True,
             "version": __version__,
             "agent": cfg.agent.client,
             "strategy_id": cfg.strategy_id,
             "allow_live": cfg.execution.allow_live,
-            "account": cfg.execution.account,
+            "account": st.effective_account(),
+            "nt_allow_live": st.reported_allow_live,
         }
 
     @app.get("/session/status", response_model=AccountState)
@@ -177,6 +195,20 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         st = _state(request)
         return {"bars": [b.model_dump() for b in st.store.recent(n)]}
 
+    @app.get("/levels")
+    def levels(request: Request) -> dict:
+        """Swing-pivot S/R zones over the stored history, for the chart overlay."""
+        st = _state(request)
+        lc = cfg.levels
+        if not lc.enabled:
+            return {"levels": []}
+        zones = detect_levels(
+            st.store.all(), lookback=lc.lookback, tick_size=cfg.instrument.tick_size,
+            merge_ticks=lc.merge_ticks, min_touches=lc.min_touches,
+            max_levels=lc.max_levels,
+        )
+        return {"levels": [z.model_dump() for z in zones]}
+
     # ---- dashboard -----------------------------------------------------------
     def _levels(st: AppState) -> dict | None:
         """The agent's current support/resistance + EMAs (from the last bar's context)."""
@@ -187,11 +219,9 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
                 "ema_fast": lc.ema_fast, "ema_slow": lc.ema_slow}
 
     def _agent_model() -> str:
-        """Model label for the dashboard header (e.g. claude · sonnet · hermes-default)."""
+        """Model label for the dashboard header (e.g. claude · sonnet)."""
         if cfg.agent.client == "claude":
             return cfg.agent.claude.model
-        if cfg.agent.client == "hermes":
-            return cfg.agent.hermes.model
         return ""
 
     def _dashboard_payload(st: AppState) -> dict:
@@ -201,9 +231,10 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         recent = list(st.decisions)[-15:]
         return {
             "agent": cfg.agent.client,
+            "brain": st.engine.agent.describe(),
             "model": _agent_model(),
-            "mode": cfg.agent.hermes.mode,
             "strategy_id": cfg.strategy_id,
+            "account": st.effective_account(),
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,
             "now": now,
@@ -221,6 +252,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "stale_drops": st.stale_drops,
             "last_decision": recent[-1] if recent else None,
             "recent_decisions": list(reversed(recent)),
+            "planner": st.planner.snapshot() if st.planner else None,
             "levels": _levels(st),
         }
 
@@ -256,6 +288,9 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     def ingest_history(request: Request, batch: BarBatch) -> dict:
         st = _state(request)
         stored = st.store.replace_history(batch.bars)
+        # Kick off the one-time session study + initial plan in the background.
+        with st.lock:
+            st.engine.on_history(batch.bars)
         return {"ok": True, "stored": stored}
 
     @app.post("/ingest/bar", response_model=Decision)
@@ -304,6 +339,22 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "queued": f"{cmd.action}:{cmd.qty}" if cmd is not None else None,
         })
         return d
+
+    @app.post("/ingest/account")
+    def ingest_account(request: Request, report: AccountReport) -> dict:
+        """NinjaTrader reports which account its strategy is actually trading on, so the
+        bridge's logs / health / dashboard reflect the live selection instead of the
+        static config default. Advisory only — NinjaTrader's own account guard is the
+        execution interlock; this never changes where orders go."""
+        st = _state(request)
+        name = (report.account or "").strip()
+        if name and name != st.reported_account:
+            print(f"[hermes-bridge] NinjaTrader account is now '{name}' "
+                  f"(nt_allow_live={report.allow_live})", flush=True)
+        if name:
+            st.reported_account = name
+        st.reported_allow_live = report.allow_live
+        return {"ok": True, "account": st.effective_account()}
 
     @app.post("/ingest/fill")
     def ingest_fill(request: Request, fill: Fill) -> dict:

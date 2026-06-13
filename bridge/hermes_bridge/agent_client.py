@@ -4,34 +4,36 @@
 
 * `MockAgentClient` — a deterministic order-flow + price-action rule set. It makes
   the WHOLE system runnable and testable with no LLM and no API key, and serves as
-  the safe fallback if Hermes is unavailable. It is also the "rules gate" half of
-  the hybrid engine.
+  the safe fallback if the LLM brain is unavailable. It is also the "rules gate" half
+  of the hybrid engine.
 
-* `HermesAgentClient` — delegates judgment to the installed Hermes Agent runtime via
-  its documented `AIAgent` programmatic interface (or the `hermes` CLI). The trading
-  knowledge/strategy/risk/goal live in Hermes context files; this client just frames
-  the request and parses a JSON Decision back. Any failure degrades to WAIT (never
-  auto-trades on a malformed/absent response — open positions remain protected by the
-  resting bracket stop in NinjaTrader).
+* `ClaudeAgentClient` — delegates judgment to the `claude` CLI in headless print mode
+  (on your Claude subscription, no API key). The trading knowledge/strategy/risk/goal
+  live in the `context/*.md` files; this client just frames the request and parses a
+  JSON Decision back. Any failure degrades to WAIT (never auto-trades on a
+  malformed/absent response — open positions remain protected by the resting bracket
+  stop in NinjaTrader). It lives in `claude_agent.py` to keep this module import-light.
 """
 
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import BridgeConfig
 from .indicators import MarketContext
-from .models import AccountState, Action, Bar, Decision
+from .models import AccountState, Action, Bar, Decision, Mode
+
+if TYPE_CHECKING:  # plan.py imports this module at runtime; annotations only here
+    from .plan import PlanRequest, TradePlan
 
 
 @dataclass
 class AgentRequest:
-    mode: str  # "seek_entry" | "manage_position"
+    mode: Mode
     context: MarketContext
     recent_bars: list[Bar]
     account: AccountState
@@ -43,6 +45,20 @@ class AgentClient(ABC):
 
     @abstractmethod
     def decide(self, req: AgentRequest) -> Decision: ...
+
+    def describe(self) -> str:
+        """Short brain label for the dashboard header (model name or "rules")."""
+        return type(self).__name__
+
+    # Planning is optional: a client that doesn't implement it degrades safely to
+    # "no plan armed" / "no session brief", and the engine falls back to WAIT.
+    def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
+        """Between-bars analysis: arm explicit conditions for the NEXT bar close."""
+        return None
+
+    def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
+        """One-time history study at session start; returns the session brief."""
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +72,9 @@ class MockAgentClient(AgentClient):
     are ATR-based. manage_position: exit early if the trend flips against us;
     otherwise let the resting bracket work.
     """
+
+    def describe(self) -> str:
+        return "rules"
 
     def decide(self, req: AgentRequest) -> Decision:
         if req.mode == "manage_position":
@@ -110,6 +129,59 @@ class MockAgentClient(AgentClient):
                             rationale="short invalidated: trend/delta flipped up")
         return Decision(action=Action.WAIT, rationale="hold; bracket protects position")
 
+    # ---- pre-armed plans (same rule math, expressed as next-close conditions) ----
+    def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
+        from .plan import EntryTrigger, ExitRule, TradePlan  # lazy: plan.py imports us
+
+        c = preq.context
+        if preq.mode == "manage_position":
+            pos = preq.assumed_position or preq.account.position
+            if c.ema_slow is None or pos == 0:
+                return TradePlan(mode="manage_position",
+                                 rationale="no structure; hold, bracket protects")
+            if pos > 0:
+                exit_rule = ExitRule(exit_below=c.ema_slow,
+                                     rationale="long invalidated: close through slow EMA")
+            else:
+                exit_rule = ExitRule(exit_above=c.ema_slow,
+                                     rationale="short invalidated: close through slow EMA")
+            return TradePlan(mode="manage_position", exit=exit_rule,
+                             rationale="exit on trend flip, else let the bracket work")
+        if c.ema_fast is None or c.atr is None:
+            return TradePlan(mode="seek_entry", rationale="insufficient_history")
+        p = self.cfg.strategy
+        tol = p.pullback_atr * c.atr
+        stop_ticks = self._ticks(c.atr * p.atr_stop_mult)
+        target_ticks = self._ticks(c.atr * p.atr_target_mult)
+        # The decide() rule "pullback tagged the fast EMA, then closed back beyond it"
+        # becomes a close band hugging the fast EMA: a close just beyond it is the
+        # resumption at value; a close far beyond is an extended bar (chasing).
+        if c.trend == "up" and c.recent_delta >= 0:
+            trigger = EntryTrigger(
+                direction="long", min_close=c.ema_fast, max_close=c.ema_fast + tol,
+                qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
+                confidence=self._confidence(c, +1),
+                rationale="uptrend pullback resuming above fast EMA, +delta",
+            )
+            return TradePlan(mode="seek_entry", bias="long", triggers=[trigger],
+                             rationale="uptrend pullback plan")
+        if c.trend == "down" and c.recent_delta <= 0:
+            trigger = EntryTrigger(
+                direction="short", min_close=c.ema_fast - tol, max_close=c.ema_fast,
+                qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
+                confidence=self._confidence(c, -1),
+                rationale="downtrend bounce resuming below fast EMA, -delta",
+            )
+            return TradePlan(mode="seek_entry", bias="short", triggers=[trigger],
+                             rationale="downtrend bounce plan")
+        return TradePlan(mode="seek_entry", rationale="no trend/flow alignment; no-trade")
+
+    def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
+        c = preq.context
+        return (f"rules brief: trend={c.trend} atr={c.atr} ema_fast={c.ema_fast} "
+                f"ema_slow={c.ema_slow} swing_high={c.swing_high} "
+                f"swing_low={c.swing_low} bars={len(history)}")
+
     def _confidence(self, c: MarketContext, direction: int) -> float:
         score = 0.5
         if c.ema_fast is not None and c.ema_slow is not None:
@@ -124,7 +196,7 @@ class MockAgentClient(AgentClient):
 
 
 # --------------------------------------------------------------------------- #
-# Hermes Agent client (LLM judgment)                                          #
+# Shared LLM-prompt framing (used by ClaudeAgentClient)                       #
 # --------------------------------------------------------------------------- #
 DECISION_INSTRUCTION = """\
 === YOUR TASK ===
@@ -152,7 +224,14 @@ _CONTEXT_ORDER = [
 
 
 def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
-    """Concatenate the *.md context files in priority order into one string."""
+    """Concatenate the context *.md files in priority order into one string.
+
+    Top-level files come first (the explicitly ordered ones, then the rest sorted),
+    then subdirectory files (the regime playbooks under strategies/) sorted by path —
+    the agent is tool-less, so anything the knowledge references must be inlined here.
+    UTF-8 explicit so reading does not depend on the platform locale (Windows
+    defaults to cp1252 and would crash on the em-dashes/arrows in the notes).
+    """
     order = order or _CONTEXT_ORDER
     d = Path(context_dir)
     if not d.is_dir():
@@ -162,8 +241,13 @@ def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
         f = d / name
         if f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
+    # Any other top-level *.md not in the explicit order.
     for f in sorted(d.glob("*.md")):
         if f.name not in order and f.is_file():
+            parts.append(f.read_text(encoding="utf-8"))
+    # Subdirectory files (e.g. strategies/trending/*.md), deterministic path order.
+    for f in sorted(d.rglob("*.md"), key=lambda p: p.as_posix()):
+        if f.parent != d and f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
     return "\n\n---\n\n".join(parts)
 
@@ -185,113 +269,17 @@ def build_user_prompt(req: AgentRequest) -> str:
     return "CURRENT MARKET STATE:\n" + json.dumps(payload, separators=(",", ":"))
 
 
-class HermesAgentClient(AgentClient):
-    """Adapter over the installed Hermes runtime (Nous Research hermes-agent).
-
-    Verified against hermes-agent 0.16.0: `run_agent.AIAgent(...)` exposes
-    `run_conversation(user_message, system_message=...) -> {"final_response": str}`.
-    The agent is constructed ONCE and reused. The trading knowledge is loaded from the
-    `context_dir` *.md files into the system prompt so the agent reliably trades the
-    configured way. Any failure degrades to WAIT (never auto-trades on error).
-    """
-
-    def __init__(self, config: BridgeConfig) -> None:
-        super().__init__(config)
-        self._agent = None          # cached AIAgent (lazy; needs a configured provider)
-        self._system: str | None = None  # cached system prompt
-
-    def decide(self, req: AgentRequest) -> Decision:
-        try:
-            reply = self._ask(self._system_prompt(), self._user_prompt(req))
-            return self._parse(reply)
-        except Exception as exc:  # noqa: BLE001 — fail safe: never auto-trade on error
-            return Decision(action=Action.WAIT, rationale=f"hermes_error:{type(exc).__name__}")
-
-    # ---- prompt framing -----------------------------------------------------
-    def _system_prompt(self) -> str:
-        if self._system is not None:
-            return self._system
-        knowledge = self._load_context_files()
-        if not knowledge:
-            knowledge = self.cfg.agent.hermes.context_hint
-        self._system = f"{knowledge}\n\n{DECISION_INSTRUCTION}"
-        return self._system
-
-    def _load_context_files(self) -> str:
-        return load_context_files(self.cfg.agent.hermes.context_dir)
-
-    def _user_prompt(self, req: AgentRequest) -> str:
-        return build_user_prompt(req)
-
-    # ---- runtime call -------------------------------------------------------
-    def _ask(self, system: str, user: str) -> str:
-        if self.cfg.agent.hermes.mode == "cli":
-            return self._ask_cli(system, user)
-        return self._ask_in_process(system, user)
-
-    def _ask_in_process(self, system: str, user: str) -> str:
-        agent = self._get_agent()
-        result = agent.run_conversation(user, system_message=system)
-        if isinstance(result, dict):
-            return str(result.get("final_response", ""))
-        return str(result)
-
-    def _get_agent(self):
-        if self._agent is None:
-            # Lazy import so the bridge has no hard dependency on Hermes being present.
-            from run_agent import AIAgent  # type: ignore
-
-            h = self.cfg.agent.hermes
-            self._agent = AIAgent(
-                model=h.model or "",
-                enabled_toolsets=list(h.enabled_toolsets),
-                skip_memory=h.skip_memory,
-                quiet_mode=h.quiet_mode,
-            )
-        return self._agent
-
-    def _ask_cli(self, system: str, user: str) -> str:
-        # Hermes oneshot: `hermes -z "<prompt>"`. Reuses Hermes' own provider/auth
-        # resolution (its OAuth logins), unlike a bare in-process AIAgent() construction.
-        h = self.cfg.agent.hermes
-        out = subprocess.run(
-            [h.hermes_bin, "-z", f"{system}\n\n{user}"],
-            capture_output=True, text=True, timeout=h.timeout_s,
-        )
-        return out.stdout
-
-    # ---- response parsing ---------------------------------------------------
-    @staticmethod
-    def _parse(reply: str) -> Decision:
-        block = _extract_json(reply)
-        if block is None:
-            return Decision(action=Action.WAIT, rationale="no_json_in_reply")
-        try:
-            data = json.loads(block)
-            return Decision.model_validate(data)
-        except Exception:  # noqa: BLE001
-            return Decision(action=Action.WAIT, rationale="unparseable_decision")
-
-
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
-
-def _extract_json(text: str) -> str | None:
-    m = _JSON_FENCE.search(text)
-    if m:
-        return m.group(1)
-    # Fallback: first balanced-looking object.
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        return text[start : end + 1]
-    return None
-
-
 def build_agent_client(config: BridgeConfig) -> AgentClient:
-    if config.agent.client == "hermes":
-        return HermesAgentClient(config)
-    if config.agent.client == "claude":
+    client = config.agent.client
+    if client == "claude":
         from .claude_agent import ClaudeAgentClient  # lazy: avoid circular import
         return ClaudeAgentClient(config)
-    return MockAgentClient(config)
+    if client == "mock":
+        return MockAgentClient(config)
+    # Config validation already rejects unknown values; this guards the env-override
+    # path (HERMES_BRIDGE_AGENT), which assigns after validation. An unknown brain
+    # must never silently downgrade to the mock rules brain, which trades on its own.
+    raise ValueError(
+        f"unknown agent.client {client!r}: expected 'claude' or 'mock' "
+        "(the legacy 'hermes' brain was replaced by 'claude')"
+    )
