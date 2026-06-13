@@ -83,6 +83,10 @@ class Decision(BaseModel):
     stop_price: float | None = None
     target_price: float | None = None
     rationale: str = ""
+    # Transport metadata, not a trading signal: True while the bridge's bar store is
+    # too thin to compute trustworthy context (e.g. the bridge restarted mid-session
+    # and never received /ingest/history). NinjaTrader reacts by re-sending history.
+    need_history: bool = False
 
 
 class OrderCommand(BaseModel):

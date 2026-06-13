@@ -25,6 +25,8 @@ from .agent_client import (
 )
 from .claude_cli import ClaudeSession, extract_structured, run_claude_oneshot
 from .config import BridgeConfig
+from .journal import JournalStore, select_similar
+from .memory import LearnedStore
 from .models import Action, Bar, BrainTimeout, Decision
 from .plan import PlanRequest, TradePlan
 
@@ -160,11 +162,14 @@ class ClaudeAgentClient(AgentClient):
     def __init__(self, config: BridgeConfig) -> None:
         super().__init__(config)
         self._knowledge: str | None = None  # cached context files (rarely change)
-        self._systems: dict[str, str] = {}  # task instruction -> full system prompt
         # Persistent sessions keyed by (system prompt, schema): at most one for
         # decide() and one for propose_plan(); analyze_session stays one-shot
         # because it may run on a different model.
         self._sessions: dict[tuple[str, str], ClaudeSession] = {}
+        # Learned knowledge (trader profile, notes, lessons) and the closed-trade
+        # journal are read back into prompts so reflection actually feeds the brain.
+        self._learned = LearnedStore(config.learning.learned_dir)
+        self._journal = JournalStore(config.learning.journal_path)
 
     def describe(self) -> str:
         return self.cfg.agent.claude.model
@@ -172,10 +177,22 @@ class ClaudeAgentClient(AgentClient):
     def decide(self, req: AgentRequest) -> Decision:
         try:
             reply = self._ask(self._system_prompt(DECISION_INSTRUCTION),
-                              build_user_prompt(req), DECISION_JSON_SCHEMA)
+                              self._user_message(req), DECISION_JSON_SCHEMA)
             return self._parse(reply)
         except Exception as exc:  # noqa: BLE001 — fail safe: never auto-trade on error
             return Decision(action=Action.WAIT, rationale=f"claude_error:{type(exc).__name__}")
+
+    def _user_message(self, req: AgentRequest) -> str:
+        """Market state, plus the most similar past trades from the journal so the
+        brain reasons against its own recorded history (no-op when learning is off)."""
+        user = build_user_prompt(req)
+        lc = self.cfg.learning
+        if lc.enabled and lc.retrieve_k > 0:
+            similar = select_similar(self._journal.recent(200), req.context, lc.retrieve_k)
+            if similar:
+                user += ("\n\nRELEVANT PAST TRADES (same regime, most recent last):\n"
+                         + json.dumps(similar, separators=(",", ":")))
+        return user
 
     # ---- pre-armed plan cycle -------------------------------------------------
     def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
@@ -217,12 +234,24 @@ class ClaudeAgentClient(AgentClient):
 
     # ---- plumbing ---------------------------------------------------------------
     def _system_prompt(self, instruction: str) -> str:
-        if instruction not in self._systems:
-            if self._knowledge is None:
-                c = self.cfg.agent.claude
-                self._knowledge = load_context_files(c.context_dir) or c.context_hint
-            self._systems[instruction] = f"{self._knowledge}\n\n{instruction}"
-        return self._systems[instruction]
+        # Rebuilt per call (cheaply): the learned block changes as reflection curates
+        # lessons, so it must not be frozen in a cache. The static knowledge stays cached.
+        if self._knowledge is None:
+            c = self.cfg.agent.claude
+            self._knowledge = load_context_files(c.context_dir) or c.context_hint
+        parts = [self._knowledge]
+        learned = self._learned_block()
+        if learned:
+            parts.append(learned)
+        parts.append(instruction)
+        return "\n\n".join(parts)
+
+    def _learned_block(self) -> str:
+        lc = self.cfg.learning
+        if not lc.enabled:
+            return ""
+        return self._learned.format_for_prompt(
+            lc.profile_char_limit, lc.notes_char_limit, lc.lessons_char_limit)
 
     def _ask(self, system: str, user: str, json_schema: str,
              timeout_s: float | None = None) -> str:

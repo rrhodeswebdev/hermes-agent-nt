@@ -44,6 +44,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     from .server import create_app
 
+    # Console safety: agent rationales contain Unicode (—, ≈, →). Default Windows stdout
+    # is cp1252 and raises UnicodeEncodeError on print(), 500-ing /ingest/bar. Force UTF-8.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
     cfg = load_config(args.config)
     if args.host:
         cfg.server.host = args.host

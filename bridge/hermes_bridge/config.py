@@ -9,11 +9,40 @@ the matching settings.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
+
+
+def timeframe_seconds(tf: str, default: float = 60.0) -> float:
+    """Parse a timeframe like '1m' / '30s' / '1h' / '1d' into seconds; default on bad input."""
+    m = re.fullmatch(r"\s*(\d+)\s*([smhd])\s*", str(tf).lower())
+    if not m:
+        return default
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def agent_timeout_s(cfg: BridgeConfig) -> float:
+    """Decision-latency ceiling of the ACTIVE agent client (0 for the mock/rules client)."""
+    if cfg.agent.client == "claude":
+        return cfg.agent.claude.timeout_s
+    return 0.0
+
+
+def effective_entry_freshness_s(cfg: BridgeConfig) -> float:
+    """Explicit execution.entry_freshness_s, or auto = max(one bar interval, agent timeout).
+
+    The floor matters: a bare bar-interval default silently fights the agent's budget —
+    1m bars + claude timeout_s 90 would stale-drop every entry decided in 60-90s. Set the
+    knob explicitly to be STRICTER than the agent timeout (fill quality over completeness).
+    """
+    explicit = cfg.execution.entry_freshness_s
+    if explicit > 0:
+        return explicit
+    return max(timeframe_seconds(cfg.instrument.timeframe), agent_timeout_s(cfg))
 
 
 class InstrumentConfig(BaseModel):
@@ -96,6 +125,13 @@ class AgentConfig(BaseModel):
     # must fail loudly at load — never silently fall back to the mock rules brain,
     # which arms triggers and places orders on its own.
     client: Literal["mock", "claude"] = "mock"
+    prefilter: str = "none"           # none | mock (mock rules screen entries before Claude)
+    # After Claude DECLINES a prefilter candidate, near-identical candidates (same
+    # direction, close within dedup_atr × ATR of the declined close) are answered
+    # locally for up to dedup_bars bars instead of burning another Claude call —
+    # extended trends otherwise produce the same candidate bar after bar. 0 disables.
+    prefilter_dedup_bars: int = 5
+    prefilter_dedup_atr: float = 0.5
     claude: ClaudeClientConfig = Field(default_factory=ClaudeClientConfig)
 
 
@@ -131,6 +167,26 @@ class ExecutionConfig(BaseModel):
     # Hard gate on real-money trading. Must be explicitly true AND acknowledged.
     allow_live: bool = False
     account: str = "Sim101"
+    # 0 = auto: max(one bar interval, the active agent's timeout_s) — see
+    # effective_entry_freshness_s(). Drops an ENTRY whose decision took >= this many
+    # seconds as stale (the bar it reasoned about is old). EXIT/FLATTEN always execute.
+    # Set explicitly to be stricter (e.g. 60 on 2m bars, prioritizing fill quality).
+    entry_freshness_s: float = 0.0
+
+
+class LearningConfig(BaseModel):
+    enabled: bool = True
+    learned_dir: str = "hermes/learned"          # trader-profile.md, agent-notes.md, lessons/*.md
+    journal_path: str = "bridge/state/journal.jsonl"  # episodic record of closed trades
+    retrieve_k: int = 3                           # similar past trades fed into each decision
+    profile_char_limit: int = 1400
+    notes_char_limit: int = 2200
+    lessons_char_limit: int = 2500
+    reflect_enabled: bool = True
+    reflect_on_trade_close: bool = True
+    reflect_model: str = "sonnet"     # model for reflection/curation calls
+    reflect_recent: int = 20          # recent trades shown to reflection for context
+    max_lessons: int = 40             # cap applied lessons per reflection
 
 
 class BridgeConfig(BaseModel):
@@ -145,6 +201,7 @@ class BridgeConfig(BaseModel):
     levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    learning: LearningConfig = Field(default_factory=LearningConfig)
 
     def apply_env(self) -> BridgeConfig:
         host = os.getenv("HERMES_BRIDGE_HOST")
@@ -159,12 +216,33 @@ class BridgeConfig(BaseModel):
         return self
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge `override` onto `base` (override wins; nested dicts merged)."""
+    out = dict(base)
+    for key, val in override.items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], val)
+        else:
+            out[key] = val
+    return out
+
+
 def load_config(path: str | Path | None = None) -> BridgeConfig:
-    """Load config from YAML; fall back to all-defaults if `path` is None/missing."""
+    """Load config from YAML; fall back to all-defaults if `path` is None/missing.
+
+    If a sibling `*.local.yaml` exists next to `path` (e.g. `config/trading.local.yaml`),
+    it is deep-merged ON TOP of the base file. Keep personal values (account, daily risk)
+    in that gitignored local file so they never get committed; the base file stays a
+    neutral, shareable template.
+    """
     if path is None:
         return BridgeConfig().apply_env()
     p = Path(path)
     if not p.exists():
         return BridgeConfig().apply_env()
-    data = yaml.safe_load(p.read_text()) or {}
+    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    local = p.with_name(f"{p.stem}.local{p.suffix}")
+    if local.exists():
+        overrides = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
+        data = _deep_merge(data, overrides)
     return BridgeConfig.model_validate(data).apply_env()

@@ -34,9 +34,14 @@ The bridge is the "rules + safety" half of a **hybrid** engine:
 - `MockAgentClient` — deterministic order-flow + price-action rules. Runs the whole
   loop with **no LLM**, and is the safe fallback.
 - `ClaudeAgentClient` — delegates judgment to the `claude` CLI in headless print mode
-  (`claude -p --safe-mode`, on your subscription — no API key), using the
-  trading-knowledge **context files**, and parses a JSON `Decision` back. Any failure
-  degrades to `WAIT`. See `claude_agent.py` / `claude_cli.py`.
+  (`claude -p --safe-mode`, on your subscription — no API key), isolated from your
+  global CLAUDE.md/hooks/MCP. Uses the trading-knowledge **context files** and a
+  JSON schema for a validated `Decision`; any failure degrades to `WAIT`. See
+  `claude_agent.py` / `claude_cli.py`.
+- **Self-improvement** (`reflect.py`) — after each closed trade a background, tool-less
+  Claude call proposes lesson/notes/profile updates (schema-validated); the bridge applies
+  them to `hermes/learned/`. `agent.prefilter: mock` screens entries with the deterministic
+  rules so Claude is only spent on candidate setups. `POST /control/curate` consolidates lessons.
 
 Select with `agent.client: mock | claude` in `config/trading.yaml`.
 

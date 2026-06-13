@@ -1,38 +1,40 @@
 # The Super Simple Setup Guide 🤖
 
-Hi! This guide shows you how to set up your trading robot, step by step.
-We will use **easy words** and go **slow**. You can do this! 💪
+Hi! This guide sets up your trading robot, step by step, in **easy words**. You can do
+this! 💪
 
-> 🟢 **Good news first:** This robot plays with **pretend money** (called "Sim").
-> It is a practice game. No real money can be lost while it says **Sim**.
+> 🟢 **Good news first:** the robot plays with **pretend money** (called "Sim"). It's a
+> practice game — no real money can be lost while it says **Sim**.
 
 ---
 
 ## 🧩 What are all the parts?
 
-Think of it like a team of helpers. Here is who does what:
+Think of it like a small team of helpers:
 
 | The part | Think of it like… | What it does |
 |---|---|---|
-| **NinjaTrader** | A TV that shows the price going up and down | Shows the market chart (lives on the Windows side) |
+| **NinjaTrader 8** | A TV that shows the price going up and down | Shows the market chart (lives on the Windows side) |
 | **The Strategy** (`HermesBridgeStrategy`) | A mail carrier 📬 | Every minute it mails the new price to the robot, and does what the robot says (buy / sell / wait) |
 | **The Bridge** | The robot's desk + a safety guard 👮 | Keeps the rule book, checks every order is safe, and remembers the score |
-| **Claude** (the robot's brain) | The robot's brain 🧠 | The Claude Code app on your computer — it does the thinking, running on your own Claude subscription |
+| **Claude** (the robot's brain) | The robot's brain 🧠 | The Claude Code CLI on your computer — it does the thinking, on **your own Claude subscription** (no API key, no per-token bill) |
 | **The Dashboard** | A window 🪟 | Lets *you* watch what the robot is thinking |
 
-The robot's job: look at the price, then say **BUY**, **SELL**, or **WAIT** — using
-rules you can read and change.
+The robot's job: look at the price, then say **BUY**, **SELL**, or **WAIT** — using rules
+you can read and change.
 
 ---
 
-## ✅ Before you start, you need 4 things
+## ✅ Before you start, you need these
 
 1. A **Mac** computer (you have this!).
 2. **NinjaTrader 8** running in Windows (you run it in Parallels — that's a Windows
-   "computer inside your Mac").
+   "computer inside your Mac") with a **Sim101** account and **real-time** data.
 3. The **Claude Code CLI** installed and logged in (this is the brain — it runs on your
    own **Claude subscription**, so make sure you can sign in).
-4. The **project folder** at `/Users/hypawolf/code/hermes-trading-agent` (you have this too!).
+4. **[`uv`](https://docs.astral.sh/uv/)** — a small tool that builds the bridge's Python
+   environment.
+5. The **project folder** at `/Users/hypawolf/code/hermes-trading-agent` (you have this too!).
 
 ---
 
@@ -54,37 +56,51 @@ Only if it says "command not found", install it from the official page:
 
 **How do you know it worked?** `claude --version` shows a version number.
 
----
-
-## Step 2 — Give the brain its thinking power ⚡
-
-The brain thinks using your own **Claude subscription** — no API key, no separate
-sign-up. You just need to be **logged in**. In the Terminal, type:
-
-```bash
-claude
-```
-
-If it asks you to sign in, type `/login` and follow the steps to log in with your
-**Claude subscription**. If it just opens a chat, you're already logged in. That's it! ✅
-
-(Type `/exit` or press Ctrl+C to leave the chat.)
-
-**How do you know it worked?** Run `claude`, say "hi", and see if it answers back.
+> No subscription handy? You can still run everything on the **mock** brain (deterministic
+> rules, no LLM) — see Step 3.
 
 ---
 
-## Step 3 — Build the robot's desk 🪑
+## Step 2 — Turn on the desk (the Bridge) 🪑
 
-The "desk" is called the **Bridge**. It does the safety checking and keeps score.
-In the Terminal, go to the project folder and set it up:
+First make sure you're **logged in** so the brain can think — in the Terminal, type
+`claude`, and if it asks you to sign in, type `/login` and follow the steps (or just
+`/exit` if it's already logged in).
+
+Now open a terminal in the **project folder** and start the desk. On a **Mac**:
 
 ```bash
-cd /Users/hypawolf/code/hermes-trading-agent
-make setup
+./start.sh
 ```
 
-This builds everything the desk needs. Wait for it to finish.
+This builds the bridge on first run, pings Claude once to prove the brain answers, then
+starts serving. On **Windows**, use `.\start.ps1 -CheckClaude` instead.
+
+**Worked?** It prints `serving on 0.0.0.0:8787` and exactly what to type into NinjaTrader
+(host, `BridgePort`, `StrategyId`). **Leave this window open** — the desk stays on while
+the robot works.
+
+> Want a dry run with no LLM first? `./start.sh --mock` (Mac) or `.\start.ps1 -Mock`
+> (Windows).
+
+---
+
+## Step 3 — Pick the brain & the rules 📒
+
+The brain is set in **`config/trading.yaml`** under `agent.client`:
+
+- **`claude`** — your Claude subscription (the **default**).
+- **`mock`** — deterministic rules, no LLM (great for a dry run).
+
+The robot's *trading rules* are plain-English notes in **`hermes/context/`** (like
+`strategy.md`). Want it to trade differently? **Change those notes** — no code needed.
+
+Your **personal** values (like your project path) can go in a gitignored
+`config/trading.local.yaml` so they don't get overwritten. The robot also **learns**: it
+writes lessons into `hermes/learned/` and reviews them between bars to improve over time.
+
+> ⚠️ If you change any config or context file, **restart the Bridge** (Step 2) so the robot
+> notices.
 
 **How do you know it worked?** Run the practice test:
 
@@ -96,136 +112,91 @@ If it says something like **"60 passed"**, you're golden! 🌟
 
 ---
 
-## Step 4 — Tell the robot how to trade 📒
+## Step 4 — Put the mail carrier in NinjaTrader 📬
 
-The rule book is a file called **`config/trading.yaml`**. You can open it in any text
-editor. Inside, you can change easy things like:
+In **NinjaTrader**:
 
-- **What to trade** (`symbol` — right now it's **MNQ**, the tiny Nasdaq contract).
-- **How much it can risk** (`max_risk_per_trade`).
-- **The daily goal** (`profit_target`) and **stop-for-the-day** (`max_daily_loss`).
+1. Open the **NinjaScript Editor** (Tools → NinjaScript Editor).
+2. Make a **New Strategy** → paste `ninjatrader/HermesBridgeStrategy.cs` → press **F5** to
+   compile. Fix any red messages if they pop up.
+3. Open a **2-minute MNQ** chart (2–3m gives Claude time to think; 1m is tight).
+4. Right-click the chart → **Strategies…** → add **HermesBridgeStrategy**, and set:
 
-The robot's *trading brain rules* live in the **`hermes/context/`** folder. These are
-just notes written in plain English (like `strategy.md`). If you want the robot to
-trade differently, **change those notes** — no code needed!
-
-> ⚠️ If you change any of these files, you must **restart the Bridge** (Step 5) for
-> the robot to notice.
-
----
-
-## Step 5 — Turn on the desk (start the Bridge) 🟢
-
-In the Terminal:
-
-```bash
-cd /Users/hypawolf/code/hermes-trading-agent
-./scripts/run_bridge.sh
-```
-
-Leave this window **open** — the desk needs to stay on while the robot works.
-
-**How do you know it worked?** It will say something like
-`serving on 0.0.0.0:8787`. That means the desk is awake and listening. 👂
-
----
-
-## Step 6 — Put the mail carrier in NinjaTrader 📬
-
-Now switch to **NinjaTrader** (in your Windows/Parallels window).
-
-1. Open the **NinjaScript Editor** (Tools menu → NinjaScript Editor).
-2. Make a **New Strategy**, then paste in the file
-   `ninjatrader/HermesBridgeStrategy.cs`.
-3. Press **F5** to **Compile** (that means "build it"). Fix any red messages if they pop up.
-4. Open a **chart** for **MNQ** on a **1-minute** time.
-5. Right-click the chart → **Strategies…** → add **HermesBridgeStrategy**.
-6. Set these boxes:
-
-| Box | Type this |
+| Box | Value |
 |---|---|
-| `BridgeHost` | `192.168.1.16` |
+| `BridgeHost` | `127.0.0.1` |
 | `BridgePort` | `8787` |
 | `StrategyId` | `hermes-default` |
-| `HttpTimeoutMs` | `45000` |
+| `HttpTimeoutMs` | `115000` ← must be longer than the agent's think time |
 | `AllowLive` | `false` ← keep it OFF for pretend money |
 | Account | `Sim101` |
 
-7. Make sure the chart is using your **real-time data** (not delayed), then click **Enable**. 🟢
+5. Make sure the chart is on your **real-time** feed (not delayed), then click **Enable**. 🟢
 
-**How do you know it worked?** Look at the **NinjaScript Output** window. You should
-see a line like **"Hermes: sent … historical bars"**. That means the mail carrier
-just mailed the price history to the desk! 🎉
-
----
-
-## Step 7 — Add the watching window 🪟
-
-You have **two ways** to watch the robot think. Pick either (or both!).
-
-**Way A — On your computer screen (easiest):**
-Open a web browser and go to:
-- On the **Mac**: `http://localhost:8787/`
-- In the **Windows** window: `http://192.168.1.16:8787/`
-
-You'll see a live page with the robot's position, score, and its latest thought. ✨
-
-**Way B — Right on the chart (in NinjaTrader):**
-1. In the NinjaScript Editor, make a **New Indicator** and paste in
-   `ninjatrader/HermesDashboard.cs`. Press **F5** to compile.
-2. Right-click a chart → **Indicators…** → add **HermesDashboard**.
-3. Set `BridgeHost` = `192.168.1.16` and `BridgePort` = `8787`.
-
-Now a little panel shows up on the chart with the robot's thoughts!
+**Worked?** The **NinjaScript Output** window shows a line like
+`Hermes: sent … historical bars` — the mail carrier just shipped the price history to the
+desk! 🎉
 
 ---
 
-## Step 8 — Watch it work! 👀
+## Step 5 — Add the watching window 🪟
+
+Two ways — pick either (or both):
+
+**Way A — In a browser (easiest):** open `http://127.0.0.1:8787/` — a live page with the
+robot's position, score, and latest thought. ✨
+
+**Way B — Right on the chart:** in the NinjaScript Editor, make a **New Indicator** → paste
+`ninjatrader/HermesDashboard.cs` → press **F5**. Right-click a chart → **Indicators…** →
+add **HermesDashboard** (`BridgeHost` `127.0.0.1`, `BridgePort` `8787`). It also draws the
+agent's **support/resistance lines** on the chart.
+
+---
+
+## Step 6 — Watch it work! 👀
 
 That's it — you did it! 🥳 Now just watch.
 
-- Most of the time the robot says **WAIT**. That is **normal and good** — a smart
-  trader waits for a *really* good moment. It is being patient, not broken.
-- When it sees a great setup, it will say **BUY** or **SELL**, and you'll see a trade
-  with a safety **stop** appear on the chart.
-- When the day's goal or the stop-for-the-day is reached, it **closes everything and
-  stops** until tomorrow.
+- Most of the time it says **WAIT**. That is **normal and good** — a smart trader waits for
+  a *really* good moment. It's being patient, not broken.
+- On a great setup it says **BUY** or **SELL**, and you'll see a trade with a safety
+  **stop** appear on the chart.
+- When the day's goal or the loss limit is reached, it **closes everything and stops** until
+  tomorrow.
 
-The watching window shows the robot's reason every time, like:
-*"Uptrend, but the price is too close to the top — waiting for a better spot."*
+The window shows its reason every time, like:
+*"Uptrend, but price is too close to resistance — waiting for a better spot."*
 
 ---
 
 ## 🛑 The big red STOP button
 
-If you ever want it to **stop and close everything right now**, type this in a
-Terminal:
+To make it **stop and close everything right now**, run this in a terminal:
 
-```bash
-curl -X POST http://localhost:8787/control/flatten
+```
+curl -X POST http://127.0.0.1:8787/control/flatten
 ```
 
-This is the **kill switch**. It sells everything and stops new trades for the day.
-To let it trade again later:
+This is the **kill switch** — it flattens everything and stops new trades for the day. To
+let it trade again later:
 
-```bash
-curl -X POST http://localhost:8787/control/resume
+```
+curl -X POST http://127.0.0.1:8787/control/resume
 ```
 
-To **stop the desk completely**, click the Terminal window running the Bridge and
-press **Ctrl + C**.
+To **stop the desk completely**, click the Bridge window and press **Ctrl + C**.
 
 ---
 
 ## 🦺 Safety rules (please read!)
 
-- It uses **pretend money (Sim)**. Keep `AllowLive` set to **false** and the account
-  on **Sim101**. Do **not** switch to real money until you have watched it for a long
-  time and you fully understand it.
-- A **safety guard** checks *every* order before it happens. It will block trades that
-  are too big or too risky. That is the guard doing its job!
-- The robot is a **helper**, not magic. The trading rules are a starting example. It is
-  *not* promised to make money. You are the boss.
+- It uses **pretend money (Sim)**. Keep `AllowLive` set to **false** and the account on
+  **Sim101**. Do **not** switch to real money until you've watched it for a long time and
+  fully understand it.
+- A **safety guard** (the RiskGate) checks *every* order, server-side, and blocks anything
+  too big or too risky. That's the guard doing its job!
+- The robot is a **helper**, not magic. The trading rules are a starting example — *not*
+  promised to make money. You are the boss.
 
 ---
 
@@ -233,23 +204,22 @@ press **Ctrl + C**.
 
 | What you see | What it probably means | What to do |
 |---|---|---|
-| Nothing in NinjaTrader's output | That's **normal**! It only prints history or errors. | Watch the **dashboard** instead — that's where the thinking shows. |
-| "A task was canceled" | The robot needed more time to think | Set `HttpTimeoutMs` to `45000` and re-enable the strategy. |
-| Dashboard says "data age" is big (like 600s) | Your chart is on **delayed** data | Switch the chart to your **real-time** feed and re-enable. |
-| Dashboard says "bridge unreachable" | The desk (Bridge) isn't running | Do Step 5 again to start it. |
-| It never trades | It's being **patient** (usually fine), or the market is quiet | Let it run. Check the dashboard reasons to see why it's waiting. |
+| Nothing in NinjaTrader's output | That's **normal** — it only prints history/errors | Watch the **dashboard** instead |
+| "A task was canceled" | The robot needed more time to think | Raise `HttpTimeoutMs` (e.g. `115000`) and re-enable the strategy |
+| Dashboard "data age" is big (like 600s) | Delayed chart data, or the strategy needs re-enabling after a bridge restart | Switch to **real-time** data and **re-enable** the strategy |
+| "bridge unreachable" | The desk (Bridge) isn't running | Do Step 2 again |
+| It never trades | It's being **patient** (usually fine), or the market is quiet | Let it run; read the dashboard reasons |
 
 ---
 
 ## 🧠 The one-minute review
 
-1. Get the brain → check `claude --version` (you probably already have it)
-2. Give it thinking power → run `claude` and `/login` with your Claude subscription
-3. Build the desk → `make setup`
-4. (Optional) change the rules → `config/trading.yaml` and `hermes/context/`
-5. Start the desk → `./scripts/run_bridge.sh`
-6. Add the mail carrier → compile `HermesBridgeStrategy.cs`, enable on the MNQ chart
-7. Add the window → open `http://localhost:8787/`
-8. Watch! And use the **STOP button** if you ever need to.
+1. Brain → check `claude --version` (you probably already have it), run `claude` and
+   `/login` with your Claude subscription (or use **mock**).
+2. Desk → `./start.sh` (Mac) or `.\start.ps1 -CheckClaude` (Windows).
+3. (Optional) pick the brain + edit rules → `config/trading.yaml` and `hermes/context/`.
+4. Mail carrier → compile `HermesBridgeStrategy.cs`, enable on a **2m MNQ** chart.
+5. Window → open `http://127.0.0.1:8787/`.
+6. Watch! And use the **STOP button** if you ever need to.
 
 You're all set. Have fun, and stay safe with **pretend money** first! 🎈

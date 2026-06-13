@@ -68,8 +68,8 @@ flowchart LR
     SRV -- "approved orders" --> STRAT
     SRV --> STORE --> IND --> ENG
     ENG --> BRAIN
-    BRAIN -. "client: mock" .-> MOCK
     BRAIN -. "client: claude" .-> CLAUDE
+    BRAIN -. "client: mock" .-> MOCK
     ENG --> RISK --> SESS
     PANEL -- "GET /dashboard.txt" --> SRV
     WEB -- "GET /dashboard" --> SRV
@@ -202,18 +202,18 @@ tests (60 of them, all green).
 ### C. The Brain — *the decision-maker*
 
 The brain answers one question per bar: **enter long, enter short, exit, or wait?** It also
-suggests a stop and target and a confidence score. You choose between two brains in the
-config (`agent.client`):
+suggests a stop and target and a confidence score. You choose the brain in the config
+(`agent.client`):
 
+- **`claude` — the LLM (default).** The bridge sends the market state to **Claude** via the
+  `claude` CLI **on your subscription** (no API key, no per-token billing). Claude reads your
+  strategy notes (section D) and replies with a decision in a structured format. If it ever
+  errors, times out, or replies with nonsense, the decision safely degrades to **WAIT** — it
+  never guesses a trade on a broken answer.
 - **`mock` — deterministic rules** (`agent_client.py`, no LLM, free, instant). It encodes
   the exact strategy: in an uptrend, when a bar dips to "tag" the fast EMA and then closes
   back above it as an up-bar with non-negative order flow → go long (mirror for shorts).
   This is also the **safe fallback** and the engine used by the replay/test harness.
-- **`claude` — the LLM** (currently selected). The bridge runs `claude -p` on your Claude
-  subscription, sending it the market state; Claude reads your strategy notes (section D) and
-  replies with a schema-validated JSON decision. If Claude ever errors, times out, or replies
-  with nonsense, the decision safely degrades to **WAIT** — it never guesses a trade on a
-  broken answer.
 
 Either way, the answer is just a *suggestion* until the risk gate approves it.
 
@@ -224,6 +224,18 @@ Either way, the answer is just a *suggestion* until the risk gate approves it.
 > which the bridge reads from the `structured_output` field. This is why setup just needs you
 > logged in.
 
+> **Plan cycle (LLM off the critical path):** so a slow LLM call never delays a bar close,
+> the bridge runs `plan.py` *between* bars: it asks Claude to analyse the market and **arm
+> explicit conditions** for the next bar close. When that bar actually closes, the engine
+> answers instantly from the armed plan — the LLM is never on the bar-close critical path.
+> The `planner:` config block tunes this (`plan_timeout_s`, `session_timeout_s`,
+> `max_plan_age_bars`), and the Claude session is kept warm and reused via
+> `agent.claude.persistent` (`session_model`, `max_thinking_tokens`).
+
+> **Prefilter (cheap screen before Claude):** `agent.prefilter: mock` runs the rules brain
+> first and only escalates plausible entries to Claude, so the LLM isn't spent on bars that
+> obviously aren't a setup.
+
 > **Timeframe & cadence (cost/latency):** the brain runs once per *closed* bar, so a
 > sub-minute chart calls Claude very frequently — each call needs to finish before the next
 > bar matters. Extended "thinking" tokens dominate that latency, and
@@ -231,6 +243,11 @@ Either way, the answer is just a *suggestion* until the risk gate approves it.
 > lever: **0 = fastest (~10s)**, uncapped ≈ 30–50s. It defaults to 0, and `model: haiku` (the
 > default) is the fastest model. Pick a bar size that comfortably exceeds your chosen
 > latency.
+
+> **Self-improvement (learning loop):** after a trade closes, `reflect.py` /`journal.py` /
+> `memory.py` curate a lesson, running notes, and a trader profile into `hermes/learned/` so
+> the brain's context sharpens over time. You can trigger curation on demand with
+> `POST /control/curate`.
 
 ### D. The trading knowledge — *the context files*
 
@@ -277,7 +294,13 @@ you need. The sections:
 - **`agent`** — which brain (`mock` / `claude`), plus the Claude settings under
   `agent.claude`: `model` (default `haiku`, the fastest; `sonnet`/`opus` also valid),
   `safe_mode` (true), `max_thinking_tokens` (default 0 = fastest), `context_dir` (the notes
-  folder), `timeout_s` (30), and `claude_bin` (default `claude`, must be on PATH).
+  folder), `timeout_s` (30), `claude_bin` (default `claude`, must be on PATH), and
+  `persistent` (keep a warm Claude session for the plan cycle). An optional `prefilter: mock`
+  screens entries with the rules before escalating to Claude.
+- **`planner`** — the plan-cycle timings: `plan_timeout_s`, `session_timeout_s`, and
+  `max_plan_age_bars` (how stale an armed plan may be before it's re-derived).
+- **`levels`** — the swing-pivot support/resistance settings (`levels.py`, served at
+  `GET /levels`) the brain references for location.
 - **`server`** — the host/port the bridge listens on (`0.0.0.0:8787` so Windows can reach it).
 - **`execution`** — `allow_live` (default **false**) and the account name. An advisory
   posture; the NinjaScript account guard is the real interlock.
@@ -361,13 +384,14 @@ The full, friendly version is in `docs/EASY-SETUP.md`; the developer version in
 
 1. **Set up the brain (Claude CLI):** install the Claude Code CLI and make sure you're logged
    in on your Claude subscription — run `claude` once and `/login` if prompted. (No API key,
-   no `ANTHROPIC_API_KEY`.)
-2. **Build the desk:** `make setup`, then `make test` (expect "60 passed").
+   no `ANTHROPIC_API_KEY`.) Or skip it and run the **mock** brain instead.
+2. **Build the desk:** `make setup`, then `make test` (all green).
 3. **(Optional) adjust the rules:** edit `config/trading.yaml` and the notes in `hermes/context/`.
-4. **Start the desk:** `./start.sh` (or `./scripts/run_bridge.sh`). It prints the NinjaTrader settings.
+4. **Start the desk:** `./start.sh` (Mac) or `.\start.ps1` (Windows), or `./scripts/run_bridge.sh`.
+   It prints the NinjaTrader settings.
 5. **Add the mail carrier:** in NinjaTrader, compile `HermesBridgeStrategy.cs`, add it to an
-   MNQ 1-minute chart, set `BridgeHost`/`BridgePort`/`StrategyId`, keep **`AllowLive: false`**
-   and account **`Sim101`**, then Enable.
+   **MNQ 2-minute** chart, set `BridgeHost`/`BridgePort`/`StrategyId` and `HttpTimeoutMs`, keep
+   **`AllowLive: false`** and account **`Sim101`**, then Enable.
 6. **Watch:** open `http://localhost:8787/` (and/or add the `HermesDashboard` indicator).
 
 > Remember: after editing any config or context file, **restart the bridge** for it to take

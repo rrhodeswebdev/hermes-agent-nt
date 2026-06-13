@@ -223,7 +223,7 @@ _CONTEXT_ORDER = [
 ]
 
 
-def load_context_files(context_dir: str) -> str:
+def load_context_files(context_dir: str, order: list[str] | None = None) -> str:
     """Concatenate the context *.md files in priority order into one string.
 
     Top-level files come first (the explicitly ordered ones, then the rest sorted),
@@ -232,17 +232,18 @@ def load_context_files(context_dir: str) -> str:
     UTF-8 explicit so reading does not depend on the platform locale (Windows
     defaults to cp1252 and would crash on the em-dashes/arrows in the notes).
     """
+    order = order or _CONTEXT_ORDER
     d = Path(context_dir)
     if not d.is_dir():
         return ""
     parts: list[str] = []
-    for name in _CONTEXT_ORDER:
+    for name in order:
         f = d / name
         if f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
     # Any other top-level *.md not in the explicit order.
     for f in sorted(d.glob("*.md")):
-        if f.name not in _CONTEXT_ORDER and f.is_file():
+        if f.name not in order and f.is_file():
             parts.append(f.read_text(encoding="utf-8"))
     # Subdirectory files (e.g. strategies/trending/*.md), deterministic path order.
     for f in sorted(d.rglob("*.md"), key=lambda p: p.as_posix()):

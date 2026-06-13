@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from .agent_client import build_agent_client
 from .config import BridgeConfig
 from .engine import TradingEngine
+from .journal import JournalStore
 from .models import Action, Bar, Fill, Side
 from .plan import Planner
 from .risk import RiskGate
@@ -49,7 +50,7 @@ class ReplayReport:
 
 
 class ReplaySimulator:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, journal: JournalStore | None = None) -> None:
         self.cfg = config
         self.store = BarStore(config.instrument.symbol, config.instrument.timeframe)
         self.session = SessionState(
@@ -66,7 +67,7 @@ class ReplaySimulator:
         planner = Planner(config, agent, synchronous=True) if config.planner.enabled else None
         self.engine = TradingEngine(
             config, self.store, self.session, agent, RiskGate(config),
-            planner=planner,
+            planner=planner, journal=journal,
         )
         self._bracket: _Bracket | None = None
 
