@@ -2,7 +2,9 @@
 
 `HermesBridgeStrategy.cs` is the NinjaTrader 8 side of the system. It streams chart
 data to the Python `hermes-bridge` and executes the risk-approved orders the bridge
-returns, on the **Sim** account by default.
+returns, on the **Sim** account by default. It **also renders the agent dashboard
+card + S/R levels directly on the chart** — the dashboard is built into the strategy
+(NT8 strategies support `OnRender`), so there is no separate indicator to add.
 
 ## Install
 
@@ -48,17 +50,20 @@ Order sizing, stops, daily goal, and all risk limits are enforced by the bridge'
 
 ---
 
-## HermesDashboard (Indicator) — see what the agent is doing
+## Built-in dashboard — see what the agent is doing
 
-`HermesDashboard.cs` is an **indicator** that shows the agent's live state as a panel
-on the chart: position, P&L, trades, daily-goal status, **data age** (so you can spot a
-delayed feed), the last decision + its rationale, and recent decisions. It polls the
-bridge's pre-formatted panel (`GET /dashboard.txt`), so there's no JSON parsing in C#.
+The strategy draws a live **dashboard card** on the chart (position, P&L, trades,
+daily-goal status, **data age** so you can spot a delayed feed, the last decision + its
+rationale, recent decisions, and the armed plan) plus the agent's **support/resistance
+lines**. It polls the bridge's pre-formatted panels (`GET /panel.txt` + `GET /levels.txt`),
+so there's no JSON parsing in C#. The card is **click-draggable** (double-click resets);
+the header glyph folds it to a compact strip. Position/fold persist with the workspace.
 
-Install: NinjaScript Editor → **New → Indicator** → paste `HermesDashboard.cs` →
-**Compile (F5)**. Then **right-click any chart → Indicators… → HermesDashboard**, set
-`BridgeHost`/`BridgePort` (same as the strategy), and add it. Drop it on the trading
-chart or a **separate chart window** — it only needs network access to the bridge.
+Dashboard knobs on the strategy: `RefreshSeconds`, `FontSize`, `RecentRows`, `ShowLevels`.
+
+> **Upgrading from the separate `HermesDashboard` indicator?** It's now folded into the
+> strategy. **Remove the HermesDashboard indicator from your charts** and delete it from
+> `Documents/NinjaTrader 8/bin/Custom/Indicators/` so you don't get two cards.
 
 Prefer a browser? The bridge also serves a full **web dashboard** at
 `http://<bridge-host>:8787/` (auto-refreshing) — open it on the Mac or inside the VM.
