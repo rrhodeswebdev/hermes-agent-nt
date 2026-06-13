@@ -76,7 +76,10 @@ See `ninjatrader/README.md`. Summary:
    **HermesBridgeStrategy**.
 3. Set `BridgeHost`/`BridgePort` (e.g. `127.0.0.1` / `8787`), `StrategyId`
    (= `strategy_id`), `SendHistory: true`, **`AllowLive: false`**.
-4. Select the **Sim101** account and enable the strategy.
+4. Select your account — a **Sim** (e.g. `Sim101`) or **Playback** account — and enable the
+   strategy. The selected account is auto-detected and reported to the bridge (shown on
+   `/health` and the dashboard); the `execution.account` config value is only a fallback
+   until the strategy connects.
 
 On enable it bulk-uploads history, then streams each closed bar; approved orders appear
 on the chart with their stop/target bracket.

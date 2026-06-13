@@ -28,6 +28,7 @@ from .journal import JournalStore
 from .levels import detect_levels
 from .memory import LearnedStore
 from .models import (
+    AccountReport,
     AccountState,
     Action,
     BarBatch,
@@ -106,6 +107,15 @@ class AppState:
         # Server-side (true-UTC) arrival stamp of the latest realtime bar, so "data age"
         # is correct regardless of the timezone the strategy stamps bar.ts in.
         self.last_bar_received_at: float | None = None
+        # The account NinjaTrader's strategy reports it is actually trading on (and
+        # whether live is permitted there). None until the strategy first reports;
+        # effective_account() falls back to the static config default until then.
+        self.reported_account: str | None = None
+        self.reported_allow_live: bool | None = None
+
+    def effective_account(self) -> str:
+        """Live NT account if the strategy has reported one, else the config default."""
+        return self.reported_account or self.cfg.execution.account
 
     def _on_trade_closed(self, trade) -> None:
         lc = self.cfg.learning
@@ -148,22 +158,26 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     # account guard is the real interlock), so this flag is an advisory posture that
     # we surface in logs and /health rather than a silent default.
     posture = "LIVE-ENABLED" if cfg.execution.allow_live else "sim-only (allow_live=false)"
-    print(f"[hermes-bridge] execution posture: {posture}; account={cfg.execution.account}; "
-          f"strategy_id={cfg.strategy_id}; agent={cfg.agent.client}")
+    print(f"[hermes-bridge] execution posture: {posture}; "
+          f"account(config default)={cfg.execution.account}; "
+          f"strategy_id={cfg.strategy_id}; agent={cfg.agent.client} "
+          f"(NinjaTrader reports its live account on connect)")
     if cfg.execution.allow_live:
         print("[hermes-bridge] WARNING: allow_live=true — real-money orders permitted. "
               "Confirm this is intended and that NinjaTrader's AllowLive is set deliberately.")
 
     # ---- health / status ------------------------------------------------------
     @app.get("/health")
-    def health() -> dict:
+    def health(request: Request) -> dict:
+        st = _state(request)
         return {
             "ok": True,
             "version": __version__,
             "agent": cfg.agent.client,
             "strategy_id": cfg.strategy_id,
             "allow_live": cfg.execution.allow_live,
-            "account": cfg.execution.account,
+            "account": st.effective_account(),
+            "nt_allow_live": st.reported_allow_live,
         }
 
     @app.get("/session/status", response_model=AccountState)
@@ -220,6 +234,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "brain": st.engine.agent.describe(),
             "model": _agent_model(),
             "strategy_id": cfg.strategy_id,
+            "account": st.effective_account(),
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,
             "now": now,
@@ -324,6 +339,22 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "queued": f"{cmd.action}:{cmd.qty}" if cmd is not None else None,
         })
         return d
+
+    @app.post("/ingest/account")
+    def ingest_account(request: Request, report: AccountReport) -> dict:
+        """NinjaTrader reports which account its strategy is actually trading on, so the
+        bridge's logs / health / dashboard reflect the live selection instead of the
+        static config default. Advisory only — NinjaTrader's own account guard is the
+        execution interlock; this never changes where orders go."""
+        st = _state(request)
+        name = (report.account or "").strip()
+        if name and name != st.reported_account:
+            print(f"[hermes-bridge] NinjaTrader account is now '{name}' "
+                  f"(nt_allow_live={report.allow_live})", flush=True)
+        if name:
+            st.reported_account = name
+        st.reported_allow_live = report.allow_live
+        return {"ok": True, "account": st.effective_account()}
 
     @app.post("/ingest/fill")
     def ingest_fill(request: Request, fill: Fill) -> dict:

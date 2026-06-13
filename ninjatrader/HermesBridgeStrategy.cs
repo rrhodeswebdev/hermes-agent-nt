@@ -38,7 +38,9 @@ using DXVec = SharpDX.Vector2;
 //    * Each CLOSED realtime bar (Calculate.OnBarClose) POSTs to /ingest/bar, then
 //      GETs /commands/next and runs any command on the strategy thread.
 //    * Fills are reported to /ingest/fill from OnExecutionUpdate.
-//    * AllowLive defaults FALSE; a non-Sim account disables trading.
+//    * AllowLive defaults FALSE; a live (non-Sim/Playback) account disables trading.
+//    * The selected account name is reported to the bridge (/ingest/account) so the
+//      dashboard/logs follow the chart's account selection, not a static config default.
 //
 //  DASHBOARD (folded in from HermesDashboard):
 //    * A background timer polls /panel.txt + /levels.txt and caches an immutable
@@ -156,8 +158,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         public int RefreshSeconds { get; set; } = 5;
 
+        // Master size knob: the whole card scales by FontSize/12 — text AND the layout
+        // (width, padding, boxes) in both BuildOps and EnsureFormats. 12 = original size,
+        // 18 = 1.5×. Bump this if the card reads too small on a high-DPI / 4K chart.
         [NinjaScriptProperty]
-        public int FontSize { get; set; } = 12;
+        public int FontSize { get; set; } = 18;
 
         [NinjaScriptProperty]
         public int RecentRows { get; set; } = 5;    // decision-table rows (1..8)
@@ -252,11 +257,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Realtime)
             {
+                // First realtime moment: read the selected account, apply the safety
+                // guard, and tell the bridge which account we're on — so the bridge's
+                // dashboard/logs follow the chart's account selection, not the static
+                // config default. Done unconditionally (even if SendHistory is off).
+                GuardAccount();
+                _ = ReportAccountAsync();
                 // Transitioned historical → realtime: ship the full history once.
                 if (SendHistory && !historySent)
                 {
                     historySent = true;
-                    GuardAccount();
                     _ = PostHistoryAsync();
                 }
             }
@@ -354,8 +364,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             _lastHistResendUtc = DateTime.UtcNow;
             Print("Hermes: bridge requested a history re-send (bridge restarted?) — pushing.");
             // Build the payload on the strategy thread — series access (Bars.GetTime
-            // et al.) is not safe from the HTTP continuation's pool thread.
-            TriggerCustomEvent(o => { _ = PostHistoryAsync(); }, null);
+            // et al.) is not safe from the HTTP continuation's pool thread. A restarted
+            // bridge also lost the reported account, so re-send that too.
+            TriggerCustomEvent(o => { _ = ReportAccountAsync(); _ = PostHistoryAsync(); }, null);
         }
 
         private async Task PostHistoryAsync()
@@ -383,6 +394,28 @@ namespace NinjaTrader.NinjaScript.Strategies
             catch (Exception ex)
             {
                 Print("Hermes bridge history error: " + ex.Message);
+            }
+        }
+
+        // Tell the bridge which account this strategy is actually trading on (and whether
+        // AllowLive is set here). Advisory: the bridge uses it only for its dashboard /
+        // logs — NinjaTrader's account guard (GuardAccount) is the real execution
+        // interlock. The name is whatever is selected in the strategy dialog, so the rest
+        // of the tool follows the chart's account selection automatically.
+        private async Task ReportAccountAsync()
+        {
+            try
+            {
+                string name = Account != null ? Account.Name : "";
+                string body = string.Format(
+                    "{{\"account\":\"{0}\",\"allow_live\":{1}}}",
+                    Escape(name), AllowLive ? "true" : "false");
+                await PostAsync("/ingest/account", body);
+                Print("Hermes: reported account '" + name + "' to bridge.");
+            }
+            catch (Exception ex)
+            {
+                Print("Hermes bridge account report error: " + ex.Message);
             }
         }
 
@@ -452,15 +485,19 @@ namespace NinjaTrader.NinjaScript.Strategies
         // ---- helpers ---------------------------------------------------------
         private void GuardAccount()
         {
-            // Best-effort guard. NinjaTrader's built-in simulator account is "Sim101".
-            // If the live account does not look like a sim account, refuse to trade
-            // unless AllowLive was explicitly enabled.
+            // Best-effort guard. NinjaTrader's simulated (no-real-money) accounts are the
+            // built-in simulator "Sim101" and the Market-Replay/Playback account "Playback101".
+            // Both are safe to trade; only refuse a genuine live (brokerage) account unless
+            // AllowLive was explicitly enabled.
             string name = Account != null ? Account.Name : "";
-            bool looksSim = name != null && name.IndexOf("Sim", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool looksSim = name != null &&
+                (name.IndexOf("Sim", StringComparison.OrdinalIgnoreCase) >= 0
+                 || name.IndexOf("Playback", StringComparison.OrdinalIgnoreCase) >= 0
+                 || name.IndexOf("Replay", StringComparison.OrdinalIgnoreCase) >= 0);
             if (!looksSim && !AllowLive)
             {
                 tradingDisabled = true;
-                Print("Hermes SAFETY: account '" + name + "' is not a simulation account and "
+                Print("Hermes SAFETY: account '" + name + "' is not a simulation/playback account and "
                       + "AllowLive is false. Trading DISABLED. Set AllowLive=true to override.");
             }
         }

@@ -29,7 +29,7 @@ you can read and change.
 
 1. A **Mac** computer (you have this!).
 2. **NinjaTrader 8** running in Windows (you run it in Parallels — that's a Windows
-   "computer inside your Mac") with a **Sim101** account and **real-time** data.
+   "computer inside your Mac") with a **Sim101** (or **Playback**) account and **real-time** data.
 3. The **Claude Code CLI** installed and logged in (this is the brain — it runs on your
    own **Claude subscription**, so make sure you can sign in).
 4. **[`uv`](https://docs.astral.sh/uv/)** — a small tool that builds the bridge's Python
@@ -129,7 +129,11 @@ In **NinjaTrader**:
 | `StrategyId` | `hermes-default` |
 | `HttpTimeoutMs` | `115000` ← must be longer than the agent's think time |
 | `AllowLive` | `false` ← keep it OFF for pretend money |
-| Account | `Sim101` |
+| Account | `Sim101` (or a **Playback** account — both are pretend money) |
+
+Whatever account you pick here is the one the robot uses — the strategy tells the desk
+which account you chose, so the watching window shows it. You don't set the account anywhere
+else.
 
 5. Make sure the chart is on your **real-time** feed (not delayed), then click **Enable**. 🟢
 
@@ -190,8 +194,10 @@ To **stop the desk completely**, click the Bridge window and press **Ctrl + C**.
 
 ## 🦺 Safety rules (please read!)
 
-- It uses **pretend money (Sim)**. Keep `AllowLive` set to **false** and the account on
-  **Sim101**. Do **not** switch to real money until you've watched it for a long time and
+- It uses **pretend money**. Keep `AllowLive` set to **false** and the account on a
+  simulated one — **Sim101** or a **Playback** account both work (the strategy tells the
+  desk which one you picked, so the window shows it). Do **not** switch to real money until
+  you've watched it for a long time and
   fully understand it.
 - A **safety guard** (the RiskGate) checks *every* order, server-side, and blocks anything
   too big or too risky. That's the guard doing its job!

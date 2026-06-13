@@ -115,6 +115,16 @@ class Fill(BaseModel):
     realized_pnl_delta: float = 0.0   # realized P&L produced by this fill
 
 
+class AccountReport(BaseModel):
+    """NinjaTrader tells the bridge which account its strategy is actually trading on,
+    and whether live trading is permitted there. The bridge uses this for display /
+    logging only (NinjaTrader's own account guard is the execution interlock), so the
+    dashboard and /health reflect the live account instead of the config default."""
+
+    account: str = ""
+    allow_live: bool = False
+
+
 class Level(BaseModel):
     """One support/resistance zone from swing-pivot clustering (levels.py).
 
