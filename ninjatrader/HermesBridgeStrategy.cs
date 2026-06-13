@@ -275,11 +275,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 _terminated = true;   // FIRST: stop OnRender touching DX before we dispose it
                 if (_timer != null) { try { _timer.Dispose(); } catch { } _timer = null; }
                 UnhookMouse();        // async if off the UI thread — never a sync Invoke here
-                try
-                {
-                    RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel");
-                    RemoveDrawObject("HermesSupport");    RemoveDrawObject("HermesSupLabel");
-                }
+                try { RemoveLevelDrawings(); }
                 catch { }
                 try { DisposeOps(); } catch { }
                 try { DisposeBrushes(); } catch { }
@@ -755,8 +751,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!ShowLevels)
             {
-                RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel");
-                RemoveDrawObject("HermesSupport");    RemoveDrawObject("HermesSupLabel");
+                RemoveLevelDrawings();
                 return;
             }
             string lv = _levelsText;
@@ -774,6 +769,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Draw.Text(this, "HermesSupLabel", "S (agent)", 0, s, Brushes.LimeGreen);
             }
             else { RemoveDrawObject("HermesSupport"); RemoveDrawObject("HermesSupLabel"); }
+        }
+
+        // Remove all four agent S/R draw objects (resistance + support, line + label).
+        // Idempotent: RemoveDrawObject is a no-op when the tag isn't on the chart.
+        private void RemoveLevelDrawings()
+        {
+            RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel");
+            RemoveDrawObject("HermesSupport");    RemoveDrawObject("HermesSupLabel");
         }
 
         private double GetLevel(string text, string key)
