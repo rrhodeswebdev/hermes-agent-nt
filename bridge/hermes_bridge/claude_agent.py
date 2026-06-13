@@ -162,10 +162,13 @@ class ClaudeAgentClient(AgentClient):
     def __init__(self, config: BridgeConfig) -> None:
         super().__init__(config)
         self._knowledge: str | None = None  # cached context files (rarely change)
-        # Persistent sessions keyed by (system prompt, schema): at most one for
-        # decide() and one for propose_plan(); analyze_session stays one-shot
-        # because it may run on a different model.
-        self._sessions: dict[tuple[str, str], ClaudeSession] = {}
+        # Persistent sessions keyed by schema (≈ call kind): one for decide() and one
+        # for propose_plan(); analyze_session stays one-shot (it may run on a different
+        # model). The system prompt is deliberately NOT in the key — it embeds the
+        # learned-memory block that reflection rewrites mid-session, so a (system, schema)
+        # key would orphan a live child on every change. _session_ask recycles the child
+        # in place when the prompt changes instead.
+        self._sessions: dict[str, ClaudeSession] = {}
         # Learned knowledge (trader profile, notes, lessons) and the closed-trade
         # journal are read back into prompts so reflection actually feeds the brain.
         self._learned = LearnedStore(config.learning.learned_dir)
@@ -269,14 +272,17 @@ class ClaudeAgentClient(AgentClient):
     def _session_ask(self, system: str, user: str, json_schema: str,
                      timeout_s: float | None) -> str:
         c = self.cfg.agent.claude
-        key = (system, json_schema)
+        key = json_schema
         sess = self._sessions.get(key)
         if sess is not None and (
             not sess.alive()
+            or sess.system != system
             or (c.max_session_turns is not None and sess.turns >= c.max_session_turns)
         ):
-            # Dead, or at the turn cap: the conversation grows with every turn and
-            # its latency with it — recycle before it outgrows the plan budget.
+            # Recycle the child (its system prompt is fixed at spawn) when it has died,
+            # the prompt changed (reflection rewrote the learned block — keeping the old
+            # child would orphan a live process AND serve a stale prompt), or it hit the
+            # turn cap (the conversation grows every turn and latency creeps with it).
             sess.close()
             self._sessions.pop(key, None)
             sess = None

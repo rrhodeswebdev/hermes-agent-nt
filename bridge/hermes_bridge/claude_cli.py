@@ -98,6 +98,7 @@ class ClaudeSession:
     def __init__(self, c: ClaudeClientConfig, system: str,
                  json_schema: str | None = None) -> None:
         self._c = c
+        self.system = system  # fixed at spawn; _session_ask recycles when it changes
         self._lock = threading.Lock()  # one in-flight turn at a time
         self.turns = 0  # user turns asked; drives max_session_turns recycling
         tmp = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,

@@ -97,6 +97,28 @@ def test_session_recycled_after_max_turns(monkeypatch):
     assert spawned[0].killed
 
 
+def test_session_recycled_when_system_prompt_changes(monkeypatch):
+    # The system prompt embeds the learned-memory block, which reflection rewrites
+    # mid-session. A persistent child's prompt is fixed at spawn, so a changed prompt
+    # must recycle the old child in place — NOT spawn a second and orphan the first
+    # (one leaked `claude` process + temp files per learned-memory change otherwise).
+    spawned: list[_FakeProc] = []
+
+    def popen(*a, **k):
+        proc = _FakeProc([_result_line({"action": "WAIT", "rationale": "session"})])
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.Popen", popen)
+    c = make_claude_client()
+    c.cfg.agent.claude.persistent = True
+    c._session_ask("SYSTEM-A", "u", "{}", None)
+    c._session_ask("SYSTEM-B", "u", "{}", None)  # learned block changed -> new prompt
+    assert len(spawned) == 2
+    assert spawned[0].killed                      # old child closed, not orphaned
+    assert len(c._sessions) == 1                  # keyed by schema; no accumulation
+
+
 def test_persistent_decide_falls_back_to_oneshot_on_dead_session(fake_claude, monkeypatch):
     # Session child answers nothing (EOF immediately) → client degrades to the
     # one-shot path for the same request.
