@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Net.Http;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -23,15 +24,15 @@ using DXVec = SharpDX.Vector2;
 #endregion
 
 // =============================================================================
-//  HermesBridgeStrategy  (strategy + built-in dashboard)
+//  HermesBridgeStrategy  (strategy + on-chart dashboard button)
 // -----------------------------------------------------------------------------
 //  Streams chart data to the Python "hermes-bridge", executes the risk-approved
-//  orders it returns (Sim by default), AND renders the agent's dashboard card +
-//  S/R levels directly on the chart. The dashboard used to be a separate
-//  HermesDashboard indicator; it is now built into this strategy (NT8 strategies
-//  support OnRender), so enabling the strategy is all that's needed — there is no
-//  separate indicator to add (remove the old HermesDashboard indicator from the
-//  chart, and from Custom\Indicators, so you don't get two cards).
+//  orders it returns (Sim by default), draws the agent's S/R levels on the chart,
+//  and shows a small on-chart "HERMES — DASHBOARD" button. Clicking the button
+//  opens the bridge's full HTML dashboard (http://<host>:<port>/) inside a
+//  NinjaTrader window via an embedded WebView2 (Chromium); if WebView2 isn't
+//  available it falls back to the system default browser. There is no longer an
+//  on-chart card — the rich panel lives entirely in the HTML dashboard now.
 //
 //  TRADING (unchanged):
 //    * Historical→realtime transition bulk-uploads loaded bars to /ingest/history.
@@ -42,20 +43,26 @@ using DXVec = SharpDX.Vector2;
 //    * The selected account name is reported to the bridge (/ingest/account) so the
 //      dashboard/logs follow the chart's account selection, not a static config default.
 //
-//  DASHBOARD (folded in from HermesDashboard):
-//    * A background timer polls /panel.txt + /levels.txt and caches an immutable
-//      snapshot — NO chart/UI/dispatcher calls from the timer (AGENTS.md #17).
-//    * The card is drawn in OnRender (SharpDX only, no Draw.* there — #13); S/R
-//      lines use Draw.* from the throttled OnBarUpdate. Brushes are device
-//      resources created eagerly in OnRenderTargetChanged with a self-heal in
-//      OnRender (§5b). _terminated (set first in Terminated) gates DX teardown.
-//    * The card is click-draggable (double-click resets); the header glyph folds
-//      it. Offsets persist via serialized CardOffsetX/Y/CardFolded.
+//  ON-CHART BUTTON + DASHBOARD:
+//    * A background timer polls /health (reachability) + /levels.txt (S/R) — NO
+//      chart/UI/dispatcher calls from the timer (AGENTS.md #17).
+//    * The button is drawn in OnRender (SharpDX only, no Draw.* there — #13); a
+//      small dot shows bridge reachability (green ok / amber connecting / red
+//      offline). S/R lines use Draw.* from the throttled OnBarUpdate. Brushes are
+//      device resources created eagerly in OnRenderTargetChanged with a self-heal
+//      in OnRender (§5b). _terminated (set first in Terminated) gates DX teardown.
+//    * The button is click-draggable (double-click resets; a clean click opens the
+//      dashboard). Its position persists via serialized ButtonOffsetX/Y.
+//    * The dashboard window is embedded WebView2, loaded by reflection so the
+//      strategy still COMPILES without the WebView2 DLLs referenced — when they're
+//      absent (or the runtime is missing) the click opens the default browser.
 //
 //  NOTE: compiles INSIDE NinjaTrader 8 (NinjaScript editor / F5) — it links against
 //  NinjaTrader + SharpDX assemblies and cannot be built by a standalone toolchain.
 //  OnRender/OnRenderTargetChanged/RenderTarget/ChartPanel are used from a Strategy
 //  (supported in NT8); the strategy must be applied directly to a chart to render.
+//  To embed (optional): NinjaScript Editor → References… → add Microsoft.Web.WebView2.Core.dll
+//  + Microsoft.Web.WebView2.Wpf.dll (NuGet) and ensure the WebView2 Runtime is installed.
 // =============================================================================
 
 namespace NinjaTrader.NinjaScript.Strategies
@@ -117,41 +124,44 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string BaseUrl => string.Format("http://{0}:{1}", BridgeHost, BridgePort);
         #endregion
 
-        // ---- dashboard state -----------------------------------------------
+        // ---- bridge poll state ---------------------------------------------
         private Timer _timer;
         private int _pollBusy;   // Interlocked gate: timer ticks must not overlap
 
-        // Snapshot published by the timer thread, consumed by OnRender. Immutable
-        // after construction; volatile swap gives safe publication.
-        private volatile Snapshot _snap;
         private volatile string _levelsText = "";   // raw /levels.txt, parsed on the chart thread
         private volatile string _error;             // last poll failure (null when healthy)
+        private volatile bool _everPolled;          // a /health poll has succeeded at least once
 
         private DateTime _lastDrawUtc = DateTime.MinValue;  // throttle for Draw.* (S/R lines)
 
-        // ---- card dragging (handlers run on the UI thread; OnRender only reads
+        // ---- dashboard window (embedded WebView2, opened by reflection) ----------
+        private System.Windows.Window _dashWin;      // NT NTWindow when resolvable, else a plain WPF window; null once closed
+        private static Type _ntWindowType;           // resolved-once NTWindow type (null = not found / use plain Window)
+        private static bool _ntWindowSearched;
+
+        // ---- button dragging (handlers run on the UI thread; OnRender only reads
         //      the float offsets — 32-bit reads/writes are atomic) ---------------
         private ChartControl _mouseChart;     // chart whose Preview events we hooked
         private bool _mouseHooked;
         private volatile bool _hookQueued;    // an InvokeAsync hookup is in flight
-        private bool _dragging;
-        private float _dragGrabX, _dragGrabY; // mouse-to-card-origin grab offset
+        private bool _armed;                  // a press started on the button (click or drag pending)
+        private bool _moved;                  // pointer passed the drag threshold since press
+        private float _pressX, _pressY;       // where the press began (device px)
+        private float _dragGrabX, _dragGrabY; // mouse-to-button-origin grab offset
         private DateTime _lastDragRefreshUtc = DateTime.MinValue;
         private int _mouseErrorCount;
         private float _offX, _offY;           // clamped offset actually applied at replay
-        private float _foldX1, _foldY1, _foldX2, _foldY2;   // fold-toggle hit box (built coords)
         private volatile bool _rebuildAsap;   // UI thread requests a display-list rebuild
 
         // ---- display list (built/replayed only on the render thread) ------------
         private readonly List<DrawOp> _ops = new List<DrawOp>();
         private readonly Dictionary<uint, D2D.SolidColorBrush> _brushes =
             new Dictionary<uint, D2D.SolidColorBrush>();
-        private Snapshot _builtFrom;
-        private string _builtError;
+        private bool _builtOk;                      // bridge-reachable state the button was built for
+        private string _builtError;                 // _error the button was built for
         private DateTime _lastBuildUtc = DateTime.MinValue;
-        private float _cardX, _cardY, _cardW, _cardH;
-        private bool _hasCard;
-        private float _s = 1f;                      // FontSize/12 scale factor
+        private float _btnX, _btnY, _btnW, _btnH;
+        private bool _hasButton;
 
         // Device-resource lifecycle (AGENTS.md §5b) + teardown guard (§5d).
         private volatile bool _terminated;          // set FIRST in Terminated; OnRender bails on it
@@ -161,36 +171,27 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int _barErrorCount;
         private int _stateErrorCount;
 
-        private DW.TextFormat _fLabel, _fSub, _fBody, _fBodyB, _fHead, _fBig, _fRat;
-        private DW.EllipsisTrimming _ratEllipsis;
+        private DW.TextFormat _fHead, _fSub;
 
         [NinjaScriptProperty]
         public int RefreshSeconds { get; set; } = 5;
 
-        // Master size knob: the whole card scales by FontSize/12 — text AND the layout
-        // (width, padding, boxes) in both BuildOps and EnsureFormats. 12 = original size,
-        // 18 = 1.5×. Bump this if the card reads too small on a high-DPI / 4K chart.
+        // Master size knob: the button scales by FontSize/12 — text AND padding in
+        // both BuildButton and EnsureFormats. 12 = original size, 18 = 1.5×. Bump
+        // this if the button reads too small on a high-DPI / 4K chart.
         [NinjaScriptProperty]
         public int FontSize { get; set; } = 18;
 
         [NinjaScriptProperty]
-        public int RecentRows { get; set; } = 5;    // decision-table rows (1..8)
-
-        [NinjaScriptProperty]
         public bool ShowLevels { get; set; } = true;   // plot the agent's S/R (swing) lines
 
-        // Dragged card position (px offset from the default top-left anchor). Not
+        // Dragged button position (px offset from the default top-left anchor). Not
         // browsable — set by dragging; serialized so it persists with the workspace.
         [Browsable(false)]
-        public float CardOffsetX { get; set; }
+        public float ButtonOffsetX { get; set; }
 
         [Browsable(false)]
-        public float CardOffsetY { get; set; }
-
-        // Folded = header + position/P&L strip only. Toggled by the ▾/▸ glyph in
-        // the card header; serialized so it persists with the workspace.
-        [Browsable(false)]
-        public bool CardFolded { get; set; }
+        public float ButtonOffsetY { get; set; }
 
         // ---- palette (AARRGGBB) --------------------------------------------------
         private const uint ColCardBg   = 0xF0131720;
@@ -241,7 +242,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (State == State.SetDefaults)
             {
                 Description = "Streams bars to the Hermes bridge, executes approved orders (Sim), "
-                    + "and renders the agent dashboard card + S/R levels on the chart.";
+                    + "draws the agent's S/R levels, and shows an on-chart button that opens the "
+                    + "HTML dashboard in a NinjaTrader (WebView2) window.";
                 Name = "HermesBridgeStrategy";
                 Calculate = Calculate.OnBarClose;          // one decision per closed bar
                 EntriesPerDirection = 1;
@@ -253,14 +255,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.DataLoaded)
             {
-                // Dashboard background poll (panel.txt + levels.txt). Cheap; the chart
-                // render path reads only the cached snapshot.
+                // Background poll (/health for the button's status dot + /levels.txt for
+                // S/R). Cheap; the chart render path reads only cached fields.
                 if (_timer == null)
                     _timer = new Timer(Poll, null, 0, Math.Max(1, RefreshSeconds) * 1000);
             }
             else if (State == State.Historical)
             {
-                // Earliest chance to hook the card-drag mouse events; ChartControl can
+                // Earliest chance to hook the button-drag mouse events; ChartControl can
                 // still be null here (F5 clone-reload), so OnRender retries until hooked.
                 HookMouse(ChartControl);
             }
@@ -676,8 +678,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         // =====================================================================
-        //  Background poll — ONLY fetch + parse + cache. No chart / UI / dispatcher
-        //  calls here (AGENTS.md #17). Rendering reads the cached snapshot.
+        //  Background poll — ONLY fetch + cache. No chart / UI / dispatcher calls
+        //  here (AGENTS.md #17). /health drives the button's status dot; /levels.txt
+        //  feeds the on-chart S/R lines. The rich panel now lives in the HTML dash.
         // =====================================================================
         private async void Poll(object state)
         {
@@ -685,148 +688,43 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;   // previous tick still in flight (slow bridge) — skip, don't stack
             try
             {
+                // Reachability first — this alone drives the button's status dot.
                 using (var cts = new CancellationTokenSource(Math.Max(2, RefreshSeconds) * 1000))
-                using (var resp = await Http.GetAsync(BaseUrl + "/panel.txt", cts.Token))
+                using (var resp = await Http.GetAsync(BaseUrl + "/health", cts.Token))
                 {
                     if (!resp.IsSuccessStatusCode)
                     {
-                        // A 404 here means the bridge predates /panel.txt — restart it.
-                        _error = "HTTP " + (int)resp.StatusCode + " /panel.txt (old bridge? restart it)";
+                        _error = "HTTP " + (int)resp.StatusCode + " /health";
                         return;
                     }
-                    string text = await resp.Content.ReadAsStringAsync();
-                    if (!string.IsNullOrWhiteSpace(text))
-                        _snap = ParsePanel(text);
-                }
-                using (var cts2 = new CancellationTokenSource(Math.Max(2, RefreshSeconds) * 1000))
-                using (var resp2 = await Http.GetAsync(BaseUrl + "/levels.txt", cts2.Token))
-                {
-                    if (resp2.IsSuccessStatusCode)
-                        _levelsText = await resp2.Content.ReadAsStringAsync() ?? "";
+                    await resp.Content.ReadAsStringAsync();   // drain so the connection is reused cleanly
                 }
                 _error = null;
+                _everPolled = true;
+
+                // S/R levels are best-effort: a hiccup here must not turn the dot red.
+                if (ShowLevels)
+                {
+                    try
+                    {
+                        using (var cts2 = new CancellationTokenSource(Math.Max(2, RefreshSeconds) * 1000))
+                        using (var resp2 = await Http.GetAsync(BaseUrl + "/levels.txt", cts2.Token))
+                        {
+                            if (resp2.IsSuccessStatusCode)
+                                _levelsText = await resp2.Content.ReadAsStringAsync() ?? "";
+                        }
+                    }
+                    catch { /* keep the last good levels; the dot stays green */ }
+                }
             }
             catch (Exception ex)
             {
-                _error = ex.Message;   // keep the last good snapshot; the pill shows OFFLINE
+                _error = ex.Message;   // the button's status dot turns red until the bridge answers
             }
             finally
             {
                 Interlocked.Exchange(ref _pollBusy, 0);
             }
-        }
-
-        // =====================================================================
-        //  Snapshot model + parser (runs on the timer thread)
-        // =====================================================================
-        private sealed class Snapshot
-        {
-            public bool Ok;
-            public string Instrument = "", Timeframe = "", Agent = "", Model = "", StrategyId = "";
-            // Agent-authored strategy: source ("agent"/"custom"), the headline name/summary
-            // (= the active setup), how the active setup was chosen ("declared" by the brain
-            // vs "regime" fallback), and every authored setup as name|regime|summary|active.
-            public string StrategySource = "", StrategyName = "", StrategySummary = "", StrategyActiveSource = "";
-            public List<string[]> StrategyRows = new List<string[]>();  // name|regime|summary|active
-            // Authoring telemetry (re-author observability): how many playbooks have installed
-            // (count ticks => the strategy refreshed), how long ago, and why the latest fired.
-            // Count < 0 means the bridge sent no telemetry (old bridge / never authored).
-            public int StrategyAuthoredCount = -1, StrategyAuthoredBarsAgo = -1;
-            public string StrategyAuthoredReason = "";
-            // Planner / study health, so a re-author that never lands is visible on the card.
-            public string PlannerStatus = "", PlannerError = "", SessionError = "";
-            public double AgeS = double.NaN, LastClose = double.NaN;
-            public int Position, Trades;
-            public double AvgPrice = double.NaN, Realized, Unrealized;
-            public bool Halted, GoalHit;
-            public string HaltReason = "";
-            public double GoalTarget = double.NaN, GoalLoss = double.NaN;
-            public string LdTime = "", LdAction = "", LdOrder = "", LdRationale = "";
-            public double LdConf = double.NaN, LdClose = double.NaN;
-            public List<string[]> Rows = new List<string[]>();  // time|action|conf|close|order
-            public bool HasPlan;
-            public string PlanStatus = "", PlanDirection = "", PlanNote = "", PlanBarsLeft = "";
-            public double PlanHigh = double.NaN, PlanLow = double.NaN;
-            public DateTime PolledUtc;     // for client-side age extrapolation between polls
-            public DateTime PolledLocal;   // footer "updated HH:mm:ss"
-        }
-
-        private static Snapshot ParsePanel(string text)
-        {
-            var p = new Snapshot { PolledUtc = DateTime.UtcNow, PolledLocal = DateTime.Now };
-            foreach (var raw in text.Split('\n'))
-            {
-                string line = raw.TrimEnd('\r');
-                int eq = line.IndexOf('=');
-                if (eq <= 0) continue;
-                string k = line.Substring(0, eq), v = line.Substring(eq + 1);
-                switch (k)
-                {
-                    case "ok":           p.Ok = v == "1"; break;
-                    case "instrument":   p.Instrument = v; break;
-                    case "timeframe":    p.Timeframe = v; break;
-                    case "agent":        p.Agent = v; break;
-                    case "model":        p.Model = v; break;
-                    case "strategy_id":      p.StrategyId = v; break;
-                    case "strategy_source":         p.StrategySource = v; break;
-                    case "strategy_name":           p.StrategyName = v; break;
-                    case "strategy_summary":        p.StrategySummary = v; break;
-                    case "strategy_active_source":  p.StrategyActiveSource = v; break;
-                    case "strategy_row":
-                        var sp = v.Split('|');               // name|regime|summary|active
-                        if (sp.Length >= 4) p.StrategyRows.Add(sp);
-                        break;
-                    case "strategy_authored_count":     p.StrategyAuthoredCount = (int)NumOr(v, -1); break;
-                    case "strategy_authored_bars_ago":  p.StrategyAuthoredBarsAgo = (int)NumOr(v, -1); break;
-                    case "strategy_authored_reason":    p.StrategyAuthoredReason = v; break;
-                    case "planner_status":              p.PlannerStatus = v; break;
-                    case "planner_error":               p.PlannerError = v; break;
-                    case "session_error":               p.SessionError = v; break;
-                    case "age_s":        p.AgeS = Num(v); break;
-                    case "last_close":   p.LastClose = Num(v); break;
-                    case "position":     p.Position = (int)NumOr(v, 0); break;
-                    case "avg_price":    p.AvgPrice = Num(v); break;
-                    case "realized":     p.Realized = NumOr(v, 0); break;
-                    case "unrealized":   p.Unrealized = NumOr(v, 0); break;
-                    case "trades":       p.Trades = (int)NumOr(v, 0); break;
-                    case "halted":       p.Halted = v == "1"; break;
-                    case "halt_reason":  p.HaltReason = v; break;
-                    case "goal_hit":     p.GoalHit = v == "1"; break;
-                    case "goal_target":  p.GoalTarget = Num(v); break;
-                    case "goal_loss":    p.GoalLoss = Num(v); break;
-                    case "ld_time":      p.LdTime = v; break;
-                    case "ld_action":    p.LdAction = v; break;
-                    case "ld_conf":      p.LdConf = Num(v); break;
-                    case "ld_close":     p.LdClose = Num(v); break;
-                    case "ld_order":     p.LdOrder = v; break;
-                    case "ld_rationale": p.LdRationale = v; break;
-                    case "row":
-                        var parts = v.Split('|');
-                        if (parts.Length >= 5) p.Rows.Add(parts);
-                        break;
-                    case "plan_status":     p.HasPlan = true; p.PlanStatus = v; break;
-                    case "plan_direction":  p.HasPlan = true; p.PlanDirection = v; break;
-                    case "plan_entry_high": p.HasPlan = true; p.PlanHigh = Num(v); break;
-                    case "plan_entry_low":  p.HasPlan = true; p.PlanLow = Num(v); break;
-                    case "plan_bars_left":  p.HasPlan = true; p.PlanBarsLeft = v; break;
-                    case "plan_note":       p.HasPlan = true; p.PlanNote = v; break;
-                }
-            }
-            return p;
-        }
-
-        private static double Num(string v)
-        {
-            double d;
-            if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d))
-                return d;
-            return double.NaN;
-        }
-
-        private static double NumOr(string v, double fallback)
-        {
-            double d = Num(v);
-            return double.IsNaN(d) ? fallback : d;
         }
 
         private void DrawAgentLevels()
@@ -880,11 +778,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         // =====================================================================
-        //  Card dragging — Preview mouse events on the ChartControl. Hook/unhook
-        //  hop to the UI thread ASYNC (a sync Invoke from a lifecycle path can
-        //  ABBA-deadlock with F5 reload's Clone — dump-verified 2026-06-10).
-        //  Handlers run on the UI thread: guard _terminated, try/catch all
-        //  bodies (#21), touch only plain fields, never Draw.* (#22).
+        //  Button mouse handling — Preview mouse events on the ChartControl. A clean
+        //  click opens the dashboard; a drag past the threshold moves the button;
+        //  double-click snaps it home. Hook/unhook hop to the UI thread ASYNC (a
+        //  sync Invoke from a lifecycle path can ABBA-deadlock with F5 reload's
+        //  Clone — dump-verified 2026-06-10). Handlers run on the UI thread: guard
+        //  _terminated, try/catch all bodies (#21), touch only plain fields, never
+        //  Draw.* (#22).
         // =====================================================================
         private void HookMouse(ChartControl cc)
         {
@@ -902,7 +802,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         cc.PreviewMouseLeftButtonUp += OnChartMouseUp;
                         _mouseChart = cc;
                         _mouseHooked = true;
-                        Print("[HermesDashboard] card drag enabled (mouse hook installed)");
+                        Print("[HermesDashboard] dashboard button enabled (mouse hook installed)");
                     }
                     catch (Exception ex) { _hookQueued = false; MouseError(ex); }   // retry next frame
                 });
@@ -935,39 +835,32 @@ namespace NinjaTrader.NinjaScript.Strategies
             _mouseChart = null;
         }
 
+        private const float DragThresholdPx = 4f;   // movement under this counts as a click, not a drag
+
         private void OnChartMouseDown(object sender, MouseButtonEventArgs e)
         {
             try
             {
-                if (_terminated || !_hasCard) return;
+                _armed = false; _moved = false;
+                if (_terminated || !_hasButton) return;
                 var cc = _mouseChart;
                 if (cc == null) return;
                 float mx = MouseX(cc, e), my = MouseY(cc, e);
-                if (!HitCard(mx, my)) return;
-                if (HitFold(mx, my))
-                {
-                    if (e.ClickCount == 1)   // swallow the 2nd click of a fast double
-                    {
-                        CardFolded = !CardFolded;
-                        _rebuildAsap = true;
-                        cc.InvalidateVisual();
-                    }
-                    _dragging = false;
-                    e.Handled = true;
-                    return;
-                }
+                if (!HitButton(mx, my)) return;
                 if (e.ClickCount == 2)   // double-click: snap back to the default corner
                 {
-                    CardOffsetX = 0f; CardOffsetY = 0f;
-                    _dragging = false;
+                    ButtonOffsetX = 0f; ButtonOffsetY = 0f;
                     e.Handled = true;
                     cc.InvalidateVisual();
                     return;
                 }
-                _dragging = true;
+                // Arm a press: it becomes a drag if the pointer passes the threshold,
+                // otherwise the mouse-up fires it as a click (opens the dashboard).
+                _armed = true;
+                _pressX = mx; _pressY = my;
                 _dragGrabX = mx - _offX;
                 _dragGrabY = my - _offY;
-                e.Handled = true;   // keep the chart from panning/crosshairing inside the card
+                e.Handled = true;   // keep the chart from panning/crosshairing inside the button
             }
             catch (Exception ex) { MouseError(ex); }
         }
@@ -976,16 +869,22 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             try
             {
-                if (_terminated || !_dragging) return;
+                if (_terminated || !_armed) return;
                 if (e.LeftButton != MouseButtonState.Pressed)
                 {
-                    _dragging = false;   // the Up happened off-chart — self-heal
+                    _armed = false;   // the Up happened off-chart — self-heal (no click)
                     return;
                 }
                 var cc = _mouseChart;
                 if (cc == null) return;
-                CardOffsetX = MouseX(cc, e) - _dragGrabX;
-                CardOffsetY = MouseY(cc, e) - _dragGrabY;
+                float mx = MouseX(cc, e), my = MouseY(cc, e);
+                if (!_moved
+                    && Math.Abs(mx - _pressX) < DragThresholdPx
+                    && Math.Abs(my - _pressY) < DragThresholdPx)
+                    return;   // still within the click slop — don't start dragging yet
+                _moved = true;
+                ButtonOffsetX = mx - _dragGrabX;
+                ButtonOffsetY = my - _dragGrabY;
                 e.Handled = true;
                 if ((DateTime.UtcNow - _lastDragRefreshUtc).TotalMilliseconds >= 33)
                 {
@@ -1000,11 +899,19 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             try
             {
-                if (!_dragging) return;
-                _dragging = false;
+                if (!_armed) return;
+                _armed = false;
+                if (_terminated) return;   // tearing down — don't open mid-disable
                 e.Handled = true;
                 var cc = _mouseChart;
-                if (cc != null) cc.InvalidateVisual();   // final paint past the 33 ms gate
+                if (_moved)
+                {
+                    if (cc != null) cc.InvalidateVisual();   // final paint past the 33 ms gate
+                }
+                else
+                {
+                    OpenDashboard();   // a clean click (no drag) — open the HTML dashboard
+                }
             }
             catch (Exception ex) { MouseError(ex); }
         }
@@ -1021,33 +928,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             return (float)e.GetPosition(cc).Y.ConvertToVerticalPixels(cc.PresentationSource);
         }
 
-        private bool HitCard(float x, float y)
+        private bool HitButton(float x, float y)
         {
-            return _hasCard
-                && x >= _cardX + _offX && x <= _cardX + _offX + _cardW
-                && y >= _cardY + _offY && y <= _cardY + _offY + _cardH;
+            return _hasButton
+                && x >= _btnX + _offX && x <= _btnX + _offX + _btnW
+                && y >= _btnY + _offY && y <= _btnY + _offY + _btnH;
         }
 
-        private bool HitFold(float x, float y)
+        // Clamp the dragged offset so the button can't leave the panel (render thread).
+        private void ApplyButtonOffset()
         {
-            return _foldX2 > _foldX1
-                && x >= _foldX1 + _offX && x <= _foldX2 + _offX
-                && y >= _foldY1 + _offY && y <= _foldY2 + _offY;
-        }
-
-        // Clamp the dragged offset so the card can't leave the panel (render thread).
-        private void ApplyCardOffset()
-        {
-            if (!_hasCard || ChartPanel == null)
+            if (!_hasButton || ChartPanel == null)
             {
-                _offX = CardOffsetX; _offY = CardOffsetY;
+                _offX = ButtonOffsetX; _offY = ButtonOffsetY;
                 return;
             }
-            float x = _cardX + CardOffsetX, y = _cardY + CardOffsetY;
-            x = Math.Max(ChartPanel.X, Math.Min(x, ChartPanel.X + ChartPanel.W - _cardW));
-            y = Math.Max(ChartPanel.Y, Math.Min(y, ChartPanel.Y + ChartPanel.H - _cardH));
-            _offX = x - _cardX;
-            _offY = y - _cardY;
+            float x = _btnX + ButtonOffsetX, y = _btnY + ButtonOffsetY;
+            x = Math.Max(ChartPanel.X, Math.Min(x, ChartPanel.X + ChartPanel.W - _btnW));
+            y = Math.Max(ChartPanel.Y, Math.Min(y, ChartPanel.Y + ChartPanel.H - _btnH));
+            _offX = x - _btnX;
+            _offY = y - _btnY;
         }
 
         private void MouseError(Exception ex)
@@ -1060,7 +960,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         // =====================================================================
-        //  Card rendering (SharpDX only — no Draw.* in OnRender, AGENTS.md #13)
+        //  Button rendering (SharpDX only — no Draw.* in OnRender, AGENTS.md #13)
         // =====================================================================
         protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
         {
@@ -1078,18 +978,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (!_dxInitialized)
                     return;   // init failed (transient RT state) — skip the frame, retry next pass
 
-                // Rebuild the display list at most ~1×/s (age counter tick) or when a new
-                // snapshot/error arrives. OnRender itself can fire per tick; building
-                // DirectWrite layouts that often is the GC/dispatcher pressure #17 warns about.
-                Snapshot p = _snap;
+                // Rebuild the button only when its reachability state changes (or once,
+                // or on an explicit request). The button is tiny, but rebuilding
+                // DirectWrite layouts every tick is the GC/dispatcher pressure #17 warns about.
                 string err = _error;
-                if (p != _builtFrom || err != _builtError || _rebuildAsap
-                    || (DateTime.UtcNow - _lastBuildUtc).TotalMilliseconds >= 1000)
-                {
-                    BuildOps(p, err);
-                }
+                bool ok = err == null && _everPolled;
+                if (!_hasButton || ok != _builtOk || err != _builtError || _rebuildAsap)
+                    BuildButton(ok);
 
-                ApplyCardOffset();   // clamp the dragged offset to the panel each frame
+                ApplyButtonOffset();   // clamp the dragged offset to the panel each frame
 
                 var oldAa = RenderTarget.AntialiasMode;
                 var oldTxt = RenderTarget.TextAntialiasMode;
@@ -1197,19 +1094,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void ReplayOps()
         {
-            if (_hasCard)
-            {
-                var bg = BrushFor(ColCardBg);
-                var edge = BrushFor(ColCardEdge);
-                var rr = new D2D.RoundedRectangle
-                {
-                    Rect = new DXRect(_cardX, _cardY, _cardW, _cardH),
-                    RadiusX = 10f * _s,
-                    RadiusY = 10f * _s,
-                };
-                if (bg != null) RenderTarget.FillRoundedRectangle(rr, bg);
-                if (edge != null) RenderTarget.DrawRoundedRectangle(rr, edge, 1f);
-            }
+            // The button background is the first op BuildButton emits, so a plain
+            // in-order replay draws it behind the dot + text. No special-casing here.
             foreach (var op in _ops)
             {
                 var b = BrushFor(op.Color);
@@ -1254,322 +1140,62 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        // ---- display-list construction ------------------------------------------
-        private void BuildOps(Snapshot p, string err)
+        // ---- on-chart button + dashboard window --------------------------------
+        private void BuildButton(bool bridgeOk)
         {
-            _builtFrom = p;
-            _builtError = err;
+            _builtOk = bridgeOk;
+            _builtError = _error;
             _lastBuildUtc = DateTime.UtcNow;
             _rebuildAsap = false;
-            _foldX1 = _foldY1 = _foldX2 = _foldY2 = 0f;   // no fold toggle until placed
             DisposeOps();
             EnsureFormats();
 
             float s = Math.Max(0.5f, FontSize / 12f);
-            _s = s;
+            var fac = NinjaTrader.Core.Globals.DirectWriteFactory;
+
+            // Measure the two text lines so the pill hugs its content.
+            var tlLabel = new DW.TextLayout(fac, "HERMES", _fHead, 4000f, 200f);
+            var tlSub   = new DW.TextLayout(fac, "DASHBOARD ↗", _fSub, 4000f, 200f);
+            float labW = tlLabel.Metrics.Width, labH = tlLabel.Metrics.Height;
+            float subW = tlSub.Metrics.Width,  subH = tlSub.Metrics.Height;
+
+            float padX = 12f * s, padY = 8f * s, gap = 7f * s, dotR = 4f * s;
+            float textW = Math.Max(labW, subW);
+            float w = padX * 2f + dotR * 2f + gap + textW;
+            float h = padY * 2f + labH + 3f * s + subH;
+
             float x0 = ChartPanel.X + 12f, y0 = ChartPanel.Y + 12f;
-            float w = 420f * s, pad = 14f * s;
-            float xL = x0 + pad, xR = x0 + w - pad, innerW = xR - xL;
-            float y = y0 + pad;
 
-            if (p == null)   // never reached the bridge yet
-            {
-                AddText("HERMES", _fHead, xL, y, ColText);
-                AddPill(err == null ? "CONNECTING" : "OFFLINE",
-                        err == null ? ColAmberBg : ColRedBg,
-                        err == null ? ColAmber : ColRed, xR, y + 9f * s);
-                y += 26f * s;
-                AddText("bridge " + BridgeHost + ":" + BridgePort, _fSub, xL, y, ColDim);
-                y += 18f * s;
-                SetCard(x0, y0, w, y + pad - 4f * s - y0);
-                return;
-            }
+            // Background first (drawn behind the dot + text on in-order replay). The
+            // border tints with reachability: edge = ok, amber = connecting, red = offline.
+            uint border = _error != null ? ColRed : (bridgeOk ? ColCardEdge : ColAmber);
+            AddRect(x0, y0, x0 + w, y0 + h, 9f * s, ColCardBg, border);
 
-            // ---- status pill ----------------------------------------------------
-            double age = double.IsNaN(p.AgeS)
-                ? double.NaN
-                : p.AgeS + (DateTime.UtcNow - p.PolledUtc).TotalSeconds;
-            int staleAfter = TimeframeSeconds(p.Timeframe) * 2 + 30;
-            string pill; uint pillBg, pillFg;
-            if (err != null) { pill = "OFFLINE"; pillBg = ColRedBg; pillFg = ColRed; }
-            else if (!p.Ok) { pill = "NO DATA"; pillBg = ColAmberBg; pillFg = ColAmber; }
-            else if (double.IsNaN(age)) { pill = "WAITING"; pillBg = ColAmberBg; pillFg = ColAmber; }
-            else if (age > staleAfter) { pill = "STALE " + FmtAge(age); pillBg = ColAmberBg; pillFg = ColAmber; }
-            else { pill = "LIVE " + FmtAge(age); pillBg = ColGreenBg; pillFg = ColGreen; }
+            // Reachability dot, centered on the label line.
+            float dotCx = x0 + padX + dotR;
+            float dotCy = y0 + padY + labH / 2f;
+            uint dotColor = _error != null ? ColRed : (bridgeOk ? ColGreen : ColAmber);
+            AddEllipse(dotCx, dotCy, dotR, dotColor);
 
-            // ---- header ----------------------------------------------------------
-            AddEllipse(xL + 4f * s, y + 9f * s, 4f * s, pillFg);
-            var hHead = AddText("HERMES", _fHead, xL + 14f * s, y, ColText);
-            AddText(Join(" · ", p.Instrument, p.Timeframe), _fSub,
-                xL + 14f * s + hHead.Metrics.WidthIncludingTrailingWhitespace + 8f * s,
-                y + 3.5f * s, ColMuted);
-            AddPill(pill, pillBg, pillFg, xR - 18f * s, y + 9f * s);
-            // fold toggle (▾ open / ▸ folded) — generous hit box, tested on mouse-down
-            AddTextRight(CardFolded ? "▸" : "▾", _fBody, xR + 2f * s, y + 3f * s, ColMuted);
-            _foldX1 = xR - 14f * s; _foldY1 = y - 2f * s;
-            _foldX2 = x0 + w;       _foldY2 = y + 20f * s;
-            y += 24f * s;
+            // Text lines.
+            float textX = dotCx + dotR + gap;
+            PlaceLayout(tlLabel, textX, y0 + padY, ColText);
+            PlaceLayout(tlSub,   textX, y0 + padY + labH + 3f * s, ColMuted);
 
-            if (CardFolded)   // compact card: header + position/P&L strip
-            {
-                double tot = p.Realized + p.Unrealized;
-                AddText(PosText(p), _fBodyB, xL, y, PosColor(p));
-                AddTextRight(FmtMoney(tot) + " today", _fSub, xR, y + 1.5f * s, MoneyColor(tot));
-                y += 20f * s;
-                SetCard(x0, y0, w, y + pad - 5f * s - y0);
-                return;
-            }
-
-            AddText(Join(" · ", p.Agent, p.Model, p.StrategyId), _fSub, xL, y, ColDim);
-            y += 20f * s;
-
-            // ---- agent-authored strategies (every setup; the live-regime one highlighted) ---
-            AddText("STRATEGY", _fLabel, xL, y, ColDim);
-            y += 17f * s;
-            if (p.StrategyRows.Count > 0)
-            {
-                foreach (var sr in p.StrategyRows)   // name|regime|summary|active
-                {
-                    string nm = sr[0], regime = sr[1], summary = sr[2];
-                    bool active = sr.Length > 3 && sr[3] == "1";
-                    string head = (active ? "▸ " : "· ") + nm
-                        + (regime.Length > 0 ? "  (" + regime + ")" : "");
-                    AddText(head, _fBodyB, xL, y, active ? ColGreen : ColText);
-                    if (active)   // "TRADING" when the brain named this setup; else regime match
-                        AddTextRight(p.StrategyActiveSource == "declared" ? "TRADING" : "ACTIVE",
-                            _fLabel, xR, y + 1f * s, ColGreen);
-                    y += 16f * s;
-                    if (summary.Length > 0)
-                    {
-                        AddText(summary, _fRat, xL + 12f * s, y, ColMuted, innerW - 12f * s);
-                        y += 15f * s;   // one ellipsized line per setup
-                    }
-                }
-            }
-            else
-            {
-                string fb = p.StrategySource == "agent" ? "authoring…"
-                          : p.StrategySource == "custom" ? "custom playbooks" : "—";
-                AddText(fb, _fBody, xL, y, ColMuted);
-                y += 16f * s;
-            }
-            // Authoring telemetry + study health: watch the count tick to confirm the playbook
-            // is refreshing; an analyzing_session status or a red session error shows a
-            // re-author in flight / failed (previously the card had no signal for either).
-            if (p.StrategyAuthoredCount >= 0)
-            {
-                string ago = p.StrategyAuthoredBarsAgo >= 0
-                    ? p.StrategyAuthoredBarsAgo + "b ago" : "just now";
-                AddText("authored " + p.StrategyAuthoredCount + "x · " + ago, _fSub, xL, y, ColDim);
-                if (p.PlannerStatus.Length > 0)
-                    AddTextRight(p.PlannerStatus, _fSub, xR, y,
-                        p.PlannerStatus == "analyzing_session" ? ColAmber : ColDim);
-                y += 14f * s;
-                string why = p.SessionError.Length > 0 ? p.SessionError
-                           : p.StrategyAuthoredReason;
-                if (why.Length > 0)
-                {
-                    AddText(why, _fRat, xL + 12f * s, y,
-                        p.SessionError.Length > 0 ? ColRed : ColMuted, innerW - 12f * s);
-                    y += 14f * s;
-                }
-            }
-            Divider(xL, xR, ref y);
-
-            // ---- position + last price ------------------------------------------
-            AddText(PosText(p), _fBig, xL, y, PosColor(p));
-            AddTextRight("last " + FmtPrice(p.LastClose), _fSub, xR, y + 5f * s, ColMuted);
-            y += 26f * s;
-
-            // ---- stat boxes ------------------------------------------------------
-            double total = p.Realized + p.Unrealized;
-            string[] labels = { "REALIZED", "UNREALIZED", "TOTAL", "TRADES" };
-            string[] vals = { FmtMoney(p.Realized), FmtMoney(p.Unrealized), FmtMoney(total),
-                              p.Trades.ToString(CultureInfo.InvariantCulture) };
-            uint[] vcols = { MoneyColor(p.Realized), MoneyColor(p.Unrealized), MoneyColor(total), ColText };
-            float gap = 8f * s, bw = (innerW - gap * 3f) / 4f, bh = 38f * s;
-            for (int i = 0; i < 4; i++)
-            {
-                float bx = xL + i * (bw + gap);
-                AddRect(bx, y, bx + bw, y + bh, 6f * s, ColBoxBg, ColBoxEdge);
-                AddText(labels[i], _fLabel, bx + 7f * s, y + 5f * s, ColDim);
-                AddText(vals[i], _fBodyB, bx + 7f * s, y + 17f * s, vcols[i]);
-            }
-            y += bh + 12f * s;
-
-            // ---- daily goal ------------------------------------------------------
-            AddText("DAILY GOAL", _fLabel, xL, y, ColDim);
-            string goalRight; uint goalRightCol;
-            if (p.Halted)
-            {
-                goalRight = "HALTED" + (p.HaltReason.Length > 0 ? ": " + p.HaltReason : "");
-                goalRightCol = ColAmber;
-            }
-            else if (p.GoalHit) { goalRight = "GOAL HIT"; goalRightCol = ColGreen; }
-            else
-            {
-                goalRight = "stop -" + FmtPrice(p.GoalLoss) + "  target +" + FmtPrice(p.GoalTarget);
-                goalRightCol = ColMuted;
-            }
-            AddTextRight(goalRight, _fSub, xR, y - 1.5f * s, goalRightCol);
-            y += 15f * s;
-            AddRect(xL, y, xR, y + 4f * s, 2f * s, ColTrack, 0);
-            double span = p.GoalLoss + p.GoalTarget;
-            double frac = (double.IsNaN(span) || span <= 0) ? 0.5
-                : Math.Min(1.0, Math.Max(0.0, (total + p.GoalLoss) / span));
-            float mx = xL + (float)(innerW * frac);
-            AddRect(mx - 1.5f * s, y - 3f * s, mx + 1.5f * s, y + 7f * s, 1.5f * s,
-                total < 0 ? ColRed : ColGreen, 0);
-            y += 14f * s;
-            Divider(xL, xR, ref y);
-
-            // ---- armed plan (forward-compat with the analysis/execution split) ---
-            AddText("ARMED PLAN", _fLabel, xL, y, ColDim);
-            if (p.PlanStatus.Length > 0)
-            {
-                string st = p.PlanStatus.ToUpperInvariant();
-                uint bg = st == "ARMED" ? ColGreenBg : st == "ANALYZING" ? ColBlueBg : ColBoxBg;
-                uint fg = st == "ARMED" ? ColGreen : st == "ANALYZING" ? ColBlue : ColMuted;
-                AddPill(st, bg, fg, xR, y + 5f * s);
-            }
-            y += 17f * s;
-            string dir = p.PlanDirection.Length > 0 ? p.PlanDirection.ToUpperInvariant() : "NEUTRAL";
-            uint dirCol = dir.Contains("LONG") ? ColGreen : dir.Contains("SHORT") ? ColRed : ColText;
-            var hDir = AddText("◆ " + dir, _fBodyB, xL, y, dirCol);
-            string note = p.PlanNote.Length > 0 ? p.PlanNote
-                : p.HasPlan ? "seeking entry" : "per-bar mode";
-            AddText(note, _fSub,
-                xL + hDir.Metrics.WidthIncludingTrailingWhitespace + 8f * s, y + 1f * s, ColMuted);
-            y += 18f * s;
-            if (!double.IsNaN(p.PlanLow) && !double.IsNaN(p.PlanHigh))
-            {
-                string rng = FmtPrice(p.PlanLow) + " – " + FmtPrice(p.PlanHigh)
-                    + (p.PlanBarsLeft.Length > 0 ? "  ·  " + p.PlanBarsLeft + " bars left" : "");
-                AddText(rng, _fBody, xL, y, ColText);
-            }
-            else
-                AddText("none armed", _fBody, xL, y, ColMuted);
-            y += 20f * s;
-            Divider(xL, xR, ref y);
-
-            // ---- last decision ---------------------------------------------------
-            AddText("LAST DECISION", _fLabel, xL, y, ColDim);
-            AddTextRight(p.LdTime, _fSub, xR, y - 1.5f * s, ColMuted);
-            y += 17f * s;
-            string act = p.LdAction.Length > 0 ? DisplayAction(p.LdAction) : "—";
-            var hAct = AddText(act, _fBig, xL, y, ActionColor(p.LdAction));
-            float ax = xL + hAct.Metrics.WidthIncludingTrailingWhitespace + 10f * s;
-            var hConf = AddText("conf " + FmtConf(p.LdConf), _fSub, ax, y + 5f * s, ColMuted);
-            AddText("@ " + FmtPrice(p.LdClose), _fBodyB,
-                ax + hConf.Metrics.WidthIncludingTrailingWhitespace + 10f * s, y + 4f * s, ColText);
-            if (p.LdOrder.Length > 0)   // an order actually left the bridge for this decision
-                AddTextRight("→ " + DisplayAction(p.LdOrder), _fBodyB, xR, y + 4f * s,
-                    ActionColor(p.LdOrder));
-            y += 23f * s;
-            if (p.LdRationale.Length > 0)
-            {
-                AddText(p.LdRationale, _fRat, xL, y, ColMuted, innerW);
-                y += 17f * s;
-            }
-            Divider(xL, xR, ref y);
-
-            // ---- recent decisions table -----------------------------------------
-            // Columns are anchored to innerW (fractions, not fixed px) so the ORDER
-            // column — drawn left-aligned and unbounded — always lands inside the card
-            // and can't run off the right edge if the card width changes again.
-            float cTime = xL, cAct = xL + innerW * 0.17f, cConf = xL + innerW * 0.44f,
-                  cClose = xL + innerW * 0.57f, cOrd = xL + innerW * 0.79f;
-            AddText("TIME", _fLabel, cTime, y, ColDim);
-            AddText("ACTION", _fLabel, cAct, y, ColDim);
-            AddText("CONF", _fLabel, cConf, y, ColDim);
-            AddText("CLOSE", _fLabel, cClose, y, ColDim);
-            AddText("ORDER", _fLabel, cOrd, y, ColDim);
-            y += 15f * s;
-            int n = Math.Min(p.Rows.Count, Math.Max(1, Math.Min(8, RecentRows)));
-            if (p.Rows.Count == 0)
-            {
-                AddText("no decisions yet", _fSub, xL, y, ColDim);
-                y += 15f * s;
-            }
-            for (int i = 0; i < n; i++)
-            {
-                var r = p.Rows[i];
-                string ord = r[4].Length > 0 ? DisplayAction(r[4]) : "—";
-                AddText(r[0], _fSub, cTime, y, ColMuted);
-                AddText(DisplayAction(r[1]), _fSub, cAct, y, ActionColor(r[1]));
-                AddText(r[2], _fSub, cConf, y, ColMuted);
-                AddText(r[3], _fSub, cClose, y, ColText);
-                AddText(ord, _fSub, cOrd, y, r[4].Length > 0 ? ActionColor(r[4]) : ColDim);
-                y += 15f * s;
-            }
-            y += 3f * s;
-            Divider(xL, xR, ref y);
-
-            // ---- footer ----------------------------------------------------------
-            AddText("bridge " + BridgeHost + ":" + BridgePort, _fSub, xL, y, ColDim);
-            AddTextRight(err != null ? "retrying…" : "updated " + p.PolledLocal.ToString("HH:mm:ss"),
-                _fSub, xR, y, ColDim);
-            y += 15f * s;
-
-            SetCard(x0, y0, w, y + pad - 5f * s - y0);
+            SetButton(x0, y0, w, h);
         }
 
-        private void SetCard(float x, float y, float w, float h)
+        private void SetButton(float x, float y, float w, float h)
         {
-            _cardX = x; _cardY = y; _cardW = w; _cardH = h;
-            _hasCard = true;
+            _btnX = x; _btnY = y; _btnW = w; _btnH = h;
+            _hasButton = true;
         }
 
-        // ---- small build helpers (render thread only) ----------------------------
-        private DW.TextLayout AddText(string text, DW.TextFormat fmt, float x, float y,
-            uint color, float maxW = 4000f)
+        // Add a Text op for an already-created (and measured) layout. The op owns the
+        // layout from here — DisposeOps disposes it on the next rebuild.
+        private void PlaceLayout(DW.TextLayout tl, float x, float y, uint color)
         {
-            var tl = new DW.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
-                text ?? "", fmt, maxW, 200f);
-            _ops.Add(new DrawOp
-            {
-                Kind = OpKind.Text,
-                Layout = tl,
-                X1 = x, Y1 = y,
-                Color = color,
-            });
-            return tl;
-        }
-
-        private void AddTextRight(string text, DW.TextFormat fmt, float right, float y, uint color)
-        {
-            var tl = new DW.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
-                text ?? "", fmt, 4000f, 200f);
-            _ops.Add(new DrawOp
-            {
-                Kind = OpKind.Text,
-                Layout = tl,
-                X1 = right - tl.Metrics.Width, Y1 = y,
-                Color = color,
-            });
-        }
-
-        private void AddPill(string text, uint bg, uint fg, float rightEdge, float cy)
-        {
-            var tl = new DW.TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory,
-                text ?? "", _fLabel, 4000f, 200f);
-            float tw = tl.Metrics.Width, th = tl.Metrics.Height;
-            float padX = 8f * _s, padY = 3f * _s;
-            float left = rightEdge - tw - padX * 2f;
-            _ops.Add(new DrawOp
-            {
-                Kind = OpKind.FillRect,
-                X1 = left, Y1 = cy - th / 2f - padY, X2 = rightEdge, Y2 = cy + th / 2f + padY,
-                Radius = th / 2f + padY,
-                Color = bg,
-            });
-            _ops.Add(new DrawOp
-            {
-                Kind = OpKind.Text,
-                Layout = tl,
-                X1 = left + padX, Y1 = cy - th / 2f,
-                Color = fg,
-            });
+            _ops.Add(new DrawOp { Kind = OpKind.Text, Layout = tl, X1 = x, Y1 = y, Color = color });
         }
 
         private void AddRect(float l, float t, float r, float b, float radius, uint fill, uint stroke)
@@ -1602,115 +1228,170 @@ namespace NinjaTrader.NinjaScript.Strategies
             });
         }
 
-        private void Divider(float xL, float xR, ref float y)
+        // =====================================================================
+        //  Open the HTML dashboard. Prefer an embedded WebView2 inside a NinjaTrader
+        //  window; if the WebView2 DLLs aren't referenced or the runtime is missing,
+        //  fall back to the system default browser. Reflection keeps the strategy
+        //  compiling WITHOUT the WebView2 assemblies present.
+        // =====================================================================
+        private void OpenDashboard()
         {
-            _ops.Add(new DrawOp
+            string url = string.Format("http://{0}:{1}/", BridgeHost, BridgePort);
+            var cc = _mouseChart;
+            Action open = delegate
             {
-                Kind = OpKind.Line,
-                X1 = xL, Y1 = y, X2 = xR, Y2 = y,
-                Thick = 1f,
-                Color = ColDivider,
-            });
-            y += 11f * _s;
+                try { if (TryShowWebViewWindow(url)) return; }
+                catch (Exception ex) { Print("[HermesDashboard] WebView2 open failed: " + ex.Message); }
+                OpenInBrowser(url);
+            };
+            try
+            {
+                if (cc != null && !cc.Dispatcher.CheckAccess())
+                    cc.Dispatcher.InvokeAsync(open);
+                else
+                    open();
+            }
+            catch (Exception ex) { Print("[HermesDashboard] open dispatch failed: " + ex.Message); }
         }
 
-        // ---- formatting helpers ---------------------------------------------------
-        private static string Join(string sep, params string[] parts)
+        // Returns true if an embedded WebView2 window was shown; false means "not
+        // available — caller should fall back to the browser." Must run on the UI thread.
+        private bool TryShowWebViewWindow(string url)
         {
-            var keep = new List<string>();
-            foreach (var part in parts)
-                if (!string.IsNullOrEmpty(part)) keep.Add(part);
-            return string.Join(sep, keep);
+            // Core assembly present? (Added via NinjaScript Editor -> References...)
+            Type envType = Type.GetType(
+                "Microsoft.Web.WebView2.Core.CoreWebView2Environment, Microsoft.Web.WebView2.Core");
+            if (envType == null) return false;
+
+            // Runtime installed? GetAvailableBrowserVersionString(null) throws if not.
+            MethodInfo getVer = envType.GetMethod("GetAvailableBrowserVersionString",
+                new Type[] { typeof(string) });
+            if (getVer == null) return false;
+            string ver;
+            try { ver = (string)getVer.Invoke(null, new object[] { null }); }
+            catch { return false; }   // WebView2RuntimeNotFoundException -> browser fallback
+            if (string.IsNullOrEmpty(ver)) return false;
+
+            Type wvType = Type.GetType(
+                "Microsoft.Web.WebView2.Wpf.WebView2, Microsoft.Web.WebView2.Wpf");
+            if (wvType == null) return false;
+
+            // Implicit init writes a user-data folder; point it somewhere writable
+            // (NinjaTrader's install dir often isn't) before the control initializes.
+            try
+            {
+                string udf = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "HermesDashboard", "WebView2");
+                System.IO.Directory.CreateDirectory(udf);
+                Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", udf);
+            }
+            catch { }
+
+            // Reuse the window if it's already open.
+            if (_dashWin != null)
+            {
+                try { _dashWin.Activate(); return true; }
+                catch { _dashWin = null; }
+            }
+
+            object wv = Activator.CreateInstance(wvType);
+            PropertyInfo srcProp = wvType.GetProperty("Source");
+            if (srcProp == null) return false;
+            srcProp.SetValue(wv, new Uri(url), null);   // setting Source triggers implicit init
+
+            var win = CreateDashboardWindow();
+            win.Title = "Hermes Dashboard";
+            // NTWindow labels its chrome via a "Caption" property (not Window.Title) — set it
+            // when present so the NT-themed title bar reads correctly. Reflection: NTWindow is
+            // not referenced at compile time (its namespace differs across NT builds).
+            try
+            {
+                PropertyInfo capProp = win.GetType().GetProperty("Caption");
+                if (capProp != null && capProp.CanWrite)
+                    capProp.SetValue(win, "Hermes Dashboard", null);
+            }
+            catch { }
+            win.Width = 1180;
+            win.Height = 820;
+            win.Content = (System.Windows.UIElement)wv;
+            win.Closed += delegate { _dashWin = null; };
+            win.Show();
+            _dashWin = win;
+            return true;
         }
 
-        private static string FmtPrice(double v)
+        // Host window for the embedded WebView2: a NinjaTrader NTWindow (native chrome +
+        // theming) when its type can be resolved at runtime, otherwise a plain WPF window.
+        // NTWindow is found by reflection so the strategy never hard-depends on its
+        // namespace/assembly (which the NinjaScript Strategy compile doesn't expose by name).
+        private System.Windows.Window CreateDashboardWindow()
         {
-            return double.IsNaN(v) ? "—" : v.ToString("0.##", CultureInfo.InvariantCulture);
+            if (!_ntWindowSearched)
+            {
+                _ntWindowSearched = true;
+                _ntWindowType = ResolveNtWindowType();
+            }
+            if (_ntWindowType != null)
+            {
+                try { return (System.Windows.Window)Activator.CreateInstance(_ntWindowType); }
+                catch { }   // ctor not accessible / threw — drop to a plain WPF window
+            }
+            return new System.Windows.Window();
         }
 
-        private static string FmtMoney(double v)
+        // Find a Window-derived type named "NTWindow" in the loaded NinjaTrader assemblies.
+        private static Type ResolveNtWindowType()
         {
-            return double.IsNaN(v) ? "—" : v.ToString("+0.00;-0.00;+0.00", CultureInfo.InvariantCulture);
+            var asms = AppDomain.CurrentDomain.GetAssemblies();
+            // Fast path: the two namespaces NTWindow has shipped under.
+            foreach (var asm in asms)
+            {
+                try
+                {
+                    Type t = asm.GetType("NinjaTrader.Gui.NTWindow")
+                          ?? asm.GetType("NinjaTrader.Gui.Tools.NTWindow");
+                    if (t != null && typeof(System.Windows.Window).IsAssignableFrom(t))
+                        return t;
+                }
+                catch { }
+            }
+            // Fallback: scan NinjaTrader assemblies for any Window-derived "NTWindow".
+            foreach (var asm in asms)
+            {
+                if (asm.FullName == null
+                    || asm.FullName.IndexOf("NinjaTrader", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types; }
+                catch { continue; }
+                foreach (var t in types)
+                    if (t != null && t.Name == "NTWindow"
+                        && typeof(System.Windows.Window).IsAssignableFrom(t))
+                        return t;
+            }
+            return null;
         }
 
-        private static string FmtConf(double v)
+        private void OpenInBrowser(string url)
         {
-            return double.IsNaN(v) ? "—" : v.ToString("0.00", CultureInfo.InvariantCulture);
-        }
-
-        private static string FmtAge(double seconds)
-        {
-            if (seconds < 0) seconds = 0;
-            if (seconds < 100) return ((int)seconds) + "s";
-            return ((int)(seconds / 60)) + "m";
-        }
-
-        private static int TimeframeSeconds(string tf)
-        {
-            if (string.IsNullOrEmpty(tf)) return 120;
-            int i = 0;
-            while (i < tf.Length && char.IsDigit(tf[i])) i++;
-            int n;
-            if (i == 0 || !int.TryParse(tf.Substring(0, i), out n)) return 120;
-            char unit = i < tf.Length ? char.ToLowerInvariant(tf[i]) : 'm';
-            if (unit == 's') return n;
-            if (unit == 'h') return n * 3600;
-            return n * 60;
-        }
-
-        private static string DisplayAction(string a)
-        {
-            return (a ?? "").Replace("ENTER_", "");
-        }
-
-        private uint ActionColor(string a)
-        {
-            string u = (a ?? "").ToUpperInvariant();
-            if (u.Contains("LONG") || u.Contains("BUY")) return ColGreen;
-            if (u.Contains("SHORT") || u.Contains("SELL")) return ColRed;
-            if (u.Contains("FLAT")) return ColAmber;
-            if (u.Contains("WAIT")) return ColMuted;
-            if (u.Contains("HOLD")) return ColBlue;
-            return ColText;
-        }
-
-        private static string PosText(Snapshot p)
-        {
-            if (p.Position > 0) return "LONG " + p.Position + " @ " + FmtPrice(p.AvgPrice);
-            if (p.Position < 0) return "SHORT " + (-p.Position) + " @ " + FmtPrice(p.AvgPrice);
-            return "FLAT";
-        }
-
-        private static uint PosColor(Snapshot p)
-        {
-            return p.Position > 0 ? ColGreen : p.Position < 0 ? ColRed : ColText;
-        }
-
-        private uint MoneyColor(double v)
-        {
-            if (double.IsNaN(v)) return ColText;
-            if (v > 0.005) return ColGreen;
-            if (v < -0.005) return ColRed;
-            return ColText;
+            try
+            {
+                System.Diagnostics.Process.Start(
+                    new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch (Exception ex) { Print("[HermesDashboard] could not open browser: " + ex.Message); }
         }
 
         // ---- resource lifecycle -----------------------------------------------------
         private void EnsureFormats()
         {
-            if (_fLabel != null) return;
+            if (_fHead != null) return;
             float s = Math.Max(0.5f, FontSize / 12f);
             var fac = NinjaTrader.Core.Globals.DirectWriteFactory;
-            _fLabel = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.SemiBold, DW.FontStyle.Normal, 9f * s);
-            _fSub   = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal,   DW.FontStyle.Normal, 11f * s);
-            _fBody  = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal,   DW.FontStyle.Normal, 12f * s);
-            _fBodyB = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,     DW.FontStyle.Normal, 12f * s);
-            _fHead  = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,     DW.FontStyle.Normal, 15f * s);
-            _fBig   = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,     DW.FontStyle.Normal, 16f * s);
-            _fRat   = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal,   DW.FontStyle.Normal, 10.5f * s);
-            _fRat.WordWrapping = DW.WordWrapping.NoWrap;
-            _ratEllipsis = new DW.EllipsisTrimming(fac, _fRat);
-            _fRat.SetTrimming(new DW.Trimming { Granularity = DW.TrimmingGranularity.Character },
-                _ratEllipsis);
+            _fHead = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Bold,   DW.FontStyle.Normal, 15f * s);
+            _fSub  = new DW.TextFormat(fac, "Segoe UI", DW.FontWeight.Normal, DW.FontStyle.Normal, 11f * s);
         }
 
         private void DisposeOps()
@@ -1718,7 +1399,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             foreach (var op in _ops)
                 if (op.Layout != null && !op.Layout.IsDisposed) op.Layout.Dispose();
             _ops.Clear();
-            _hasCard = false;
+            _hasButton = false;
         }
 
         private void DisposeBrushes()
@@ -1732,12 +1413,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void DisposeFormats()
         {
-            if (_ratEllipsis != null && !_ratEllipsis.IsDisposed) _ratEllipsis.Dispose();
-            _ratEllipsis = null;
-            var formats = new[] { _fLabel, _fSub, _fBody, _fBodyB, _fHead, _fBig, _fRat };
+            var formats = new[] { _fHead, _fSub };
             foreach (var f in formats)
                 if (f != null && !f.IsDisposed) f.Dispose();
-            _fLabel = _fSub = _fBody = _fBodyB = _fHead = _fBig = _fRat = null;
+            _fHead = _fSub = null;
         }
 
         // Lookup ONLY — the palette is created eagerly in InitDeviceResources (§5b).

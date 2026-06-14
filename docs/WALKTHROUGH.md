@@ -43,8 +43,8 @@ approved.
 flowchart LR
     subgraph WIN["🪟 Windows / Parallels"]
         NT["NinjaTrader 8<br/>(live chart)"]
-        STRAT["HermesBridgeStrategy<br/>mails bars · places orders"]
-        PANEL["HermesDashboard<br/>on-chart panel"]
+        STRAT["HermesBridgeStrategy<br/>mails bars · places orders · S/R lines"]
+        PANEL["HERMES button<br/>(opens dashboard window)"]
         NT --- STRAT
         NT --- PANEL
     end
@@ -71,7 +71,8 @@ flowchart LR
     BRAIN -. "client: claude" .-> CLAUDE
     BRAIN -. "client: mock" .-> MOCK
     ENG --> RISK --> SESS
-    PANEL -- "GET /dashboard.txt" --> SRV
+    PANEL -- "GET /health · /levels.txt" --> SRV
+    PANEL -. "click → opens" .-> WEB
     WEB -- "GET /dashboard" --> SRV
 ```
 
@@ -312,17 +313,19 @@ you need. The sections:
   here is only a fallback label — the strategy reports its actually-selected account to the
   bridge on connect, and that's what the dashboard / `/health` display.
 
-### F. Watching it — *the dashboards*
+### F. Watching it — *the dashboard*
 
-Two views, same data, so you're never guessing what the robot is thinking:
+The full picture lives in one HTML dashboard, reachable two ways so you're never guessing
+what the robot is thinking:
 
 - **Web dashboard** — open `http://localhost:8787/` (or the Mac's LAN IP from Windows). A
   live page showing position, P&L, trade count vs. goal, data freshness, the latest decision
   with its reason, and a scrolling history of recent decisions. Auto-refreshes every 3s.
-- **On-chart panel** — the `HermesDashboard` indicator polls a pre-formatted text panel
-  (`/dashboard.txt`) and draws it on the NinjaTrader chart, colored by position (green long,
-  red short, gold when halted). No JSON parsing on the NinjaTrader side — the bridge formats
-  it.
+- **From the chart** — `HermesBridgeStrategy` draws the agent's S/R lines plus a small,
+  draggable **"HERMES — DASHBOARD"** button (with a green/amber/red bridge-status dot).
+  Clicking it opens that same web dashboard **inside a NinjaTrader window** via an embedded
+  WebView2 (or your default browser if WebView2 isn't installed). The button polls only
+  `/health` and `/levels.txt`; the rich panel is the HTML page itself.
 
 ### G. Starting it all — *`start.sh`, scripts, Makefile*
 
