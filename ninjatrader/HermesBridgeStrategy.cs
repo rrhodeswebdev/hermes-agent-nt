@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
-using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -123,29 +122,16 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         public int HttpTimeoutMs { get; set; } = 115000;
 
-        // ---- prop-firm account selection (cascading dropdowns) -------------------
-        // Pick the prop firm, then the account type, then the account size. The options
-        // cascade: AccountType lists the chosen firm's programs; AccountSize lists that
-        // program's sizes (see the TypeConverters + PropFirmCatalog at the bottom of this
-        // file). All three are reported to the bridge (/ingest/account); the bridge loads
-        // that firm's context file into the brain AND enforces the account's limits (daily
-        // loss, max contracts). Leave PropFirm blank to select no firm (nothing applied).
-        // The firm/type/size NAMES here mirror config/prop-firms.yaml (the bridge owns the
-        // numbers and validates the combo — an unknown combo is ignored + logged).
+        // ---- prop-firm account selection (single dropdown) ----------------------
+        // ONE dropdown of valid firm/type/size combos (see the PropFirmAccount enum +
+        // PropFirmAccounts.Map at the bottom of this file). Reported to the bridge
+        // (/ingest/account); the bridge loads that firm's context file into the brain AND
+        // enforces the account's limits (daily loss, max contracts). Leave on "(none)" to
+        // select no account (nothing applied). The enum mirrors config/prop-firms.yaml —
+        // the bridge owns the numbers and validates the combo.
         [NinjaScriptProperty]
-        [TypeConverter(typeof(PropFirmConverter))]
-        [Display(Name = "Prop firm", GroupName = "Prop firm account", Order = 1)]
-        public string PropFirm { get; set; } = "";
-
-        [NinjaScriptProperty]
-        [TypeConverter(typeof(AccountTypeConverter))]
-        [Display(Name = "Account type", GroupName = "Prop firm account", Order = 2)]
-        public string AccountType { get; set; } = "";
-
-        [NinjaScriptProperty]
-        [TypeConverter(typeof(AccountSizeConverter))]
-        [Display(Name = "Account size", GroupName = "Prop firm account", Order = 3)]
-        public string AccountSize { get; set; } = "";
+        [Display(Name = "Prop firm account", GroupName = "Prop firm account", Order = 1)]
+        public PropFirmAccount PropAccount { get; set; } = PropFirmAccount.None;
 
         private string BaseUrl => string.Format("http://{0}:{1}", BridgeHost, BridgePort);
         #endregion
@@ -458,23 +444,26 @@ namespace NinjaTrader.NinjaScript.Strategies
             try
             {
                 string name = Account != null ? Account.Name : "";
-                // account_size is emitted as a JSON number when set, else null (the bridge
-                // treats a blank prop_firm / null size as "unspecified" and changes nothing).
-                double sizeVal;
-                string sizeTok = double.TryParse(AccountSize, NumberStyles.Any,
-                    CultureInfo.InvariantCulture, out sizeVal)
-                    ? sizeVal.ToString(CultureInfo.InvariantCulture) : "null";
+                // Map the selected account combo -> bridge report fields. "(none)" sends a
+                // blank prop_firm + null size, which the bridge treats as "unspecified" and
+                // leaves the current selection unchanged. account_size is a clean integer
+                // string (a valid JSON number).
+                string pf = "", at = "", sizeTok = "null";
+                string[] sel;
+                if (PropFirmAccounts.Map.TryGetValue(PropAccount, out sel))
+                {
+                    pf = sel[0]; at = sel[1]; sizeTok = sel[2];
+                }
                 string body = string.Format(
                     "{{\"account\":\"{0}\",\"allow_live\":{1},\"use_agent_strategies\":{2},"
                     + "\"prop_firm\":\"{3}\",\"account_type\":\"{4}\",\"account_size\":{5}}}",
                     Escape(name), AllowLive ? "true" : "false",
                     UseAgentStrategies ? "true" : "false",
-                    Escape(PropFirm ?? ""), Escape(AccountType ?? ""), sizeTok);
+                    Escape(pf), Escape(at), sizeTok);
                 await PostAsync("/ingest/account", body);
                 Print("Hermes: reported account '" + name + "' to bridge (agent_strategies="
                     + (UseAgentStrategies ? "on" : "off")
-                    + (string.IsNullOrEmpty(PropFirm) ? ""
-                        : ", prop_firm=" + PropFirm + "/" + AccountType + "/" + AccountSize)
+                    + (pf == "" ? "" : ", prop_firm=" + pf + "/" + at + "/" + sizeTok)
                     + ").");
                 return true;
             }
@@ -1377,112 +1366,48 @@ namespace NinjaTrader.NinjaScript.Strategies
     }
 
     // =========================================================================
-    //  Prop-firm account catalog + cascading dropdowns for the strategy settings.
-    //  The firm / account-type / size NAMES here MIRROR config/prop-firms.yaml on
-    //  the bridge — the bridge owns the numbers (daily loss, max contracts, etc.)
-    //  and validates the selection, so an unknown combo is simply ignored + logged
-    //  rather than enforced. Adding or renaming a firm means editing BOTH this list
-    //  and the YAML.
+    //  Prop-firm account selection — ONE flat dropdown of valid firm/type/size combos.
+    //  NinjaTrader's grid renders an enum as a native dropdown with zero TypeConverter /
+    //  context.Instance plumbing (the cascading-dropdown approach was unreliable in the
+    //  grid — dependent lists came back empty). Each member is one VALID account; the
+    //  strategy maps it to the bridge report fields via PropFirmAccounts.Map, which
+    //  MIRRORS config/prop-firms.yaml (the bridge owns the numbers + validates the combo).
+    //  Adding/renaming an account means editing BOTH this enum+map and the YAML.
     // =========================================================================
-    internal static class PropFirmCatalog
+    public enum PropFirmAccount
     {
-        // firm -> (account type -> account sizes). Sizes are canonical numeric strings
-        // (the bridge parses them to a number and matches the YAML catalog).
-        public static readonly Dictionary<string, Dictionary<string, string[]>> Firms =
-            new Dictionary<string, Dictionary<string, string[]>>
+        [Display(Name = "(none)")] None,
+        [Display(Name = "Lucid Trading - LucidPro - 25K")] LucidPro_25K,
+        [Display(Name = "Lucid Trading - LucidPro - 50K")] LucidPro_50K,
+        [Display(Name = "Lucid Trading - LucidPro - 100K")] LucidPro_100K,
+        [Display(Name = "Lucid Trading - LucidPro - 150K")] LucidPro_150K,
+        [Display(Name = "Lucid Trading - LucidFlex - 25K")] LucidFlex_25K,
+        [Display(Name = "Lucid Trading - LucidFlex - 50K")] LucidFlex_50K,
+        [Display(Name = "Lucid Trading - LucidFlex - 100K")] LucidFlex_100K,
+        [Display(Name = "Lucid Trading - LucidFlex - 150K")] LucidFlex_150K,
+        [Display(Name = "Lucid Trading - LucidDirect - 50K")] LucidDirect_50K,
+        [Display(Name = "Lucid Trading - LucidDirect - 100K")] LucidDirect_100K,
+        [Display(Name = "Lucid Trading - LucidDirect - 150K")] LucidDirect_150K,
+    }
+
+    internal static class PropFirmAccounts
+    {
+        // enum -> { prop_firm, account_type, account_size }. The size is a clean integer
+        // string (a valid JSON number for the report). MIRRORS config/prop-firms.yaml.
+        public static readonly Dictionary<PropFirmAccount, string[]> Map =
+            new Dictionary<PropFirmAccount, string[]>
             {
-                {
-                    "Lucid Trading",
-                    new Dictionary<string, string[]>
-                    {
-                        { "LucidPro",    new[] { "25000", "50000", "100000", "150000" } },
-                        { "LucidFlex",   new[] { "25000", "50000", "100000", "150000" } },
-                        { "LucidDirect", new[] { "50000", "100000", "150000" } },
-                    }
-                },
+                { PropFirmAccount.LucidPro_25K,     new[] { "Lucid Trading", "LucidPro",    "25000"  } },
+                { PropFirmAccount.LucidPro_50K,     new[] { "Lucid Trading", "LucidPro",    "50000"  } },
+                { PropFirmAccount.LucidPro_100K,    new[] { "Lucid Trading", "LucidPro",    "100000" } },
+                { PropFirmAccount.LucidPro_150K,    new[] { "Lucid Trading", "LucidPro",    "150000" } },
+                { PropFirmAccount.LucidFlex_25K,    new[] { "Lucid Trading", "LucidFlex",   "25000"  } },
+                { PropFirmAccount.LucidFlex_50K,    new[] { "Lucid Trading", "LucidFlex",   "50000"  } },
+                { PropFirmAccount.LucidFlex_100K,   new[] { "Lucid Trading", "LucidFlex",   "100000" } },
+                { PropFirmAccount.LucidFlex_150K,   new[] { "Lucid Trading", "LucidFlex",   "150000" } },
+                { PropFirmAccount.LucidDirect_50K,  new[] { "Lucid Trading", "LucidDirect", "50000"  } },
+                { PropFirmAccount.LucidDirect_100K, new[] { "Lucid Trading", "LucidDirect", "100000" } },
+                { PropFirmAccount.LucidDirect_150K, new[] { "Lucid Trading", "LucidDirect", "150000" } },
             };
-
-        public static List<string> FirmNames()
-        {
-            return Firms.Keys.ToList();
-        }
-
-        public static List<string> TypeNames(string firm)
-        {
-            Dictionary<string, string[]> types;
-            if (firm != null && Firms.TryGetValue(firm, out types))
-                return types.Keys.ToList();
-            return new List<string>();
-        }
-
-        public static List<string> SizeNames(string firm, string type)
-        {
-            Dictionary<string, string[]> types;
-            string[] sizes;
-            if (firm != null && Firms.TryGetValue(firm, out types)
-                && type != null && types.TryGetValue(type, out sizes))
-                return sizes.ToList();
-            return new List<string>();
-        }
-    }
-
-    // Base for the cascading dropdowns: each provides a string dropdown whose options
-    // depend on the OTHER properties on the same strategy instance (context.Instance).
-    // Exclusive = false so a stale child value (left over after the parent changed) is
-    // kept visible and the bridge — not the grid — is the validator.
-    public abstract class PropFirmSelectionConverter : TypeConverter
-    {
-        protected static HermesBridgeStrategy StrategyOf(ITypeDescriptorContext context)
-        {
-            if (context == null)
-                return null;
-            object inst = context.Instance;
-            object[] many = inst as object[];   // grid passes an array on multi-select
-            if (many != null)
-                return many.Length > 0 ? many[0] as HermesBridgeStrategy : null;
-            return inst as HermesBridgeStrategy;
-        }
-
-        public override bool GetStandardValuesSupported(ITypeDescriptorContext context)
-        {
-            return true;
-        }
-
-        public override bool GetStandardValuesExclusive(ITypeDescriptorContext context)
-        {
-            return false;
-        }
-
-        protected StandardValuesCollection Values(List<string> items)
-        {
-            return new StandardValuesCollection(items);
-        }
-    }
-
-    public class PropFirmConverter : PropFirmSelectionConverter
-    {
-        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext context)
-        {
-            return Values(PropFirmCatalog.FirmNames());
-        }
-    }
-
-    public class AccountTypeConverter : PropFirmSelectionConverter
-    {
-        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext context)
-        {
-            HermesBridgeStrategy s = StrategyOf(context);
-            return Values(PropFirmCatalog.TypeNames(s != null ? s.PropFirm : null));
-        }
-    }
-
-    public class AccountSizeConverter : PropFirmSelectionConverter
-    {
-        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext context)
-        {
-            HermesBridgeStrategy s = StrategyOf(context);
-            return Values(PropFirmCatalog.SizeNames(
-                s != null ? s.PropFirm : null, s != null ? s.AccountType : null));
-        }
     }
 }
