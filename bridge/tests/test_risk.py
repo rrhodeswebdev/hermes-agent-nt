@@ -319,6 +319,28 @@ def test_target_widened_to_preserve_reward_risk(cfg):
     assert any("target_widened_to_rr" in r for r in rd.reasons)
 
 
+def test_target_widened_for_price_stop_plus_ticks_target(cfg):
+    # Mixed bracket: a PRICE stop (widened to the ATR floor) paired with a TICKS target. The
+    # RR floor must use the post-clamp stop distance, not be skipped because stop_ticks is None.
+    cfg.strategy.min_stop_atr_mult = 1.5
+    cfg.strategy.atr_stop_mult = 2.0
+    cfg.strategy.atr_target_mult = 3.0         # intended reward:risk = 3.0/2.0 = 1.5
+    cfg.strategy.max_stop_ticks = 200
+    cfg.risk.max_risk_per_trade = 5000.0
+    cfg.daily_goal.max_daily_loss = 10_000.0
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    # ATR 8 → vol floor 48t = 12 pts; the 1-pt (4t) price stop widens to 3988.0 (48t). A tight
+    # 6t target would invert R:R, so it must widen to 48*1.5 = 72t even though the stop is a price.
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, qty=1, stop_price=3999.0, target_ticks=6), s,
+                       last_price=4000.0, atr=8.0)
+    assert rd.approved
+    assert rd.command.stop_price == 3988.0
+    assert rd.command.stop_ticks is None
+    assert rd.command.target_ticks == 72
+    assert any("target_widened_to_rr:6->72" in r for r in rd.reasons)
+
+
 def test_target_not_shrunk_when_already_wide(cfg):
     cfg.strategy.min_stop_atr_mult = 1.5
     cfg.strategy.atr_stop_mult = 2.0

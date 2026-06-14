@@ -167,13 +167,15 @@ class RiskGate:
         # Preserve the intended reward:risk. When the stop was widened to the vol floor, a
         # brain that paired it with a tight target would be left with a WIDE stop and a TINY
         # target — an inverted R:R (small wins, big losses). Widen the target to keep at least
-        # the configured atr_target_mult/atr_stop_mult ratio. Only the ticks bracket is scaled
-        # (the common path); an explicit price target is left to the brain.
+        # the configured atr_target_mult/atr_stop_mult ratio. ``risk_ticks`` is the POST-clamp
+        # stop distance regardless of whether the stop arrived as ticks or as a (now band-clamped)
+        # price, so a price-stop + ticks-target bracket gets the same protection. Only the ticks
+        # target is scaled (the common path); an explicit price target is left to the brain.
         target_ticks = command.target_ticks
-        if (vol_floor is not None and stop_ticks is not None and target_ticks is not None
+        if (vol_floor is not None and target_ticks is not None
                 and self.cfg.strategy.atr_stop_mult > 0):
             rr = self.cfg.strategy.atr_target_mult / self.cfg.strategy.atr_stop_mult
-            min_target = round(stop_ticks * rr)
+            min_target = round(risk_ticks * rr)
             if target_ticks < min_target:
                 reasons.append(f"target_widened_to_rr:{target_ticks}->{min_target}")
                 target_ticks = min_target
