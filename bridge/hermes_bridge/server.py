@@ -42,6 +42,7 @@ from .models import (
     Fill,
     OrderCommand,
 )
+from .news import NewsGuard
 from .plan import Planner
 from .reflect import Reflector
 from .risk import RiskGate
@@ -142,7 +143,10 @@ class AppState:
             profit_target=config.daily_goal.profit_target,
             max_daily_loss=config.daily_goal.max_daily_loss,
         )
-        self.risk = RiskGate(config)
+        # Major-news blackout guard (shared: this server refreshes it on a background
+        # thread; the RiskGate only reads it). Disabled ⇒ inert (no thread, never blocks).
+        self.news = NewsGuard(config)
+        self.risk = RiskGate(config, news=self.news)
         self.agent = build_agent_client(config)
         # Strategy source NinjaTrader reports (UseAgentStrategies toggle), overriding the
         # config default at runtime. None until the strategy first reports.
@@ -166,6 +170,20 @@ class AppState:
         # effective_account() falls back to the static config default until then.
         self.reported_account: str | None = None
         self.reported_allow_live: bool | None = None
+        self._start_news_refresh()
+
+    def _start_news_refresh(self) -> None:
+        """Refresh the economic calendar off the hot path. No-op when news is disabled, so
+        tests and the default config never touch the network."""
+        if not self.cfg.news.enabled:
+            return
+
+        def _loop() -> None:
+            while True:
+                self.news.refresh(time.time())
+                time.sleep(max(60.0, self.cfg.news.refresh_minutes * 60.0))
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def effective_account(self) -> str:
         """Live NT account if the strategy has reported one, else the config default."""
@@ -238,6 +256,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "account": st.effective_account(),
             "nt_allow_live": st.reported_allow_live,
             "strategy_source": st.effective_strategy_source(),
+            "news": st.news.status(time.time()),
         }
 
     @app.get("/session/status", response_model=AccountState)
@@ -403,6 +422,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "recent_decisions": list(reversed(recent)),
             "planner": st.planner.snapshot() if st.planner else None,
             "levels": _levels(st),
+            "news": st.news.status(now),
         }
 
     @app.get("/dashboard")

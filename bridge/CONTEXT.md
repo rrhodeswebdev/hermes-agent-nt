@@ -21,7 +21,8 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 | `models.py` | Pydantic message contract: `Bar`, `Decision`, `OrderCommand`, `Fill`, `AccountState`. The C# side serializes against these. |
 | `config.py` | `BridgeConfig` — loads `config/trading.yaml`, deep-merges `trading.local.yaml`, applies env overrides. |
 | `cli.py` | `hermes-bridge` entrypoint: `serve`, `replay`. |
-| `risk.py` | `RiskGate` — hard limits: position caps, per-trade $ risk, max trades/day, mandatory stop, daily-loss projection, halt/flatten. |
+| `risk.py` | `RiskGate` — hard limits: position caps, per-trade $ risk, max trades/day, mandatory stop, daily-loss projection, halt/flatten, **major-news blackout**. |
+| `news.py` | `NewsGuard` — fetches an economic calendar (`source: json` feed, or `forexfactory` direct-scrape); the `RiskGate` blocks entries within ±`window_minutes` of a high-impact event for the configured currencies (exits always allowed). Fails open (cached, then trade). Surfaced on `/health` + dashboard. |
 | `engine.py` | `TradingEngine` — turns a `Decision` into an `OrderCommand`; enforces engine-side, brain-agnostic breakeven + trail. |
 | `stops.py` | Vol-scaled, band-clamped stop sizing; breakeven/trail math. |
 | `session.py` | `SessionState` — P&L, daily goal, halt/flatten state. |

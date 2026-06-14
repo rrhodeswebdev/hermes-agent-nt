@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from .config import BridgeConfig
 from .models import Action, OrderCommand
+from .news import NewsGuard
 from .session import SessionState
 from .stops import clamp_stop_ticks, size_for_confidence, vol_stop_floor_ticks
 
@@ -40,8 +41,9 @@ _ENTRIES = {Action.ENTER_LONG, Action.ENTER_SHORT}
 
 
 class RiskGate:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, news: NewsGuard | None = None) -> None:
         self.cfg = config
+        self.news = news
 
     def evaluate(
         self,
@@ -74,6 +76,14 @@ class RiskGate:
         if self.cfg.session.enforce_hours and now_ts is not None:
             if not self._within_hours(now_ts):
                 return RiskDecision(False, None, ["outside_session_hours"])
+
+        # 2b) Major-news blackout (optional). Reject entries within the window around a
+        # high-impact event; exits already returned above. Pure in-memory read — the server
+        # refreshes the calendar off the hot path. Fails open: no event / empty cache ⇒ no block.
+        if self.news is not None and now_ts is not None:
+            ev = self.news.blackout_at(now_ts)
+            if ev is not None:
+                return RiskDecision(False, None, [f"news_blackout:{ev.label()}"])
 
         # 3) Flat-only entries.
         if session.position != 0:

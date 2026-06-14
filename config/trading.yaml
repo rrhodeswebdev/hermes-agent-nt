@@ -158,3 +158,25 @@ execution:
                                # never silently tighter than the agent's budget. Set it
                                # explicitly (e.g. 60) to drop ENTRIES whose decision took
                                # >= this many seconds as stale. Exits always execute.
+
+# Major-news blackout. The bridge fetches an economic calendar and the RiskGate blocks NEW
+# ENTRIES within ±window_minutes of a high-impact event for the listed currencies (exits are
+# always allowed). Deterministic + server-side — never the LLM. Fails OPEN: a fetch error
+# keeps the last-good calendar, and with none cached, trading proceeds (a flaky feed never
+# silently halts the day). Status shows on /health + the dashboard.
+news:
+  enabled: true
+  # Calendar source:
+  #   json         -> fetch feed_url (stable, sanctioned ForexFactory feed; RECOMMENDED).
+  #   forexfactory -> scrape forexfactory_url directly (same events, more brittle; behind
+  #                   Cloudflare). Use as an alternate source. Both fail OPEN.
+  source: json
+  # Economic-calendar JSON (free ForexFactory weekly mirror; no API key). Any source with the
+  # same {title, country, date, impact} shape works. Used when source: json.
+  feed_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json
+  forexfactory_url: https://www.forexfactory.com/calendar  # scraped when source: forexfactory
+  currencies: [USD]            # only events for these currencies block (MNQ/ES/NQ => USD)
+  block_impacts: [High]        # which impact tiers count as "major" (feed: High|Medium|Low)
+  window_minutes: 2            # block entries within ±2 min of a matching event's time
+  refresh_minutes: 30          # background refetch cadence (the weekly feed is near-static)
+  fetch_timeout_s: 10

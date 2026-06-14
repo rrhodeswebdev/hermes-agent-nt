@@ -1,4 +1,5 @@
 from hermes_bridge.models import Action, OrderCommand
+from hermes_bridge.news import NewsEvent
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.session import SessionState
 
@@ -355,3 +356,50 @@ def test_target_not_shrunk_when_already_wide(cfg):
                        last_price=4000.0, atr=8.0)
     assert rd.command.target_ticks == 150
     assert not any("target_widened_to_rr" in r for r in rd.reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Major-news blackout                                                          #
+# --------------------------------------------------------------------------- #
+class _NewsStub:
+    """Minimal NewsGuard stand-in: returns a fixed blackout verdict for any time."""
+
+    def __init__(self, event):
+        self.event = event
+
+    def blackout_at(self, now_ts):
+        return self.event
+
+
+def test_news_blackout_blocks_entry(cfg):
+    ev = NewsEvent(title="CPI m/m", currency="USD", impact="High", ts=1000.0)
+    gate = RiskGate(cfg, news=_NewsStub(ev))
+    s = _session(cfg)
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, stop_ticks=8), s, last_price=4000.0, now_ts=1000.0)
+    assert not rd.approved
+    assert any(r.startswith("news_blackout:") for r in rd.reasons)
+
+
+def test_news_blackout_never_blocks_exit(cfg):
+    ev = NewsEvent(title="CPI m/m", currency="USD", impact="High", ts=1000.0)
+    gate = RiskGate(cfg, news=_NewsStub(ev))
+    s = _session(cfg)
+    s.position = 1
+    rd = gate.evaluate(_cmd(Action.EXIT, qty=0), s, now_ts=1000.0)
+    assert rd.approved and rd.command.qty == 1  # risk-reducing — news never gates it
+
+
+def test_news_clear_allows_entry(cfg):
+    gate = RiskGate(cfg, news=_NewsStub(None))  # guard says no active blackout
+    s = _session(cfg)
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, stop_ticks=8), s, last_price=4000.0, now_ts=1000.0)
+    assert rd.approved
+    assert not any("news_blackout" in r for r in rd.reasons)
+
+
+def test_news_guard_absent_is_inert(cfg):
+    # The default construction (no guard) must behave exactly as before.
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, stop_ticks=8), s, last_price=4000.0, now_ts=1000.0)
+    assert rd.approved
