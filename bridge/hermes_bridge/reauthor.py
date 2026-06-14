@@ -1,29 +1,32 @@
-"""Structure-driven re-author governor (agent mode).
+"""Structure-driven re-author decision (agent mode) — a pure reducer.
 
-Decides WHEN the agent should re-run its pre-session study to refresh the authored
-playbook while a session is live, and WHY. This is a small state machine — two bar
-counters plus the structural anchor the playbook was authored under — lifted out of the
-per-bar engine so the trigger logic has one home and can be exercised directly, without
-driving bars through the whole `TradingEngine`.
+Decides WHEN the agent should re-run its pre-session study to refresh the authored playbook
+while a session is live, and WHY. The state is a small immutable value (`ReauthorState`: two
+bar counters + the structural anchor the playbook was authored under); the transitions are
+pure functions. The engine holds the current `ReauthorState` and threads it through `step`
+each bar — there is no mutable governor object, so the trigger logic can be exercised by
+feeding states + contexts in and reading states + reasons out.
 
-The engine owns the ACT (scheduling the study, which calls `record_authored` to reset the
-clocks) and the GUARDS (feature enabled, planner present, agent mode, not already
-analysing). The governor owns the DECISION. Triggers, in priority order:
+The engine owns the ACT (scheduling the study, then anchoring via `record_authored`) and the
+GUARDS (feature enabled, planner present, agent mode, not already analysing). The reducer owns
+the DECISION. Triggers, in priority order:
 
   * ceiling          — the freshness ceiling (`max_interval_bars`) reached even in a calm,
                        unchanging market.
-  * trend_flip       — the live trend turned opposite to the authored trend (its
-                       directional setups are now on the wrong side), confirmed over
-                       `confirm_bars` closes and past the `min_interval_bars` floor.
-  * no_setup_for     — no authored setup is tagged for the live regime (the brain is
-                       benched), same confirmation + floor.
-  * volatility_shock — an ATR spike/collapse mis-scales the playbook's ATR brackets even
-                       when structure holds (secondary; past the floor).
-  * author_retry     — a failed/empty author left no playbook to trade: re-attempt on a
-                       short clock instead of sitting in WAIT forever.
+  * trend_flip       — the live trend turned opposite to the authored trend (its directional
+                       setups are now on the wrong side), confirmed over `confirm_bars` closes
+                       and past the `min_interval_bars` floor.
+  * no_setup_for     — no authored setup is tagged for the live regime (the brain is benched),
+                       same confirmation + floor.
+  * volatility_shock — an ATR spike/collapse mis-scales the playbook's ATR brackets even when
+                       structure holds (secondary; past the floor).
+  * author_retry     — a failed/empty author left no playbook to trade: re-attempt on a short
+                       clock instead of sitting in WAIT forever.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass, replace
 
 from .config import ReauthorConfig
 from .indicators import MarketContext
@@ -50,96 +53,80 @@ def regime_covered(live_regime: str, generated_strategies: list[dict] | None) ->
     )
 
 
-class ReauthorGovernor:
-    """Bar-clock + structural-anchor state for the re-author decision (agent mode)."""
+@dataclass(frozen=True)
+class ReauthorState:
+    """The re-author clocks + structural anchor, as one immutable value.
 
-    def __init__(self, cfg: ReauthorConfig) -> None:
-        self.cfg = cfg
-        # Bars since the live playbook was authored — drives the debounce floor, the
-        # freshness ceiling, and the failed-author retry clock.
-        self._bars_since_author = 0
-        # Consecutive closes the live structure has diverged from the authored playbook
-        # (reset the moment it fits again), so a one-bar wobble doesn't thrash it.
-        self._struct_change_bars = 0
-        # The regime/trend the LIVE playbook was authored under, so a flip away from it is
-        # detectable. None until the first study records one.
-        self._authored_regime: str | None = None
-        self._authored_trend: str | None = None
+    ``bars_since_author`` drives the debounce floor / freshness ceiling / failed-author retry.
+    ``struct_change_bars`` counts consecutive closes the live structure has diverged from the
+    authored playbook (reset the moment it fits again). ``authored_regime`` / ``authored_trend``
+    record the read the LIVE playbook was authored under, so a flip away from it is detectable."""
 
-    # ---- read side (telemetry for the engine's log line) --------------------
-    @property
-    def bars_since_author(self) -> int:
-        return self._bars_since_author
+    bars_since_author: int = 0
+    struct_change_bars: int = 0
+    authored_regime: str | None = None
+    authored_trend: str | None = None
 
-    @property
-    def authored_regime(self) -> str | None:
-        return self._authored_regime
 
-    @property
-    def authored_trend(self) -> str | None:
-        return self._authored_trend
+def record_authored(ctx: MarketContext) -> ReauthorState:
+    """The state after a fresh study authored from ``ctx``: clocks reset, anchored to THIS read
+    so the next re-author fires when the live market drifts off the new playbook."""
+    return ReauthorState(authored_regime=ctx.regime, authored_trend=ctx.trend)
 
-    # ---- write side ---------------------------------------------------------
-    def record_authored(self, ctx: MarketContext) -> None:
-        """A fresh study just authored from ``ctx``: anchor the staleness check to THIS read
-        and reset the clocks, so the next re-author fires when the live market drifts off the
-        new playbook (not the previous one)."""
-        self._bars_since_author = 0
-        self._struct_change_bars = 0
-        self._authored_regime = ctx.regime
-        self._authored_trend = ctx.trend
 
-    def evaluate(
-        self,
-        ctx: MarketContext,
-        *,
-        generated_strategy: str | None,
-        generated_strategies: list[dict] | None,
-        baseline_atr: float | None,
-    ) -> str | None:
-        """The reason to re-author NOW, or None. Advances the bar clocks as a side effect, so
-        call exactly once per bar in agent mode (after the engine's guards, never while a study
-        is already in flight)."""
-        rc = self.cfg
-        self._bars_since_author += 1
+def step(
+    state: ReauthorState,
+    ctx: MarketContext,
+    *,
+    cfg: ReauthorConfig,
+    generated_strategy: str | None,
+    generated_strategies: list[dict] | None,
+    baseline_atr: float | None,
+) -> tuple[ReauthorState, str | None]:
+    """Advance the clocks by one bar and return ``(next_state, reason)`` — ``reason`` is the
+    trigger to re-author now, or None. Pure: call once per bar in agent mode, after the engine's
+    guards and never while a study is already in flight."""
+    rc = cfg
+    bars_since = state.bars_since_author + 1
 
-        # A failed/empty author left no playbook to trade: retry on a short clock instead of
-        # sitting in WAIT forever (otherwise the brain is stuck waiting for a study that
-        # already finished empty).
-        if generated_strategy is None:
-            if self._bars_since_author >= rc.retry_bars:
-                return "author_retry"
-            return None
+    # A failed/empty author left no playbook to trade: retry on a short clock instead of sitting
+    # in WAIT forever (struct_change_bars is left untouched until there is a playbook to judge).
+    if generated_strategy is None:
+        next_state = replace(state, bars_since_author=bars_since)
+        return next_state, ("author_retry" if bars_since >= rc.retry_bars else None)
 
-        # How long the live structure has been at odds with the authored playbook.
-        stale = self._playbook_stale(ctx, generated_strategies)
-        self._struct_change_bars = self._struct_change_bars + 1 if stale else 0
+    stale = _playbook_stale(state, ctx, generated_strategies)
+    struct_change = state.struct_change_bars + 1 if stale else 0
+    next_state = replace(state, bars_since_author=bars_since, struct_change_bars=struct_change)
 
-        past_floor = self._bars_since_author >= rc.min_interval_bars
-        if self._bars_since_author >= rc.max_interval_bars:
-            return f"ceiling({rc.max_interval_bars}b)"
-        if past_floor and stale and self._struct_change_bars >= rc.confirm_bars:
-            return f"{stale} x{self._struct_change_bars}b"
-        if past_floor and is_volatility_shock(ctx.atr, baseline_atr, rc.shock_ratio):
-            return "volatility_shock"
-        return None
+    past_floor = bars_since >= rc.min_interval_bars
+    if bars_since >= rc.max_interval_bars:
+        reason: str | None = f"ceiling({rc.max_interval_bars}b)"
+    elif past_floor and stale and struct_change >= rc.confirm_bars:
+        reason = f"{stale} x{struct_change}b"
+    elif past_floor and is_volatility_shock(ctx.atr, baseline_atr, rc.shock_ratio):
+        reason = "volatility_shock"
+    else:
+        reason = None
+    return next_state, reason
 
-    def _playbook_stale(
-        self, ctx: MarketContext, generated_strategies: list[dict] | None
-    ) -> str | None:
-        """Why the authored playbook no longer fits the live market, or None if it still does.
 
-        - ``trend_flip``: the live trend turned opposite to the trend the playbook was authored
-          under — its directional setups are now on the wrong side.
-        - ``no_setup_for``: no authored setup is tagged for the live regime, so the brain has
-          nothing to arm (benched) and a fresh playbook is needed for this market.
+def _playbook_stale(
+    state: ReauthorState, ctx: MarketContext, generated_strategies: list[dict] | None
+) -> str | None:
+    """Why the authored playbook no longer fits the live market, or None if it still does.
 
-        A trend read of "flat" (off-trend) is not a flip; an untagged setup covers any regime
-        (see ``regime_covered``) so a missing tag never forces a re-author on its own."""
-        a_trend = self._authored_trend
-        if (a_trend in ("up", "down") and ctx.trend in ("up", "down")
-                and ctx.trend != a_trend):
-            return f"trend_flip({a_trend}->{ctx.trend})"
-        if not regime_covered(ctx.regime, generated_strategies):
-            return f"no_setup_for({ctx.regime})"
-        return None
+    - ``trend_flip``: the live trend turned opposite to the trend the playbook was authored
+      under — its directional setups are now on the wrong side.
+    - ``no_setup_for``: no authored setup is tagged for the live regime, so the brain has
+      nothing to arm (benched) and a fresh playbook is needed for this market.
+
+    A trend read of "flat" (off-trend) is not a flip; an untagged setup covers any regime (see
+    ``regime_covered``) so a missing tag never forces a re-author on its own."""
+    a_trend = state.authored_trend
+    if (a_trend in ("up", "down") and ctx.trend in ("up", "down")
+            and ctx.trend != a_trend):
+        return f"trend_flip({a_trend}->{ctx.trend})"
+    if not regime_covered(ctx.regime, generated_strategies):
+        return f"no_setup_for({ctx.regime})"
+    return None

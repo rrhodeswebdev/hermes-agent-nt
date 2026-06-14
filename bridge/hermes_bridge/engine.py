@@ -35,7 +35,7 @@ from .models import (
     Side,
 )
 from .plan import Planner, PlanRequest, TradePlan, evaluate_plan
-from .reauthor import ReauthorGovernor
+from .reauthor import ReauthorState, record_authored, step
 from .risk import RiskGate
 from .session import SessionState
 from .stops import managed_stop_price, risk_scale_for_atr
@@ -86,10 +86,10 @@ class TradingEngine:
         self.on_close = on_close
         self._prefilter = MockAgentClient(config) if config.agent.prefilter == "mock" else None
         self.last_context: MarketContext | None = None  # agent regime / S/R for the dashboard
-        # Re-author governor (agent mode): owns the bar clocks + structural anchor and decides
-        # WHEN to refresh the authored playbook; the engine owns the guards + the act of
-        # re-running the study (see _maybe_reauthor / reauthor.py).
-        self.reauthor = ReauthorGovernor(config.strategies.reauthor)
+        # Re-author state (agent mode): an immutable value (bar clocks + structural anchor)
+        # threaded through reauthor.step each bar. The reducer decides WHEN to refresh the
+        # authored playbook; the engine owns the guards + the act (see _maybe_reauthor).
+        self.reauthor_state = ReauthorState()
         # Last Claude-DECLINED prefilter candidate: {action, price, ts}. Near-identical
         # candidates are answered from this memo instead of burning another Claude call
         # (extended trends produce the same candidate bar after bar). See _duplicate_decline.
@@ -281,7 +281,7 @@ class TradingEngine:
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
         # Anchor the structural staleness check to what this study authors from, so the next
         # re-author fires when the live market drifts off THIS read (not the previous one).
-        self.reauthor.record_authored(ctx)
+        self.reauthor_state = record_authored(ctx)
         self.planner.schedule_session_analysis(bars, PlanRequest(
             mode=mode, context=ctx, recent_bars=recent, account=account,
             bar_ts=bars[-1].ts, assumed_position=self.session.position,
@@ -299,8 +299,8 @@ class TradingEngine:
                 or self.planner.is_analyzing_session()):          # one already in flight
             return
         baseline = atr(self.store.recent(rc.baseline_atr_period + 1), rc.baseline_atr_period)
-        reason = self.reauthor.evaluate(
-            ctx,
+        self.reauthor_state, reason = step(
+            self.reauthor_state, ctx, cfg=rc,
             generated_strategy=self.agent.generated_strategy(),
             generated_strategies=self.agent.generated_strategies(),
             baseline_atr=baseline,
@@ -309,10 +309,10 @@ class TradingEngine:
             self._reauthor_now(ctx, reason)
 
     def _reauthor_now(self, ctx: MarketContext, why: str) -> None:
-        g = self.reauthor
-        print(f"[reauthor] {why}: bars_since_author={g.bars_since_author} "
+        s = self.reauthor_state
+        print(f"[reauthor] {why}: bars_since_author={s.bars_since_author} "
               f"live={ctx.regime}/{ctx.trend} "
-              f"authored={g.authored_regime}/{g.authored_trend}", flush=True)
+              f"authored={s.authored_regime}/{s.authored_trend}", flush=True)
         self._trigger_session_study(self.store.all(), force=True, outcome=f"reauthor:{why}")
 
     def _levels(self, bars: list[Bar]) -> list[Level]:

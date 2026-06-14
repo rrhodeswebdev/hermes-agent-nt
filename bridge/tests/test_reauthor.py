@@ -6,7 +6,12 @@ from hermes_bridge.agent_client import MockAgentClient
 from hermes_bridge.engine import TradingEngine
 from hermes_bridge.indicators import MarketContext
 from hermes_bridge.plan import Planner
-from hermes_bridge.reauthor import is_volatility_shock
+from hermes_bridge.reauthor import (
+    ReauthorState,
+    is_volatility_shock,
+    record_authored,
+    step,
+)
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.store import BarStore
 from tests.conftest import make_bar, make_session, synthetic_bars
@@ -19,6 +24,24 @@ def test_volatility_shock_detection():
     assert is_volatility_shock(15, 10, 2.0) is False   # 1.5×, inside the band
     assert is_volatility_shock(None, 10, 2.0) is False
     assert is_volatility_shock(10, 0, 2.0) is False
+
+
+# ---- pure reducer (no engine) ------------------------------------------------
+def test_step_is_pure_and_threads_state(cfg):
+    # The decision can be exercised by feeding states + contexts in, with no engine.
+    rc = cfg.strategies.reauthor
+    rc.confirm_bars, rc.min_interval_bars, rc.max_interval_bars = 2, 1, 999
+    setups = [{"name": "x", "regime": "trending"}]      # regime covered; isolate the flip
+    s0 = record_authored(_ctx("trending", "up"))        # anchored up-trend, clocks at 0
+    down = _ctx("trending", "down")
+    s1, r1 = step(s0, down, cfg=rc, generated_strategy="pb",
+                  generated_strategies=setups, baseline_atr=None)
+    assert r1 is None and s1.bars_since_author == 1 and s1.struct_change_bars == 1
+    assert s0.bars_since_author == 0                     # the input state is never mutated
+    s2, r2 = step(s1, down, cfg=rc, generated_strategy="pb",
+                  generated_strategies=setups, baseline_atr=None)
+    assert r2 == "trend_flip(up->down) x2b"              # confirmed over confirm_bars → fire
+    assert s2.bars_since_author == 2
 
 
 # ---- engine governor ---------------------------------------------------------
@@ -78,9 +101,9 @@ def _ready(cfg, agent, *, authored=("trending", "up")):
     above the seed so the shock branch stays out of the way unless a test opts in."""
     engine = _engine(cfg, agent)
     engine.store.replace_history(synthetic_bars(60))
-    engine.reauthor._authored_regime, engine.reauthor._authored_trend = authored
-    engine.reauthor._bars_since_author = 0
-    engine.reauthor._struct_change_bars = 0
+    engine.reauthor_state = ReauthorState(
+        authored_regime=authored[0], authored_trend=authored[1],
+        bars_since_author=0, struct_change_bars=0)
     return engine
 
 
