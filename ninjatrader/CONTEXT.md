@@ -35,7 +35,7 @@ Uses `Calculate.OnBarClose` — exactly one decision per closed bar.
   history. **false**: trades your `hermes/context/strategies/{trending,ranging}/` files. Reported
   to the bridge before history so the study runs in the right mode. Overrides `strategies.source`.
 - `AllowLive` — leave **false**. The strategy refuses non-Sim/Playback accounts unless true.
-- Dashboard button knobs: `RefreshSeconds`, `FontSize`, `ShowLevels`.
+- Dashboard button knobs: `RefreshSeconds`, `FontSize`.
 
 ## On-chart dashboard
 

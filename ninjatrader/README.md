@@ -81,7 +81,7 @@ plan, and the authored playbook). It opens **inside a NinjaTrader window** using
 embedded **WebView2** (Chromium); **drag** the button to move it, **double-click** to snap
 it back to the corner. Its position persists with the workspace.
 
-Button knobs on the strategy: `RefreshSeconds`, `FontSize`, `ShowLevels`.
+Button knobs on the strategy: `RefreshSeconds`, `FontSize`.
 
 ### Enabling the embedded window (WebView2)
 
