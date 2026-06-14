@@ -5,9 +5,10 @@ data to the Python `hermes-bridge` and executes the risk-approved orders the bri
 returns, on whatever account is selected in the strategy — a simulated **Sim** or
 **Playback** account by default (it refuses a live account unless `AllowLive` is set),
 and it reports that selection to the bridge so the dashboard/logs follow it. It **also
-renders the agent dashboard
-card + S/R levels directly on the chart** — the dashboard is built into the strategy
-(NT8 strategies support `OnRender`), so there is no separate indicator to add.
+draws the agent's S/R levels on the chart and shows a small on-chart "HERMES —
+DASHBOARD" button** that opens the bridge's full HTML dashboard in a NinjaTrader
+window (embedded WebView2, with a browser fallback). The rich panel that used to be
+drawn as an on-chart card now lives entirely in that HTML dashboard.
 
 ## Install
 
@@ -36,8 +37,8 @@ card + S/R levels directly on the chart** — the dashboard is built into the st
      it trades **your own** playbooks under `hermes/context/strategies/{trending,ranging}/`
      and invents nothing — if those dirs are empty it simply WAITs. The toggle is reported
      to the bridge before history so the study runs in the right mode. The agent names each
-     setup it authors; the chart card's **STRATEGY** section (and the browser dashboard) lists
-     them all and highlights the one matching the live regime. See the full authored playbook
+     setup it authors; the HTML **dashboard** lists them all and highlights the one matching
+     the live regime. See the full authored playbook
      anytime at `GET /strategy` (also written to `hermes/generated/`). Risk limits are identical
      either way.
    - `AllowLive` → leave **false**; the strategy refuses to trade a live (brokerage)
@@ -66,20 +67,38 @@ Order sizing, stops, daily goal, and all risk limits are enforced by the bridge'
 
 ---
 
-## Built-in dashboard — see what the agent is doing
+## Dashboard — see what the agent is doing
 
-The strategy draws a live **dashboard card** on the chart (position, P&L, trades,
-daily-goal status, **data age** so you can spot a delayed feed, the last decision + its
-rationale, recent decisions, and the armed plan) plus the agent's **support/resistance
-lines**. It polls the bridge's pre-formatted panels (`GET /panel.txt` + `GET /levels.txt`),
-so there's no JSON parsing in C#. The card is **click-draggable** (double-click resets);
-the header glyph folds it to a compact strip. Position/fold persist with the workspace.
+The strategy draws the agent's **support/resistance lines** on the chart and a small,
+draggable **"HERMES — DASHBOARD"** button (top-left by default). The button has a status
+dot — **green** = bridge reachable, **amber** = connecting, **red** = offline — and it
+polls only `GET /health` (for the dot) + `GET /levels.txt` (for the S/R lines).
 
-Dashboard knobs on the strategy: `RefreshSeconds`, `FontSize`, `RecentRows`, `ShowLevels`.
+**Click the button** to open the bridge's full HTML dashboard (position, P&L, trades,
+daily-goal status, data age, the last decision + rationale, recent decisions, the armed
+plan, and the authored playbook). It opens **inside a NinjaTrader window** using an
+embedded **WebView2** (Chromium); **drag** the button to move it, **double-click** to snap
+it back to the corner. Its position persists with the workspace.
 
-> **Upgrading from the separate `HermesDashboard` indicator?** It's now folded into the
-> strategy. **Remove the HermesDashboard indicator from your charts** and delete it from
-> `Documents/NinjaTrader 8/bin/Custom/Indicators/` so you don't get two cards.
+Button knobs on the strategy: `RefreshSeconds`, `FontSize`, `ShowLevels`.
 
-Prefer a browser? The bridge also serves a full **web dashboard** at
+### Enabling the embedded window (WebView2)
+
+The embedded window needs the WebView2 control. The strategy loads it **by reflection**, so
+it **compiles and runs without it** — if WebView2 isn't available the button simply opens the
+dashboard in your **default browser** instead. To get the in-NinjaTrader window:
+
+1. In the **NinjaScript Editor**, right-click **References… → Add**, and add
+   `Microsoft.Web.WebView2.Core.dll` and `Microsoft.Web.WebView2.Wpf.dll` (from the
+   `Microsoft.Web.WebView2` NuGet package), then **Compile** (F5).
+2. Ensure the **WebView2 Runtime** is installed (it ships with modern Edge; otherwise grab
+   the Evergreen runtime from Microsoft). The first open creates a user-data folder under
+   `%LOCALAPPDATA%\HermesDashboard\WebView2`.
+
+> **Upgrading from the old on-chart card / separate `HermesDashboard` indicator?** Both are
+> gone — the card was replaced by this button, and the indicator was folded into the strategy
+> earlier. **Remove the `HermesDashboard` indicator from your charts** and delete it from
+> `Documents/NinjaTrader 8/bin/Custom/Indicators/`.
+
+Prefer a plain browser? The bridge serves the same **web dashboard** at
 `http://<bridge-host>:8787/` (auto-refreshing) — open it on the Mac or inside the VM.

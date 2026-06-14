@@ -1,6 +1,7 @@
-"""Dashboard rendering: a plain-text panel (for the NinjaScript indicator) and a
-self-contained auto-refreshing HTML page (for a browser). Both consume the dict
-produced by the /dashboard endpoint, so the format lives in one place.
+"""Dashboard rendering: a plain-text panel (for terminal / CLI viewing via
+/dashboard.txt + /panel.txt) and a self-contained auto-refreshing HTML page (the
+primary dashboard, opened in a browser or the NinjaTrader WebView2 window). Both
+consume the dict produced by the /dashboard endpoint, so the format lives in one place.
 """
 
 from __future__ import annotations
