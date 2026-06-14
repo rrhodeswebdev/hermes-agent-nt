@@ -32,6 +32,7 @@ from .journal import JournalStore, select_similar
 from .memory import LearnedStore
 from .models import Action, Bar, BrainTimeout, Decision
 from .plan import PlanRequest, TradePlan
+from .prompts import agent_knowledge, authored_playbook_block, system_prompt
 
 # JSON Schema for `--json-schema`: the Decision shape the agent must return.
 DECISION_JSON_SCHEMA = json.dumps(
@@ -525,12 +526,9 @@ class ClaudeAgentClient(AgentClient):
     def _system_prompt(self, instruction: str, *, include_active_strategy: bool = True) -> str:
         # Rebuilt per call (cheaply): the learned block changes as reflection curates
         # lessons, so it must not be frozen in a cache. The static knowledge stays cached.
-        parts = [self._strategy_knowledge(include_active_strategy=include_active_strategy)]
-        learned = self._learned_block()
-        if learned:
-            parts.append(learned)
-        parts.append(instruction)
-        return "\n\n".join(parts)
+        # Composition lives in prompts.py; this just gathers the live pieces.
+        knowledge = self._strategy_knowledge(include_active_strategy=include_active_strategy)
+        return system_prompt(knowledge, self._learned_block(), instruction)
 
     def _strategy_knowledge(self, *, include_active_strategy: bool = True) -> str:
         """The knowledge block: framework + the active strategy for the current source.
@@ -548,32 +546,13 @@ class ClaudeAgentClient(AgentClient):
                 )
             if not include_active_strategy:
                 return self._framework
-            return self._framework + "\n\n---\n\n" + self._authored_playbook_block()
+            return agent_knowledge(
+                self._framework,
+                authored_playbook_block(self._generated_strategy, self._generated_strategies),
+            )
         if self._knowledge is None:
             self._knowledge = load_context_files(c.context_dir) or c.context_hint
         return self._knowledge
-
-    def _authored_playbook_block(self) -> str:
-        if self._generated_strategy:
-            roster = ""
-            if self._generated_strategies:
-                # Enumerate the canonical setup names so the brain tags each trigger's
-                # `setup` with an EXACT string the bridge validates and the dashboard matches.
-                header = "\n\nYour setups (set each trigger's `setup` to the one it trades):\n"
-                roster = header + "\n".join(
-                    f"- {s['name']}" + (f" ({s['regime']})" if s.get("regime") else "")
-                    for s in self._generated_strategies
-                )
-            return (
-                "=== ACTIVE STRATEGY (you authored this from the pre-session history "
-                "study — it is binding for this session) ===\n" + self._generated_strategy
-                + roster
-            )
-        return (
-            "=== ACTIVE STRATEGY ===\n"
-            "No strategy has been authored yet (the pre-session study has not produced "
-            "one). Until one is in place, WAIT on every bar and arm NO entry triggers."
-        )
 
     def _learned_block(self) -> str:
         lc = self.cfg.learning

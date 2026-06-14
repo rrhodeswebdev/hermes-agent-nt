@@ -32,7 +32,8 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 | `levels.py` | Swing-pivot S/R zones (served at `GET /levels`, fed to the plan prompt). |
 | `plan.py` | Pre-armed plan cycle — analysis runs *between* bars, arms close conditions; each bar close answers from the armed plan (LLM off the critical path). |
 | `agent_client.py` | `AgentClient` protocol + `MockAgentClient` (the deterministic rules engine / safe fallback). |
-| `claude_agent.py` | `ClaudeAgentClient` — builds the system prompt from context files, asks for a schema-validated `Decision`. |
+| `claude_agent.py` | `ClaudeAgentClient` — gathers the live knowledge/learned/playbook pieces, runs the call, parses a schema-validated `Decision`. |
+| `prompts.py` | Pure system-prompt assembly: composes the brain's prompt (framework knowledge + active playbook + learned memory + task instruction) from its parts. The single place "what the brain sees" is built. |
 | `claude_cli.py` | Low-level `claude -p --safe-mode` invocation (oneshot + persistent session). |
 | `reflect.py` | Post-trade self-improvement: proposes lesson/notes/profile updates into `hermes/learned/`. |
 | `memory.py` | Loads learned memory (lessons, agent notes, profile, similar past trades) for the decision prompt. |
