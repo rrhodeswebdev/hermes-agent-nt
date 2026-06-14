@@ -43,6 +43,12 @@ from .models import (
 )
 from .news import NewsGuard
 from .plan import Planner
+from .prop_firms import (
+    apply_account_profile,
+    find_account,
+    load_catalog,
+    persist_account_profile,
+)
 from .reflect import Reflector
 from .risk import RiskGate
 from .session import SessionState
@@ -85,8 +91,11 @@ class CommandQueue:
 
 
 class AppState:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, config_path: str | None = None) -> None:
         self.cfg = config
+        # Where config was loaded from, so a dashboard profile change can persist to the
+        # sibling *.local.yaml. Falls back to the conventional path when run without a file.
+        self.config_path = config_path or "config/trading.yaml"
         self.entry_freshness_s = effective_entry_freshness_s(config)
         self.stale_drops = 0  # entries dropped by the freshness guard (shown on the panel)
         self.store = BarStore(config.instrument.symbol, config.instrument.timeframe)
@@ -131,6 +140,12 @@ class AppState:
         # effective_account() falls back to the static config default until then.
         self.reported_account: str | None = None
         self.reported_allow_live: bool | None = None
+        # Prop-firm catalog (committed reference data) + the numbers the active selection
+        # applied. Seeding applies the configured selection's hard limits (daily loss, max
+        # contracts) into cfg/session and loads the firm's context file into the brain.
+        self.catalog = load_catalog(config.account_profile.catalog_path)
+        self.applied_profile: dict | None = None
+        self._seed_account_profile()
         self._start_news_refresh()
 
     def _start_news_refresh(self) -> None:
@@ -156,6 +171,61 @@ class AppState:
         default it was seeded with. "agent" = brain authors its own playbook; "custom" =
         on-disk playbooks."""
         return self.agent.strategy_source()
+
+    # ---- prop-firm account profile -------------------------------------------
+    def _seed_account_profile(self) -> None:
+        """Apply the account profile configured at startup (from trading.yaml +
+        trading.local.yaml): set the firm's context file on the brain and write its hard limits
+        into cfg/session. No-op (and no error) when nothing is selected or the selection isn't
+        in the catalog — the bridge just runs on its base config."""
+        ap = self.cfg.account_profile
+        match = find_account(self.catalog, ap.prop_firm, ap.account_type, ap.account_size)
+        if match is None:
+            return
+        firm, _prog, tier = match
+        self.agent.set_prop_firm_context(firm.context_file)
+        self.applied_profile = apply_account_profile(self.cfg, self.session, tier)
+        print(f"[hermes-bridge] account profile: {firm.name} / {ap.account_type} / "
+              f"{ap.account_size:g} -> max_daily_loss={self.cfg.daily_goal.max_daily_loss:g}, "
+              f"max_contracts={self.cfg.risk.max_contracts}", flush=True)
+
+    def select_account_profile(
+        self, prop_firm: str | None, account_type: str | None, account_size: float | None,
+        *, persist: bool = True,
+    ) -> dict:
+        """Apply a new account-profile selection: validate against the catalog, write the hard
+        limits into cfg/session, load the firm's context file into the brain, record the
+        selection on cfg, and (by default) persist it to the sibling *.local.yaml so it
+        survives a restart. Returns ``{ok, ...}``; ``ok=False`` with a note on a bad selection."""
+        match = find_account(self.catalog, prop_firm, account_type, account_size)
+        if match is None:
+            return {"ok": False, "note": "no matching account in the catalog "
+                    f"(firm={prop_firm!r}, type={account_type!r}, size={account_size!r})"}
+        firm, prog, tier = match
+        self.agent.set_prop_firm_context(firm.context_file)
+        self.applied_profile = apply_account_profile(self.cfg, self.session, tier)
+        ap = self.cfg.account_profile
+        ap.prop_firm, ap.account_type, ap.account_size = firm.name, prog.name, float(tier.size)
+        persisted: str | None = None
+        if persist:
+            persisted = str(persist_account_profile(
+                self.config_path, firm.name, prog.name, float(tier.size)))
+        print(f"[hermes-bridge] account profile selected: {firm.name} / {prog.name} / "
+              f"{tier.size:g} -> max_daily_loss={self.cfg.daily_goal.max_daily_loss:g}, "
+              f"max_contracts={self.cfg.risk.max_contracts}"
+              f"{f' (saved to {persisted})' if persisted else ''}", flush=True)
+        return {"ok": True, "selected": self.account_profile_selection(),
+                "applied": self.applied_profile, "persisted": persisted}
+
+    def account_profile_selection(self) -> dict:
+        """The current selection (firm/type/size) + the firm's context filename, for the UI."""
+        ap = self.cfg.account_profile
+        return {
+            "prop_firm": ap.prop_firm,
+            "account_type": ap.account_type,
+            "account_size": ap.account_size,
+            "context_file": self.agent.prop_firm_context(),
+        }
 
     def _on_trade_closed(self, trade) -> None:
         lc = self.cfg.learning
@@ -184,14 +254,22 @@ class AgentCommandRequest(BaseModel):
     reason: str = "agent"
 
 
+class AccountProfileRequest(BaseModel):
+    """Payload the dashboard POSTs to /control/account-profile to select a prop-firm account."""
+
+    prop_firm: str | None = None
+    account_type: str | None = None
+    account_size: float | None = None
+
+
 def _state(request: Request) -> AppState:
     return request.app.state.appstate
 
 
-def create_app(config: BridgeConfig | None = None) -> FastAPI:
+def create_app(config: BridgeConfig | None = None, config_path: str | None = None) -> FastAPI:
     cfg = config or load_config()
     app = FastAPI(title="Hermes Bridge", version=__version__)
-    app.state.appstate = AppState(cfg)
+    app.state.appstate = AppState(cfg, config_path=config_path)
 
     # Make the execution posture loud and visible. The bridge cannot know whether
     # NinjaTrader's selected account is sim or live (only NinjaTrader does — its
@@ -219,6 +297,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "account": st.effective_account(),
             "nt_allow_live": st.reported_allow_live,
             "strategy_source": st.effective_strategy_source(),
+            "account_profile": st.account_profile_selection(),
             "news": st.news.status(time.time()),
         }
 
@@ -272,6 +351,19 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         return {"source": "custom", "generated": False, "name": None, "summary": None,
                 "regime": None, "active_index": None, "active_source": None, "list": [],
                 "path": None, "playbook": playbook}
+
+    # ---- prop-firm account profile -------------------------------------------
+    @app.get("/account-profile")
+    def account_profile(request: Request) -> dict:
+        """The firm catalog (firms -> account types -> sizes + numbers) that powers the
+        dashboard dropdowns, the current selection, and the numbers it applied. Read-only."""
+        st = _state(request)
+        return {
+            "catalog": st.catalog.model_dump(),
+            "selected": st.account_profile_selection(),
+            "applied": st.applied_profile,
+            "context_dir": st.cfg.account_profile.context_dir,
+        }
 
     # ---- dashboard -----------------------------------------------------------
     # The payload + its projection helpers live in views.py (build_dashboard_payload /
@@ -496,6 +588,18 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
               "(manual /control/reauthor)", flush=True)
         return {"ok": True, "source": "agent", "bars": len(bars),
                 "status": st.planner.snapshot()["status"]}
+
+    @app.post("/control/account-profile")
+    def control_account_profile(request: Request, body: AccountProfileRequest) -> dict:
+        """Select a prop firm + account from the catalog. Applies the account's enforced hard
+        limits (daily loss, max contracts) into the live config, loads the firm's context file
+        into the brain, and persists the selection to config/trading.local.yaml so it survives a
+        restart. The selection takes effect immediately (the RiskGate reads cfg live; the next
+        decision's prompt carries the firm's rules)."""
+        st = _state(request)
+        with st.lock:
+            return st.select_account_profile(
+                body.prop_firm, body.account_type, body.account_size)
 
     return app
 

@@ -20,6 +20,7 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 | `server.py` | FastAPI app + HTTP endpoints (the contract NinjaTrader calls). |
 | `models.py` | Pydantic message contract: `Bar`, `Decision`, `OrderCommand`, `Fill`, `AccountState`. The C# side serializes against these. |
 | `config.py` | `BridgeConfig` — loads `config/trading.yaml`, deep-merges `trading.local.yaml`, applies env overrides. |
+| `prop_firms.py` | Prop-firm catalog (`config/prop-firms.yaml`): load/lookup an account, **apply** its enforced numbers (daily loss -> `daily_goal.max_daily_loss`, max contracts -> `risk.max_contracts`), and **persist** the selection to `trading.local.yaml`. Eval target / trailing drawdown are guidance only (fed to the brain via `hermes/prop-firms/<firm>.md`), not enforced. Selected in the dashboard (`POST /control/account-profile`). |
 | `cli.py` | `hermes-bridge` entrypoint: `serve`, `replay`. |
 | `risk.py` | `RiskGate` — hard limits: position caps, per-trade $ risk, max trades/day, mandatory stop, daily-loss projection, halt/flatten, **major-news blackout**. |
 | `news.py` | `NewsGuard` — fetches an economic calendar (`source: json` feed, or `forexfactory` direct-scrape); the `RiskGate` blocks entries within ±`window_minutes` of a high-impact event for the configured currencies (exits always allowed). Fails open (cached, then trade). Surfaced on `/health` + dashboard. |

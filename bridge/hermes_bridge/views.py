@@ -181,6 +181,12 @@ def build_dashboard_payload(st: AppState) -> dict:
             "profit_target": cfg.daily_goal.profit_target,
             "max_daily_loss": cfg.daily_goal.max_daily_loss,
         },
+        # The selected prop-firm account (firm/type/size) + the numbers it applied, so the
+        # dashboard can show the current account and which limits are in force. Display only.
+        "account_profile": {
+            **st.account_profile_selection(),
+            "applied": st.applied_profile,
+        },
         "stale_drops": st.stale_drops,
         "last_decision": recent[-1] if recent else None,
         "recent_decisions": list(reversed(recent)),

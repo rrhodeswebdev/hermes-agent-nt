@@ -284,10 +284,34 @@ DASHBOARD_HTML = """<!doctype html>
     border-radius:8px;padding:10px 14px;margin-bottom:16px}
   .news.blk{border-color:var(--red);background:rgba(248,81,73,.10)}
   .news .nlabel{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .acct{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:12px 14px;margin-bottom:16px}
+  .acct .ahead{display:flex;justify-content:space-between;align-items:center}
+  .acct .alabel{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .acct .aform{margin-top:10px}
+  .acct .arow{display:flex;align-items:center;gap:10px;margin-top:8px}
+  .acct .arow label{font-size:11px;color:var(--dim);width:96px;text-transform:uppercase;letter-spacing:.4px}
+  .acct select{font:inherit;background:#0d1117;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:5px 8px;min-width:210px}
+  .acct .anums{margin-top:10px;line-height:1.6;font-size:12px}
 </style></head>
 <body>
 <header><h1>HERMES · <span id="inst">—</span></h1><div id="conn">connecting…</div></header>
 <div class="wrap">
+  <div class="acct" id="acct">
+    <div class="ahead">
+      <span class="alabel">Account · <span id="acur" class="blue">—</span></span>
+      <button class="sbtn" id="agear" title="Select a prop firm + account">Change</button>
+    </div>
+    <div class="aform" id="aform" style="display:none">
+      <div class="arow"><label>Prop firm</label><select id="afirm"></select></div>
+      <div class="arow"><label>Account type</label><select id="atype"></select></div>
+      <div class="arow"><label>Account size</label><select id="asize"></select></div>
+      <div class="anums dim" id="anums"></div>
+      <div class="arow"><label></label><button class="sbtn" id="aapply">Apply</button>
+        <span id="astatus" class="dim"></span></div>
+    </div>
+  </div>
   <div class="strat" id="strat" style="display:none">
     <div class="shead">
       <span class="slabel" id="slabel">Agent strategies</span>
@@ -398,6 +422,81 @@ document.getElementById('reauthor').addEventListener('click',async function(){
   }catch(e){ alert('Re-author failed: '+e); }
   finally{ setTimeout(()=>{b.disabled=false; b.textContent=was;}, 1500); tick(); }
 });
+// ---- account profile (prop-firm selection) -------------------------------
+// Three dependent dropdowns (firm -> type -> size) sourced from /account-profile.
+// Apply POSTs the selection; the bridge applies the enforced numbers + loads the
+// firm context file + persists to trading.local.yaml. All text via textContent.
+let CATALOG=null;
+function dollars(n){return n==null?'—':'$'+Number(n).toLocaleString()}
+function firms(){return (CATALOG&&CATALOG.firms)||[]}
+function findFirm(name){return firms().find(f=>f.name===name)||null}
+function curType(){const f=findFirm(document.getElementById('afirm').value);
+  return f?((f.account_types||[]).find(t=>t.name===document.getElementById('atype').value)||null):null}
+function curAcct(){const t=curType();if(!t)return null;
+  const v=parseFloat(document.getElementById('asize').value);
+  return (t.accounts||[]).find(a=>Number(a.size)===v)||null}
+function fillSelect(el,values,labels,want){
+  el.innerHTML='';
+  values.forEach((v,i)=>{const o=document.createElement('option');o.value=v;o.textContent=labels[i];el.appendChild(o)});
+  if(want!=null&&values.map(String).includes(String(want)))el.value=String(want);
+}
+function populateTypes(sel){
+  const f=findFirm(document.getElementById('afirm').value); const types=(f&&f.account_types)||[];
+  fillSelect(document.getElementById('atype'),types.map(t=>t.name),types.map(t=>t.name),sel&&sel.account_type);
+  populateSizes(sel);
+}
+function populateSizes(sel){
+  const t=curType(); const accts=(t&&t.accounts)||[];
+  fillSelect(document.getElementById('asize'),accts.map(a=>a.size),accts.map(a=>dollars(a.size)),sel&&sel.account_size);
+  renderNums();
+}
+function renderNums(){
+  const a=curAcct(); const el=document.getElementById('anums'); el.innerHTML='';
+  if(!a)return;
+  const rows=[
+    ['Daily loss limit', a.max_daily_loss!=null?dollars(a.max_daily_loss)+' · enforced':'none (no daily limit) · keeps your config'],
+    ['Max contracts', a.max_contracts!=null?a.max_contracts+' · enforced':'—'],
+    ['Profit target', a.profit_target!=null?dollars(a.profit_target)+' · guidance':'—'],
+    ['Trailing drawdown', a.trailing_drawdown!=null?dollars(a.trailing_drawdown)+' · guidance':'—'],
+  ];
+  rows.forEach(([k,v])=>{const d=document.createElement('div');
+    const ks=document.createElement('span');ks.className='dim';ks.textContent=k+': ';
+    const vs=document.createElement('span');vs.textContent=v;
+    d.appendChild(ks);d.appendChild(vs);el.appendChild(d)});
+}
+function renderAcctSummary(sel){
+  const cur=document.getElementById('acur');
+  cur.textContent=(sel&&sel.prop_firm)?(sel.prop_firm+' · '+(sel.account_type||'')+' · '+dollars(sel.account_size)):'none selected';
+}
+async function loadAccount(){
+  try{
+    const d=await (await fetch('/account-profile',{cache:'no-store'})).json();
+    CATALOG=d.catalog; renderAcctSummary(d.selected);
+    const fs=firms();
+    fillSelect(document.getElementById('afirm'),fs.map(f=>f.name),fs.map(f=>f.name),d.selected&&d.selected.prop_firm);
+    populateTypes(d.selected);
+  }catch(e){}
+}
+document.getElementById('agear').addEventListener('click',()=>{
+  const f=document.getElementById('aform'); f.style.display=f.style.display==='none'?'':'none';});
+document.getElementById('afirm').addEventListener('change',()=>populateTypes(null));
+document.getElementById('atype').addEventListener('change',()=>populateSizes(null));
+document.getElementById('asize').addEventListener('change',renderNums);
+document.getElementById('aapply').addEventListener('click',async function(){
+  const firm=document.getElementById('afirm').value, type=document.getElementById('atype').value;
+  const size=parseFloat(document.getElementById('asize').value); const st=document.getElementById('astatus');
+  if(!firm||!type||isNaN(size)){st.className='amber';st.textContent='pick firm, type, and size';return;}
+  this.disabled=true; st.className='dim'; st.textContent='applying…';
+  try{
+    const r=await (await fetch('/control/account-profile',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prop_firm:firm,account_type:type,account_size:size})})).json();
+    if(r.ok){st.className='grn';st.textContent='applied · saved';renderAcctSummary(r.selected);}
+    else{st.className='red';st.textContent=r.note||'failed';}
+  }catch(e){st.className='red';st.textContent='failed: '+e;}
+  finally{this.disabled=false;}
+});
+loadAccount();
 tick(); setInterval(tick,3000);
 </script>
 </body></html>"""

@@ -542,20 +542,45 @@ class ClaudeAgentClient(AgentClient):
           it is installed by the pre-session study and changes per session.
         """
         c = self.cfg.agent.claude
+        firm = self._prop_firm_block()  # the selected prop firm's rules, or "" if none
         if self._strategy_source == "agent":
             if self._framework is None:
                 self._framework = (
                     load_context_files(c.context_dir, include_subdirs=False) or c.context_hint
                 )
+            framework = self._with_firm(self._framework, firm)
             if not include_active_strategy:
-                return self._framework
+                return framework
             return agent_knowledge(
-                self._framework,
+                framework,
                 authored_playbook_block(self._generated_strategy, self._generated_strategies),
             )
         if self._knowledge is None:
             self._knowledge = load_context_files(c.context_dir) or c.context_hint
-        return self._knowledge
+        return self._with_firm(self._knowledge, firm)
+
+    @staticmethod
+    def _with_firm(knowledge: str, firm: str) -> str:
+        """Append the selected prop firm's rules after the framework, separated by a rule.
+        No firm selected ⇒ knowledge is returned unchanged."""
+        return f"{knowledge}\n\n---\n\n{firm}" if firm else knowledge
+
+    def _prop_firm_block(self) -> str:
+        """The selected prop firm's context file, read fresh each build (cheap, and the
+        selection can change at runtime so it must NOT be frozen in the framework cache).
+        Empty when no firm is selected or the file is missing — the brain just trades the
+        framework rules. Resolved under config.account_profile.context_dir by the filename
+        the server set from the catalog (set_prop_firm_context)."""
+        fn = self._prop_firm_context
+        if not fn:
+            return ""
+        # Basename only: the firm file lives directly under context_dir, so strip any path
+        # components — a context_file can never traverse out of the directory (defense in depth;
+        # the catalog is committed, but this file's text is injected straight into the prompt).
+        path = Path(self.cfg.account_profile.context_dir) / Path(fn).name
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+        return ""
 
     def _learned_block(self) -> str:
         lc = self.cfg.learning
