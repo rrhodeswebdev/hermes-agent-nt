@@ -421,7 +421,16 @@ namespace NinjaTrader.NinjaScript.Strategies
         // bridge processed it before the history arrives.
         private async Task ReportThenHistoryAsync(string histBody)
         {
-            await ReportAccountAsync();
+            // Enforce the ordering contract: if the account report did not reach the bridge,
+            // do NOT post history — the pre-session study it triggers would run without knowing
+            // the strategy source. Skipping leaves the bridge's bar store empty, so it keeps
+            // flagging need_history and the bar handshake (MaybeResendHistory) retries
+            // account-then-history shortly.
+            if (!await ReportAccountAsync())
+            {
+                Print("Hermes: account report failed — deferring history (will retry via handshake).");
+                return;
+            }
             try
             {
                 await PostAsync("/ingest/history", histBody);
@@ -439,7 +448,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         // logs — NinjaTrader's account guard (GuardAccount) is the real execution
         // interlock. The name is whatever is selected in the strategy dialog, so the rest
         // of the tool follows the chart's account selection automatically.
-        private async Task ReportAccountAsync()
+        // Returns true only if the bridge acknowledged the POST — callers that must
+        // preserve the account-before-history ordering (ReportThenHistoryAsync) gate on it.
+        private async Task<bool> ReportAccountAsync()
         {
             try
             {
@@ -451,10 +462,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 await PostAsync("/ingest/account", body);
                 Print("Hermes: reported account '" + name + "' to bridge (agent_strategies="
                     + (UseAgentStrategies ? "on" : "off") + ").");
+                return true;
             }
             catch (Exception ex)
             {
                 Print("Hermes bridge account report error: " + ex.Message);
+                return false;
             }
         }
 
