@@ -3,9 +3,10 @@ when the live market drifts off the authored playbook (trend flip / uncovered re
 plus the volatility-shock fallback, the freshness ceiling, and the failed-author retry."""
 
 from hermes_bridge.agent_client import MockAgentClient
-from hermes_bridge.engine import TradingEngine, is_volatility_shock
+from hermes_bridge.engine import TradingEngine
 from hermes_bridge.indicators import MarketContext
 from hermes_bridge.plan import Planner
+from hermes_bridge.reauthor import is_volatility_shock
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.store import BarStore
 from tests.conftest import make_bar, make_session, synthetic_bars
@@ -77,9 +78,9 @@ def _ready(cfg, agent, *, authored=("trending", "up")):
     above the seed so the shock branch stays out of the way unless a test opts in."""
     engine = _engine(cfg, agent)
     engine.store.replace_history(synthetic_bars(60))
-    engine._authored_regime, engine._authored_trend = authored
-    engine._bars_since_author = 0
-    engine._struct_change_bars = 0
+    engine.reauthor._authored_regime, engine.reauthor._authored_trend = authored
+    engine.reauthor._bars_since_author = 0
+    engine.reauthor._struct_change_bars = 0
     return engine
 
 

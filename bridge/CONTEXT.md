@@ -25,6 +25,7 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 | `news.py` | `NewsGuard` — fetches an economic calendar (`source: json` feed, or `forexfactory` direct-scrape); the `RiskGate` blocks entries within ±`window_minutes` of a high-impact event for the configured currencies (exits always allowed). Fails open (cached, then trade). Surfaced on `/health` + dashboard. |
 | `engine.py` | `TradingEngine` — turns a `Decision` into an `OrderCommand`; enforces engine-side, brain-agnostic breakeven + trail. |
 | `stops.py` | Vol-scaled, band-clamped stop sizing; breakeven/trail math. |
+| `reauthor.py` | `ReauthorGovernor` — agent-mode decision for WHEN to re-author the playbook (trend-flip / uncovered-regime / vol-shock / ceiling / failed-author retry). Pure state machine; the engine owns the guards + the act. |
 | `session.py` | `SessionState` — P&L, daily goal, halt/flatten state. |
 | `store.py` | `BarStore` — in-memory bar history. |
 | `indicators.py` | ATR, swings, delta, swing-**structure** regime classification (HH/HL vs LH/LL vs contained). |
