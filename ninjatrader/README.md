@@ -37,8 +37,8 @@ drawn as an on-chart card now lives entirely in that HTML dashboard.
      it trades **your own** playbooks under `hermes/context/strategies/{trending,ranging}/`
      and invents nothing — if those dirs are empty it simply WAITs. The toggle is reported
      to the bridge before history so the study runs in the right mode. The agent names each
-     setup it authors; the HTML **dashboard** lists them all and highlights the one matching
-     the live regime. See the full authored playbook
+     setup it authors; the HTML **dashboard** lists them all and highlights the active one —
+     the setup the brain declared in its plan, or else the one matching the live regime. See the full authored playbook
      anytime at `GET /strategy` (also written to `hermes/generated/`). Risk limits are identical
      either way.
    - `AllowLive` → leave **false**; the strategy refuses to trade a live (brokerage)
