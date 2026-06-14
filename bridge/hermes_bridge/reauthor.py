@@ -95,8 +95,11 @@ def step(
     # A failed/empty author left no playbook to trade: retry on a short clock instead of sitting
     # in WAIT forever (struct_change_bars is left untouched until there is a playbook to judge).
     if generated_strategy is None:
-        next_state = replace(state, bars_since_author=bars_since)
-        return next_state, ("author_retry" if bars_since >= rc.retry_bars else None)
+        if bars_since >= rc.retry_bars:
+            # Fire and restart the retry clock so re-attempts happen every retry_bars bars,
+            # not on every bar once the threshold is first crossed.
+            return replace(state, bars_since_author=0), "author_retry"
+        return replace(state, bars_since_author=bars_since), None
 
     stale = _playbook_stale(state, ctx, generated_strategies)
     struct_change = state.struct_change_bars + 1 if stale else 0
