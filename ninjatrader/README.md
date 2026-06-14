@@ -5,10 +5,10 @@ data to the Python `hermes-bridge` and executes the risk-approved orders the bri
 returns, on whatever account is selected in the strategy — a simulated **Sim** or
 **Playback** account by default (it refuses a live account unless `AllowLive` is set),
 and it reports that selection to the bridge so the dashboard/logs follow it. It **also
-draws the agent's S/R levels on the chart and shows a small on-chart "HERMES —
-DASHBOARD" button** that opens the bridge's full HTML dashboard in a NinjaTrader
-window (embedded WebView2, with a browser fallback). The rich panel that used to be
-drawn as an on-chart card now lives entirely in that HTML dashboard.
+shows a small on-chart "HERMES — DASHBOARD" button** that opens the bridge's full HTML
+dashboard in a NinjaTrader window (embedded WebView2, with a browser fallback). The rich
+panel — and the agent's S/R levels — that used to be drawn on the chart now live entirely
+in that HTML dashboard.
 
 ## Install
 
@@ -70,10 +70,10 @@ Order sizing, stops, daily goal, and all risk limits are enforced by the bridge'
 
 ## Dashboard — see what the agent is doing
 
-The strategy draws the agent's **support/resistance lines** on the chart and a small,
-draggable **"HERMES — DASHBOARD"** button (top-left by default). The button has a status
-dot — **green** = bridge reachable, **amber** = connecting, **red** = offline — and it
-polls only `GET /health` (for the dot) + `GET /levels.txt` (for the S/R lines).
+The strategy draws a small, draggable **"HERMES — DASHBOARD"** button (top-left by
+default). The button has a status dot — **green** = bridge reachable, **amber** =
+connecting, **red** = offline — and it polls only `GET /health` (for the dot). The agent's
+**support/resistance levels** are shown by the HTML dashboard, not drawn on the chart.
 
 **Click the button** to open the bridge's full HTML dashboard (position, P&L, trades,
 daily-goal status, data age, the last decision + rationale, recent decisions, the armed

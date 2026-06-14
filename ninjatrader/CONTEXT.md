@@ -39,11 +39,12 @@ Uses `Calculate.OnBarClose` — exactly one decision per closed bar.
 
 ## On-chart dashboard
 
-Draws the agent's S/R lines and a draggable **"HERMES — DASHBOARD"** button (status dot:
-green reachable / amber connecting / red offline; polls `GET /health` + `GET /levels.txt`).
-Click opens the bridge's full HTML dashboard in an **embedded WebView2** NinjaTrader window
-(loaded by reflection, so it compiles/runs without WebView2 — falls back to the default
-browser). The same dashboard is served at `http://<bridge-host>:8787/`.
+Draws a draggable **"HERMES — DASHBOARD"** button (status dot: green reachable / amber
+connecting / red offline; polls `GET /health` only). Click opens the bridge's full HTML
+dashboard in an **embedded WebView2** NinjaTrader window (loaded by reflection, so it
+compiles/runs without WebView2 — falls back to the default browser). The same dashboard is
+served at `http://<bridge-host>:8787/`. S/R levels are rendered by that HTML dashboard, not
+by this on-chart component — the strategy no longer draws them on the chart.
 
 ## Working rules (local)
 

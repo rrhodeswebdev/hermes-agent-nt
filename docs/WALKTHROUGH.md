@@ -43,7 +43,7 @@ approved.
 flowchart LR
     subgraph WIN["🪟 Windows / Parallels"]
         NT["NinjaTrader 8<br/>(live chart)"]
-        STRAT["HermesBridgeStrategy<br/>mails bars · places orders · S/R lines"]
+        STRAT["HermesBridgeStrategy<br/>mails bars · places orders"]
         PANEL["HERMES button<br/>(opens dashboard window)"]
         NT --- STRAT
         NT --- PANEL
@@ -71,7 +71,7 @@ flowchart LR
     BRAIN -. "client: claude" .-> CLAUDE
     BRAIN -. "client: mock" .-> MOCK
     ENG --> RISK --> SESS
-    PANEL -- "GET /health · /levels.txt" --> SRV
+    PANEL -- "GET /health" --> SRV
     PANEL -. "click → opens" .-> WEB
     WEB -- "GET /dashboard" --> SRV
 ```
@@ -321,11 +321,11 @@ what the robot is thinking:
 - **Web dashboard** — open `http://localhost:8787/` (or the Mac's LAN IP from Windows). A
   live page showing position, P&L, trade count vs. goal, data freshness, the latest decision
   with its reason, and a scrolling history of recent decisions. Auto-refreshes every 3s.
-- **From the chart** — `HermesBridgeStrategy` draws the agent's S/R lines plus a small,
-  draggable **"HERMES — DASHBOARD"** button (with a green/amber/red bridge-status dot).
-  Clicking it opens that same web dashboard **inside a NinjaTrader window** via an embedded
-  WebView2 (or your default browser if WebView2 isn't installed). The button polls only
-  `/health` and `/levels.txt`; the rich panel is the HTML page itself.
+- **From the chart** — `HermesBridgeStrategy` draws a small, draggable **"HERMES —
+  DASHBOARD"** button (with a green/amber/red bridge-status dot). Clicking it opens that
+  same web dashboard **inside a NinjaTrader window** via an embedded WebView2 (or your
+  default browser if WebView2 isn't installed). The button polls only `/health`; the S/R
+  levels and the rich panel both live in the HTML page itself.
 
 ### G. Starting it all — *`start.sh`, scripts, Makefile*
 
