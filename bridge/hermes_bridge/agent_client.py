@@ -110,134 +110,159 @@ class MockAgentClient(AgentClient):
     confirmed by cumulative delta and a same-direction bar close. Stops/targets are
     ATR-based. manage_position: exit early if structure flips against us (or the close
     breaks the protective swing with adverse delta); otherwise let the resting bracket work.
+
+    The rules themselves are the pure module functions below (``mock_decide`` /
+    ``mock_propose_plan`` / ``mock_session_brief``); this class is the thin AgentClient adapter
+    that lets the engine hold the rules brain polymorphically alongside the Claude brain.
     """
 
     def describe(self) -> str:
         return "rules"
 
     def decide(self, req: AgentRequest) -> Decision:
-        if req.mode == "manage_position":
-            return self._manage(req)
-        return self._seek_entry(req)
+        return mock_decide(self.cfg, req)
 
-    def _recent_sr(self, bars: list[Bar]) -> tuple[float, float]:
-        """Immediate support/resistance = the lowest low / highest high over the last
-        ``2*swing_lookback+1`` bars — the local higher-low / lower-high a pullback returns
-        to, near price (the structural stand-in for the old fast-EMA "value" line)."""
-        window = bars[-(2 * self.cfg.strategy.swing_lookback + 1):]
-        return min(b.low for b in window), max(b.high for b in window)
-
-    def _seek_entry(self, req: AgentRequest) -> Decision:
-        c = req.context
-        p = self.cfg.strategy
-        if c.atr is None or len(req.recent_bars) < 2 or c.regime != "trending":
-            return Decision(action=Action.WAIT, rationale="no trending structure")
-
-        last = req.recent_bars[-1]
-        atr = c.atr
-        tol = p.pullback_atr * atr  # how close to the local swing still counts as a "tag"
-        stop_ticks = atr_band_stop_ticks(atr, self.cfg)  # vol-scaled, band-clamped
-        target_ticks = self._ticks(atr * p.atr_target_mult)
-        support, resistance = self._recent_sr(req.recent_bars)
-
-        # Long: structural uptrend, the bar pulled back to TAG the immediate higher-low
-        # support and closed back above it on a bullish bar with non-negative order-flow.
-        if (c.trend == "up" and last.low <= support + tol and last.close > support
-                and last.close > last.open and c.recent_delta >= 0):
-            return Decision(
-                action=Action.ENTER_LONG, confidence=self._confidence(c, +1), qty=1,
-                stop_ticks=stop_ticks, target_ticks=target_ticks,
-                rationale="uptrend pullback held the higher-low, closed back up, +delta",
-            )
-        # Short: mirror at the immediate lower-high resistance.
-        if (c.trend == "down" and last.high >= resistance - tol and last.close < resistance
-                and last.close < last.open and c.recent_delta <= 0):
-            return Decision(
-                action=Action.ENTER_SHORT, confidence=self._confidence(c, -1), qty=1,
-                stop_ticks=stop_ticks, target_ticks=target_ticks,
-                rationale="downtrend pullback held the lower-high, closed back down, -delta",
-            )
-        return Decision(action=Action.WAIT, rationale="no setup")
-
-    def _manage(self, req: AgentRequest) -> Decision:
-        c = req.context
-        pos = req.account.position
-        broke_low = c.swing_low is not None and c.last_close < c.swing_low
-        broke_high = c.swing_high is not None and c.last_close > c.swing_high
-        # Exit early when structure flips against the open position (trend turned, or the
-        # close broke the protective swing with adverse delta).
-        if pos > 0 and (c.trend == "down" or (c.recent_delta < 0 and broke_low)):
-            return Decision(action=Action.EXIT, confidence=0.6,
-                            rationale="long invalidated: structure/delta flipped down")
-        if pos < 0 and (c.trend == "up" or (c.recent_delta > 0 and broke_high)):
-            return Decision(action=Action.EXIT, confidence=0.6,
-                            rationale="short invalidated: structure/delta flipped up")
-        return Decision(action=Action.WAIT, rationale="hold; bracket protects position")
-
-    # ---- pre-armed plans (same rule math, expressed as next-close conditions) ----
     def propose_plan(self, preq: PlanRequest) -> TradePlan | None:
-        from .plan import EntryTrigger, ExitRule, TradePlan  # lazy: plan.py imports us
-
-        c = preq.context
-        if preq.mode == "manage_position":
-            pos = preq.assumed_position or preq.account.position
-            if pos > 0 and c.swing_low is not None:
-                exit_rule = ExitRule(exit_below=c.swing_low,
-                                     rationale="long invalidated: close below the higher-low")
-            elif pos < 0 and c.swing_high is not None:
-                exit_rule = ExitRule(exit_above=c.swing_high,
-                                     rationale="short invalidated: close above the lower-high")
-            else:
-                return TradePlan(mode="manage_position",
-                                 rationale="no structure; hold, bracket protects")
-            return TradePlan(mode="manage_position", exit=exit_rule,
-                             rationale="exit on a structural break, else let the bracket work")
-        if c.atr is None or c.regime != "trending" or len(preq.recent_bars) < 2:
-            return TradePlan(mode="seek_entry", rationale="no trending structure; no-trade")
-        p = self.cfg.strategy
-        tol = p.pullback_atr * c.atr
-        stop_ticks = atr_band_stop_ticks(c.atr, self.cfg)  # vol-scaled, band-clamped
-        target_ticks = self._ticks(c.atr * p.atr_target_mult)
-        support, resistance = self._recent_sr(preq.recent_bars)
-        # The decide() rule "pullback tagged the immediate higher-low, then closed back"
-        # becomes a close band hugging that local support (long) / resistance (short).
-        if c.trend == "up" and c.recent_delta >= 0:
-            trigger = EntryTrigger(
-                direction="long", min_close=support, max_close=support + tol,
-                qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
-                confidence=self._confidence(c, +1),
-                rationale="uptrend pullback resuming off the higher-low, +delta",
-            )
-            return TradePlan(mode="seek_entry", bias="long", triggers=[trigger],
-                             rationale="uptrend pullback plan")
-        if c.trend == "down" and c.recent_delta <= 0:
-            trigger = EntryTrigger(
-                direction="short", min_close=resistance - tol, max_close=resistance,
-                qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
-                confidence=self._confidence(c, -1),
-                rationale="downtrend pullback resuming off the lower-high, -delta",
-            )
-            return TradePlan(mode="seek_entry", bias="short", triggers=[trigger],
-                             rationale="downtrend pullback plan")
-        return TradePlan(mode="seek_entry", rationale="no trend/flow alignment; no-trade")
+        return mock_propose_plan(self.cfg, preq)
 
     def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
-        c = preq.context
-        return (f"rules brief: regime={c.regime} trend={c.trend} atr={c.atr} "
-                f"swing_high={c.swing_high} swing_low={c.swing_low} bars={len(history)}")
+        return mock_session_brief(preq, history)
 
-    def _confidence(self, c: MarketContext, direction: int) -> float:
-        score = 0.5
-        # Wider swing structure (relative to ATR) = a cleaner, roomier trend.
-        if c.swing_high is not None and c.swing_low is not None and c.atr:
-            span = abs(c.swing_high - c.swing_low)
-            score += min(0.25, span / c.atr * 0.05)
-        score += min(0.2, abs(c.recent_delta) / 10000.0)
-        return round(min(0.95, max(0.5, score)), 3)
 
-    def _ticks(self, price_distance: float) -> int:
-        ts = self.cfg.instrument.tick_size or 0.25
-        return max(1, round(price_distance / ts))
+# --------------------------------------------------------------------------- #
+# The deterministic rules as pure functions (cfg in, Decision / TradePlan out) #
+# --------------------------------------------------------------------------- #
+def mock_decide(cfg: BridgeConfig, req: AgentRequest) -> Decision:
+    """The rules brain's per-bar decision (also the engine's prefilter + safe fallback)."""
+    if req.mode == "manage_position":
+        return _mock_manage(req)
+    return _mock_seek_entry(cfg, req)
+
+
+def _mock_recent_sr(cfg: BridgeConfig, bars: list[Bar]) -> tuple[float, float]:
+    """Immediate support/resistance = the lowest low / highest high over the last
+    ``2*swing_lookback+1`` bars — the local higher-low / lower-high a pullback returns to,
+    near price (the structural stand-in for the old fast-EMA "value" line)."""
+    window = bars[-(2 * cfg.strategy.swing_lookback + 1):]
+    return min(b.low for b in window), max(b.high for b in window)
+
+
+def _mock_seek_entry(cfg: BridgeConfig, req: AgentRequest) -> Decision:
+    c = req.context
+    p = cfg.strategy
+    if c.atr is None or len(req.recent_bars) < 2 or c.regime != "trending":
+        return Decision(action=Action.WAIT, rationale="no trending structure")
+
+    last = req.recent_bars[-1]
+    atr = c.atr
+    tol = p.pullback_atr * atr  # how close to the local swing still counts as a "tag"
+    stop_ticks = atr_band_stop_ticks(atr, cfg)  # vol-scaled, band-clamped
+    target_ticks = _mock_ticks(cfg, atr * p.atr_target_mult)
+    support, resistance = _mock_recent_sr(cfg, req.recent_bars)
+
+    # Long: structural uptrend, the bar pulled back to TAG the immediate higher-low
+    # support and closed back above it on a bullish bar with non-negative order-flow.
+    if (c.trend == "up" and last.low <= support + tol and last.close > support
+            and last.close > last.open and c.recent_delta >= 0):
+        return Decision(
+            action=Action.ENTER_LONG, confidence=_mock_confidence(c, +1), qty=1,
+            stop_ticks=stop_ticks, target_ticks=target_ticks,
+            rationale="uptrend pullback held the higher-low, closed back up, +delta",
+        )
+    # Short: mirror at the immediate lower-high resistance.
+    if (c.trend == "down" and last.high >= resistance - tol and last.close < resistance
+            and last.close < last.open and c.recent_delta <= 0):
+        return Decision(
+            action=Action.ENTER_SHORT, confidence=_mock_confidence(c, -1), qty=1,
+            stop_ticks=stop_ticks, target_ticks=target_ticks,
+            rationale="downtrend pullback held the lower-high, closed back down, -delta",
+        )
+    return Decision(action=Action.WAIT, rationale="no setup")
+
+
+def _mock_manage(req: AgentRequest) -> Decision:
+    c = req.context
+    pos = req.account.position
+    broke_low = c.swing_low is not None and c.last_close < c.swing_low
+    broke_high = c.swing_high is not None and c.last_close > c.swing_high
+    # Exit early when structure flips against the open position (trend turned, or the
+    # close broke the protective swing with adverse delta).
+    if pos > 0 and (c.trend == "down" or (c.recent_delta < 0 and broke_low)):
+        return Decision(action=Action.EXIT, confidence=0.6,
+                        rationale="long invalidated: structure/delta flipped down")
+    if pos < 0 and (c.trend == "up" or (c.recent_delta > 0 and broke_high)):
+        return Decision(action=Action.EXIT, confidence=0.6,
+                        rationale="short invalidated: structure/delta flipped up")
+    return Decision(action=Action.WAIT, rationale="hold; bracket protects position")
+
+
+# Pre-armed plans: the same rule math, expressed as next-close conditions.
+def mock_propose_plan(cfg: BridgeConfig, preq: PlanRequest) -> TradePlan | None:
+    from .plan import EntryTrigger, ExitRule, TradePlan  # lazy: plan.py imports us
+
+    c = preq.context
+    if preq.mode == "manage_position":
+        pos = preq.assumed_position or preq.account.position
+        if pos > 0 and c.swing_low is not None:
+            exit_rule = ExitRule(exit_below=c.swing_low,
+                                 rationale="long invalidated: close below the higher-low")
+        elif pos < 0 and c.swing_high is not None:
+            exit_rule = ExitRule(exit_above=c.swing_high,
+                                 rationale="short invalidated: close above the lower-high")
+        else:
+            return TradePlan(mode="manage_position",
+                             rationale="no structure; hold, bracket protects")
+        return TradePlan(mode="manage_position", exit=exit_rule,
+                         rationale="exit on a structural break, else let the bracket work")
+    if c.atr is None or c.regime != "trending" or len(preq.recent_bars) < 2:
+        return TradePlan(mode="seek_entry", rationale="no trending structure; no-trade")
+    p = cfg.strategy
+    tol = p.pullback_atr * c.atr
+    stop_ticks = atr_band_stop_ticks(c.atr, cfg)  # vol-scaled, band-clamped
+    target_ticks = _mock_ticks(cfg, c.atr * p.atr_target_mult)
+    support, resistance = _mock_recent_sr(cfg, preq.recent_bars)
+    # The decide() rule "pullback tagged the immediate higher-low, then closed back"
+    # becomes a close band hugging that local support (long) / resistance (short).
+    if c.trend == "up" and c.recent_delta >= 0:
+        trigger = EntryTrigger(
+            direction="long", min_close=support, max_close=support + tol,
+            qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
+            confidence=_mock_confidence(c, +1),
+            rationale="uptrend pullback resuming off the higher-low, +delta",
+        )
+        return TradePlan(mode="seek_entry", bias="long", triggers=[trigger],
+                         rationale="uptrend pullback plan")
+    if c.trend == "down" and c.recent_delta <= 0:
+        trigger = EntryTrigger(
+            direction="short", min_close=resistance - tol, max_close=resistance,
+            qty=1, stop_ticks=stop_ticks, target_ticks=target_ticks,
+            confidence=_mock_confidence(c, -1),
+            rationale="downtrend pullback resuming off the lower-high, -delta",
+        )
+        return TradePlan(mode="seek_entry", bias="short", triggers=[trigger],
+                         rationale="downtrend pullback plan")
+    return TradePlan(mode="seek_entry", rationale="no trend/flow alignment; no-trade")
+
+
+def mock_session_brief(preq: PlanRequest, history: list[Bar]) -> str:
+    c = preq.context
+    return (f"rules brief: regime={c.regime} trend={c.trend} atr={c.atr} "
+            f"swing_high={c.swing_high} swing_low={c.swing_low} bars={len(history)}")
+
+
+def _mock_confidence(c: MarketContext, direction: int) -> float:
+    score = 0.5
+    # Wider swing structure (relative to ATR) = a cleaner, roomier trend.
+    if c.swing_high is not None and c.swing_low is not None and c.atr:
+        span = abs(c.swing_high - c.swing_low)
+        score += min(0.25, span / c.atr * 0.05)
+    score += min(0.2, abs(c.recent_delta) / 10000.0)
+    return round(min(0.95, max(0.5, score)), 3)
+
+
+def _mock_ticks(cfg: BridgeConfig, price_distance: float) -> int:
+    ts = cfg.instrument.tick_size or 0.25
+    return max(1, round(price_distance / ts))
 
 
 # --------------------------------------------------------------------------- #
