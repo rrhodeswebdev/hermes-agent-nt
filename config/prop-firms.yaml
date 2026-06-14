@@ -6,49 +6,41 @@
 #        max_daily_loss -> daily_goal.max_daily_loss   (daily loss halt)
 #        max_contracts  -> risk.max_contracts          (position ceiling)
 #
-# profit_target (the cumulative EVALUATION target) and trailing_drawdown (the cumulative
-# high-water-mark limit) are NOT enforced server-side today (the RiskGate has no cumulative
+# profit_target (the EVALUATION target to pass) and trailing_drawdown (the Max Loss Limit /
+# end-of-day drawdown) are NOT enforced server-side today (the RiskGate has no cumulative
 # primitive yet) — they are shown on the dashboard and fed to the brain via the context file
 # so it trades within them by judgment. Trailing-drawdown enforcement is a planned follow-up.
 #
-# Numbers below are representative of each firm's PUBLICLY documented programs at the time of
-# writing. Verify against your firm's CURRENT terms — programs change. Your personal selection
-# is saved to config/trading.local.yaml (gitignored), not here.
+# CONTRACT SIZING: Lucid quotes sizing as "N minis OR 10N micros" (1 mini = 10 micros). The
+# configured instrument is MNQ (a MICRO), so max_contracts below is the MICRO count. If you
+# switch to a MINI instrument (NQ/ES), divide these by 10 (the mini counts are in lucid.md).
+#
+# Numbers are Lucid Trading's documented LucidPro evaluation programs (the eval ladder is
+# shared across LucidPro / LucidFlex / LucidDirect). Verify against your CURRENT account terms.
+# Your personal selection is saved to config/trading.local.yaml (gitignored), not here.
 
 firms:
-  - name: Topstep
-    context_file: topstep.md
+  - name: Lucid Trading
+    context_file: lucid.md
     account_types:
-      - name: Trading Combine
+      # LucidPro — evaluation -> funded. Fixed daily loss limit; end-of-day drawdown MLL.
+      - name: LucidPro
         accounts:
-          - { size: 50000,  max_daily_loss: 1000, max_contracts: 5,  profit_target: 3000, trailing_drawdown: 2000 }
-          - { size: 100000, max_daily_loss: 2000, max_contracts: 10, profit_target: 6000, trailing_drawdown: 3000 }
-          - { size: 150000, max_daily_loss: 3000, max_contracts: 15, profit_target: 9000, trailing_drawdown: 4500 }
-      - name: Express Funded Account
+          - {size: 25000,  max_contracts: 20,  profit_target: 1250, trailing_drawdown: 1000}
+          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000}
+          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000}
+          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500}
+      # LucidFlex — end-of-day TRAILING drawdown that locks past the initial trail balance.
+      # Funded LucidFlex has NO daily loss limit (see lucid.md); the eval DLL is shown here.
+      - name: LucidFlex
         accounts:
-          - { size: 50000,  max_daily_loss: 1000, max_contracts: 5,  trailing_drawdown: 2000 }
-          - { size: 100000, max_daily_loss: 2000, max_contracts: 10, trailing_drawdown: 3000 }
-          - { size: 150000, max_daily_loss: 3000, max_contracts: 15, trailing_drawdown: 4500 }
-
-  - name: Apex Trader Funding
-    context_file: apex.md
-    # Apex has NO daily loss limit — only a trailing drawdown. max_daily_loss is omitted, so the
-    # bridge keeps your configured daily loss as a self-imposed guardrail.
-    account_types:
-      - name: Evaluation
+          - {size: 25000,  max_contracts: 20,  profit_target: 1250, trailing_drawdown: 1000}
+          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000}
+          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000}
+          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500}
+      # LucidDirect — direct-to-funded; daily loss limit + a 20% consistency rule (see lucid.md).
+      - name: LucidDirect
         accounts:
-          - { size: 25000,  max_contracts: 4,  profit_target: 1500,  trailing_drawdown: 1500 }
-          - { size: 50000,  max_contracts: 10, profit_target: 3000,  trailing_drawdown: 2500 }
-          - { size: 100000, max_contracts: 14, profit_target: 6000,  trailing_drawdown: 3000 }
-          - { size: 150000, max_contracts: 17, profit_target: 9000,  trailing_drawdown: 5000 }
-          - { size: 250000, max_contracts: 27, profit_target: 15000, trailing_drawdown: 6500 }
-
-  - name: TakeProfitTrader
-    context_file: takeprofittrader.md
-    account_types:
-      - name: PRO
-        accounts:
-          - { size: 25000,  max_daily_loss: 500,  max_contracts: 3,  profit_target: 1500, trailing_drawdown: 1500 }
-          - { size: 50000,  max_daily_loss: 1100, max_contracts: 6,  profit_target: 3000, trailing_drawdown: 2000 }
-          - { size: 100000, max_daily_loss: 2200, max_contracts: 12, profit_target: 6000, trailing_drawdown: 3000 }
-          - { size: 150000, max_daily_loss: 3300, max_contracts: 15, profit_target: 9000, trailing_drawdown: 4500 }
+          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000}
+          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000}
+          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500}

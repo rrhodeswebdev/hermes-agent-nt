@@ -32,7 +32,7 @@ Loaded *verbatim* into the system prompt in both strategy modes.
 
 ### `prop-firms/` — prop-firm rulebooks (committed)
 
-One plain-English `*.md` per prop firm (`topstep.md`, `apex.md`, …). Selecting a firm + account
+One plain-English `*.md` per prop firm (e.g. `lucid.md`). Selecting a firm + account
 in the dashboard loads **only that one file** into the prompt (on top of the framework) so the
 brain trades within the firm's rules. Kept **outside** `context/` on purpose so the framework
 loader's directory glob never concatenates every firm's file. The firm CATALOG (firms -> account
