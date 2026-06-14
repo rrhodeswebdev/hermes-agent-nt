@@ -26,7 +26,7 @@ def _engine(cfg, tmp_path):
     bars = synthetic_bars(60)
     for b in bars:
         eng.store.append(b)
-    eng.last_context = build_context(bars, ema_fast=9, ema_slow=21, atr_period=14)
+    eng.last_context = build_context(bars, atr_period=14)
     return eng, js, bars
 
 

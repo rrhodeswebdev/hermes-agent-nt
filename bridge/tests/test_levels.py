@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 from hermes_bridge.config import BridgeConfig
 from hermes_bridge.levels import detect_levels
 from hermes_bridge.server import create_app
-from tests.conftest import make_range_bar as _bar, synthetic_bars
+from tests.conftest import make_range_bar as _bar
+from tests.conftest import synthetic_bars
 
 
 def test_no_pivots_returns_empty():
@@ -92,9 +93,9 @@ def test_levels_exposed_after_bars(tmp_path):
                                     "bar": b.model_dump()})
     lv = c.get("/dashboard").json()["levels"]
     assert lv is not None
-    # EMAs are always populated once warmed up; swing_high/low keys exist (may be None
-    # depending on structure). The /levels.txt endpoint emits key=value lines, no JSON.
-    assert lv["ema_fast"] is not None and lv["ema_slow"] is not None
-    assert "swing_high" in lv and "swing_low" in lv
+    # Levels are the swing S/R now (no EMAs). With this much oscillating history the
+    # swings are confirmed. The /levels.txt endpoint emits key=value lines, no JSON.
+    assert lv["swing_high"] is not None and lv["swing_low"] is not None
+    assert "ema_fast" not in lv and "ema_slow" not in lv
     txt = c.get("/levels.txt").text
-    assert "ema_fast=" in txt
+    assert "swing_high=" in txt and "ema_fast=" not in txt

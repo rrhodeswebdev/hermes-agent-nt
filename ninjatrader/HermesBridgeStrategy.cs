@@ -91,6 +91,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         public bool AllowLive { get; set; } = false;
 
+        // Strategy source toggle. TRUE (default): the agent AUTHORS its own playbook from
+        // this chart's historical bars and trades that. FALSE: the agent invents nothing
+        // and trades the user's own playbooks (hermes/context/strategies/**); empty dirs
+        // mean it simply WAITs. Reported to the bridge (/ingest/account) BEFORE history so
+        // the pre-session study knows which mode to run in. Safety (risk gate, brackets,
+        // the AllowLive account guard) is identical either way.
+        [NinjaScriptProperty]
+        public bool UseAgentStrategies { get; set; } = true;
+
         // Windows timezone id of the CHART's "Time zone" setting (what Time[0] is
         // expressed in). "Eastern Standard Time" = US ET incl. DST. If the bridge logs
         // a bar.ts skew warning, set this to match the chart.
@@ -262,12 +271,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // dashboard/logs follow the chart's account selection, not the static
                 // config default. Done unconditionally (even if SendHistory is off).
                 GuardAccount();
-                _ = ReportAccountAsync();
-                // Transitioned historical → realtime: ship the full history once.
+                // Transitioned historical → realtime: ship the full history once. The
+                // account report (which carries UseAgentStrategies) must land BEFORE the
+                // history POST, because the history triggers the bridge's pre-session
+                // study — and that study must already know whether to author a playbook
+                // (agent) or use the on-disk ones (custom). Build the payload here on the
+                // strategy thread (series access is unsafe from the HTTP continuation),
+                // then report-then-post.
                 if (SendHistory && !historySent)
                 {
                     historySent = true;
-                    _ = PostHistoryAsync();
+                    string histBody = BuildHistoryPayload();
+                    _ = ReportThenHistoryAsync(histBody);
+                }
+                else
+                {
+                    _ = ReportAccountAsync();
                 }
             }
             else if (State == State.Terminated)
@@ -324,7 +343,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Self-healing history handshake: history is normally pushed once per
                 // ENABLE, so a bridge restarted mid-session has an empty bar store (it
-                // then computes EMAs/ATR on a thin live seed — 2026-06-11 incident).
+                // then reads swing structure / ATR on a thin live seed — 2026-06-11 incident).
                 // The bridge flags need_history on every bar response until
                 // /ingest/history arrives; re-send it, throttled.
                 if (resp != null && resp.Contains("\"need_history\":true"))
@@ -361,31 +380,62 @@ namespace NinjaTrader.NinjaScript.Strategies
             Print("Hermes: bridge requested a history re-send (bridge restarted?) — pushing.");
             // Build the payload on the strategy thread — series access (Bars.GetTime
             // et al.) is not safe from the HTTP continuation's pool thread. A restarted
-            // bridge also lost the reported account, so re-send that too.
-            TriggerCustomEvent(o => { _ = ReportAccountAsync(); _ = PostHistoryAsync(); }, null);
+            // bridge also lost the reported account + strategy source, so re-send both
+            // (account first) before the history re-triggers the pre-session study.
+            TriggerCustomEvent(o =>
+            {
+                string histBody = BuildHistoryPayload();
+                _ = ReportThenHistoryAsync(histBody);
+            }, null);
         }
 
-        private async Task PostHistoryAsync()
+        private int _lastHistCount;   // bar count of the last BuildHistoryPayload (for logging)
+
+        // Build the /ingest/history JSON on the STRATEGY thread. Series access
+        // (Bars.GetTime et al.) is unsafe from an HTTP continuation's pool thread, so the
+        // payload is built synchronously here and the string handed to the async poster.
+        private string BuildHistoryPayload()
         {
+            var sb = new StringBuilder();
+            sb.Append("{\"instrument\":\"").Append(Escape(Instrument.FullName))
+              .Append("\",\"timeframe\":\"").Append(Escape(BarsPeriodString()))
+              .Append("\",\"bars\":[");
+            int last = CurrentBar; // last closed historical bar
+            bool first = true;
+            for (int i = 0; i <= last; i++)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append(BarJson(
+                    EpochSeconds(Bars.GetTime(i)), Bars.GetOpen(i), Bars.GetHigh(i),
+                    Bars.GetLow(i), Bars.GetClose(i), Bars.GetVolume(i)));
+            }
+            sb.Append("]}");
+            _lastHistCount = last + 1;
+            return sb.ToString();
+        }
+
+        // Report the account + strategy source, THEN post the pre-built history. The
+        // ordering matters: the bridge's pre-session study (triggered by the history)
+        // must already know the strategy source. Awaiting the account POST guarantees the
+        // bridge processed it before the history arrives.
+        private async Task ReportThenHistoryAsync(string histBody)
+        {
+            // Enforce the ordering contract: if the account report did not reach the bridge,
+            // do NOT post history — the pre-session study it triggers would run without knowing
+            // the strategy source. Skipping leaves the bridge's bar store empty, so it keeps
+            // flagging need_history and the bar handshake (MaybeResendHistory) retries
+            // account-then-history shortly.
+            if (!await ReportAccountAsync())
+            {
+                Print("Hermes: account report failed — deferring history (will retry via handshake).");
+                return;
+            }
             try
             {
-                var sb = new StringBuilder();
-                sb.Append("{\"instrument\":\"").Append(Escape(Instrument.FullName))
-                  .Append("\",\"timeframe\":\"").Append(Escape(BarsPeriodString()))
-                  .Append("\",\"bars\":[");
-                int last = CurrentBar; // last closed historical bar
-                bool first = true;
-                for (int i = 0; i <= last; i++)
-                {
-                    if (!first) sb.Append(',');
-                    first = false;
-                    sb.Append(BarJson(
-                        EpochSeconds(Bars.GetTime(i)), Bars.GetOpen(i), Bars.GetHigh(i),
-                        Bars.GetLow(i), Bars.GetClose(i), Bars.GetVolume(i)));
-                }
-                sb.Append("]}");
-                await PostAsync("/ingest/history", sb.ToString());
-                Print(string.Format("Hermes: sent {0} historical bars to {1}", last + 1, BaseUrl));
+                await PostAsync("/ingest/history", histBody);
+                Print(string.Format("Hermes: sent {0} historical bars to {1}",
+                    _lastHistCount, BaseUrl));
             }
             catch (Exception ex)
             {
@@ -398,20 +448,26 @@ namespace NinjaTrader.NinjaScript.Strategies
         // logs — NinjaTrader's account guard (GuardAccount) is the real execution
         // interlock. The name is whatever is selected in the strategy dialog, so the rest
         // of the tool follows the chart's account selection automatically.
-        private async Task ReportAccountAsync()
+        // Returns true only if the bridge acknowledged the POST — callers that must
+        // preserve the account-before-history ordering (ReportThenHistoryAsync) gate on it.
+        private async Task<bool> ReportAccountAsync()
         {
             try
             {
                 string name = Account != null ? Account.Name : "";
                 string body = string.Format(
-                    "{{\"account\":\"{0}\",\"allow_live\":{1}}}",
-                    Escape(name), AllowLive ? "true" : "false");
+                    "{{\"account\":\"{0}\",\"allow_live\":{1},\"use_agent_strategies\":{2}}}",
+                    Escape(name), AllowLive ? "true" : "false",
+                    UseAgentStrategies ? "true" : "false");
                 await PostAsync("/ingest/account", body);
-                Print("Hermes: reported account '" + name + "' to bridge.");
+                Print("Hermes: reported account '" + name + "' to bridge (agent_strategies="
+                    + (UseAgentStrategies ? "on" : "off") + ").");
+                return true;
             }
             catch (Exception ex)
             {
                 Print("Hermes bridge account report error: " + ex.Message);
+                return false;
             }
         }
 
@@ -667,6 +723,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             public bool Ok;
             public string Instrument = "", Timeframe = "", Agent = "", Model = "", StrategyId = "";
+            // Agent-authored strategy: source ("agent"/"custom"), the headline name/summary
+            // (= the active setup), how the active setup was chosen ("declared" by the brain
+            // vs "regime" fallback), and every authored setup as name|regime|summary|active.
+            public string StrategySource = "", StrategyName = "", StrategySummary = "", StrategyActiveSource = "";
+            public List<string[]> StrategyRows = new List<string[]>();  // name|regime|summary|active
+            // Authoring telemetry (re-author observability): how many playbooks have installed
+            // (count ticks => the strategy refreshed), how long ago, and why the latest fired.
+            // Count < 0 means the bridge sent no telemetry (old bridge / never authored).
+            public int StrategyAuthoredCount = -1, StrategyAuthoredBarsAgo = -1;
+            public string StrategyAuthoredReason = "";
+            // Planner / study health, so a re-author that never lands is visible on the card.
+            public string PlannerStatus = "", PlannerError = "", SessionError = "";
             public double AgeS = double.NaN, LastClose = double.NaN;
             public int Position, Trades;
             public double AvgPrice = double.NaN, Realized, Unrealized;
@@ -699,7 +767,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                     case "timeframe":    p.Timeframe = v; break;
                     case "agent":        p.Agent = v; break;
                     case "model":        p.Model = v; break;
-                    case "strategy_id":  p.StrategyId = v; break;
+                    case "strategy_id":      p.StrategyId = v; break;
+                    case "strategy_source":         p.StrategySource = v; break;
+                    case "strategy_name":           p.StrategyName = v; break;
+                    case "strategy_summary":        p.StrategySummary = v; break;
+                    case "strategy_active_source":  p.StrategyActiveSource = v; break;
+                    case "strategy_row":
+                        var sp = v.Split('|');               // name|regime|summary|active
+                        if (sp.Length >= 4) p.StrategyRows.Add(sp);
+                        break;
+                    case "strategy_authored_count":     p.StrategyAuthoredCount = (int)NumOr(v, -1); break;
+                    case "strategy_authored_bars_ago":  p.StrategyAuthoredBarsAgo = (int)NumOr(v, -1); break;
+                    case "strategy_authored_reason":    p.StrategyAuthoredReason = v; break;
+                    case "planner_status":              p.PlannerStatus = v; break;
+                    case "planner_error":               p.PlannerError = v; break;
+                    case "session_error":               p.SessionError = v; break;
                     case "age_s":        p.AgeS = Num(v); break;
                     case "last_close":   p.LastClose = Num(v); break;
                     case "position":     p.Position = (int)NumOr(v, 0); break;
@@ -1186,7 +1268,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             float s = Math.Max(0.5f, FontSize / 12f);
             _s = s;
             float x0 = ChartPanel.X + 12f, y0 = ChartPanel.Y + 12f;
-            float w = 340f * s, pad = 14f * s;
+            float w = 420f * s, pad = 14f * s;
             float xL = x0 + pad, xR = x0 + w - pad, innerW = xR - xL;
             float y = y0 + pad;
 
@@ -1240,6 +1322,58 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             AddText(Join(" · ", p.Agent, p.Model, p.StrategyId), _fSub, xL, y, ColDim);
             y += 20f * s;
+
+            // ---- agent-authored strategies (every setup; the live-regime one highlighted) ---
+            AddText("STRATEGY", _fLabel, xL, y, ColDim);
+            y += 17f * s;
+            if (p.StrategyRows.Count > 0)
+            {
+                foreach (var sr in p.StrategyRows)   // name|regime|summary|active
+                {
+                    string nm = sr[0], regime = sr[1], summary = sr[2];
+                    bool active = sr.Length > 3 && sr[3] == "1";
+                    string head = (active ? "▸ " : "· ") + nm
+                        + (regime.Length > 0 ? "  (" + regime + ")" : "");
+                    AddText(head, _fBodyB, xL, y, active ? ColGreen : ColText);
+                    if (active)   // "TRADING" when the brain named this setup; else regime match
+                        AddTextRight(p.StrategyActiveSource == "declared" ? "TRADING" : "ACTIVE",
+                            _fLabel, xR, y + 1f * s, ColGreen);
+                    y += 16f * s;
+                    if (summary.Length > 0)
+                    {
+                        AddText(summary, _fRat, xL + 12f * s, y, ColMuted, innerW - 12f * s);
+                        y += 15f * s;   // one ellipsized line per setup
+                    }
+                }
+            }
+            else
+            {
+                string fb = p.StrategySource == "agent" ? "authoring…"
+                          : p.StrategySource == "custom" ? "custom playbooks" : "—";
+                AddText(fb, _fBody, xL, y, ColMuted);
+                y += 16f * s;
+            }
+            // Authoring telemetry + study health: watch the count tick to confirm the playbook
+            // is refreshing; an analyzing_session status or a red session error shows a
+            // re-author in flight / failed (previously the card had no signal for either).
+            if (p.StrategyAuthoredCount >= 0)
+            {
+                string ago = p.StrategyAuthoredBarsAgo >= 0
+                    ? p.StrategyAuthoredBarsAgo + "b ago" : "just now";
+                AddText("authored " + p.StrategyAuthoredCount + "x · " + ago, _fSub, xL, y, ColDim);
+                if (p.PlannerStatus.Length > 0)
+                    AddTextRight(p.PlannerStatus, _fSub, xR, y,
+                        p.PlannerStatus == "analyzing_session" ? ColAmber : ColDim);
+                y += 14f * s;
+                string why = p.SessionError.Length > 0 ? p.SessionError
+                           : p.StrategyAuthoredReason;
+                if (why.Length > 0)
+                {
+                    AddText(why, _fRat, xL + 12f * s, y,
+                        p.SessionError.Length > 0 ? ColRed : ColMuted, innerW - 12f * s);
+                    y += 14f * s;
+                }
+            }
             Divider(xL, xR, ref y);
 
             // ---- position + last price ------------------------------------------
@@ -1340,8 +1474,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             Divider(xL, xR, ref y);
 
             // ---- recent decisions table -----------------------------------------
-            float cTime = xL, cAct = xL + 62f * s, cConf = xL + 148f * s,
-                  cClose = xL + 192f * s, cOrd = xL + 258f * s;
+            // Columns are anchored to innerW (fractions, not fixed px) so the ORDER
+            // column — drawn left-aligned and unbounded — always lands inside the card
+            // and can't run off the right edge if the card width changes again.
+            float cTime = xL, cAct = xL + innerW * 0.17f, cConf = xL + innerW * 0.44f,
+                  cClose = xL + innerW * 0.57f, cOrd = xL + innerW * 0.79f;
             AddText("TIME", _fLabel, cTime, y, ColDim);
             AddText("ACTION", _fLabel, cAct, y, ColDim);
             AddText("CONF", _fLabel, cConf, y, ColDim);

@@ -1,29 +1,41 @@
 # Strategy — Regime-Routed Playbooks
 
-You trade **only** the setups defined in the playbooks below, and only in the regime
-each playbook is built for. If the current market does not match a playbook's regime
-and entry conditions, you WAIT. Most bars are WAIT.
+You trade **only** the setups defined in the **ACTIVE PLAYBOOK**, and only in the regime
+that playbook is built for. The active playbook is whichever the operator selected:
+
+- **Agent-authored** (`UseAgentStrategies` on): the playbook YOU wrote from this
+  instrument's pre-session history study, supplied below under
+  "=== ACTIVE STRATEGY ===". It is binding — trade its named setups and nothing else.
+- **Custom** (`UseAgentStrategies` off): the operator's own playbook files for each
+  regime (inlined above from `strategies/trending/` and `strategies/ranging/`). If a
+  regime has no file, there is **no setup for that regime — WAIT**.
+
+If the current market does not match the active playbook's regime and entry conditions,
+you WAIT. Most bars are WAIT.
 
 ## Decision flow (every analysis)
 
 1. **Classify the regime first** (market-regime.md): trending, ranging, or
    transitional/unclear. This is the master switch — never pick a trade before it.
-2. **Open the matching playbook** (inlined below under "Playbook"):
-   - Trending → *Trend Pullback* or *Breakout Continuation*.
-   - Ranging → *Range Fade* or *Failed Breakout*.
-   - Transitional/unclear → **no playbook exists. WAIT.**
-3. **Check the playbook's entry conditions** — ALL of them. One missing condition is
+2. **Open the matching setup in the active playbook**:
+   - Trending → the active playbook's trending setup(s).
+   - Ranging → the active playbook's ranging setup(s).
+   - Transitional/unclear, or no setup exists for this regime → **WAIT.**
+3. **Check that setup's entry conditions** — ALL of them. One missing condition is
    a WAIT, not a discount.
 4. **Size and bracket per the hard rules below**, then act (or arm the plan).
 
 ## Definitions (provided to you each bar in `context`)
 
-- `trend` — `up` when fast EMA > slow EMA, `down` when fast EMA < slow EMA. A crude
-  filter only; your structural read overrides it (see market-regime.md).
-- `ema_fast`, `ema_slow` — the moving averages (defaults 9 / 21).
+- `regime` — `trending` / `ranging` / `transitional`, read from swing **structure**
+  (HH+HL vs LH+LL vs contained/mixed), not moving averages (see market-regime.md).
+- `trend` — `up` / `down` / `flat`, the structural direction (flat unless trending).
+  A mechanical first read; confirm it against the bars and `recent_pivots`.
+- `recent_pivots` — the recent confirmed swing pivots `(price, "high"/"low")`, oldest
+  first — the structure the regime read is based on.
 - `atr` — Average True Range; your unit of "normal" movement.
 - `recent_delta` — cumulative order-flow delta over the recent window (order-flow.md).
-- `swing_high`, `swing_low` — the last confirmed pivots (structure).
+- `swing_high`, `swing_low` — the last confirmed pivots (structure / nearest S/R).
 
 ## Hard rules (apply to EVERY playbook; never relaxed)
 

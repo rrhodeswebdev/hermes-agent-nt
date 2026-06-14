@@ -21,7 +21,12 @@ from pydantic import BaseModel
 
 from . import __version__
 from .agent_client import build_agent_client
-from .config import BridgeConfig, effective_entry_freshness_s, load_config
+from .config import (
+    BridgeConfig,
+    effective_entry_freshness_s,
+    load_config,
+    timeframe_seconds,
+)
 from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
 from .journal import JournalStore
@@ -48,6 +53,51 @@ def is_stale_entry(action: Action, elapsed_s: float, budget_s: float) -> bool:
     """An ENTRY whose decision took >= budget is stale; exits/flatten are never stale."""
     return (budget_s > 0 and elapsed_s >= budget_s
             and action in (Action.ENTER_LONG, Action.ENTER_SHORT))
+
+
+def current_regime(context) -> str | None:
+    """The structural regime on the latest bar's context — "trending" / "ranging" /
+    "transitional" (read from swing structure, not EMAs; see indicators.classify_regime),
+    or None if there is no context yet. These are the same labels the agent tags its
+    setups with, so the dashboard can match the active setup to the live regime."""
+    return getattr(context, "regime", None)
+
+
+def strategy_list_with_active(
+    strategies: list[dict] | None, regime: str | None, declared: str | None = None
+) -> tuple[list[dict], int | None, str | None]:
+    """Display items ``[{name, regime, summary, active}]`` for every authored setup, the
+    index of the active one, and how it was chosen ("declared"/"regime"/None).
+
+    The brain's own ``declared`` setup name (from the armed plan) wins — that is the setup
+    it says it is trading. Failing that (no plan yet, waiting, or an unrecognized name) the
+    setup whose regime matches the live ``regime`` is used. First match wins; with no setups
+    or neither signal, none is active."""
+    items = [
+        {
+            "name": s.get("name", ""),
+            "regime": s.get("regime", "") or "",
+            "summary": s.get("summary", "") or "",
+            "active": False,
+        }
+        for s in (strategies or [])
+    ]
+    active_index: int | None = None
+    source: str | None = None
+    if declared:
+        key = declared.strip().lower()
+        for i, it in enumerate(items):
+            if it["name"].strip().lower() == key:
+                active_index, source = i, "declared"
+                break
+    if active_index is None and regime:
+        for i, it in enumerate(items):
+            if it["regime"] == regime:
+                active_index, source = i, "regime"
+                break
+    if active_index is not None:
+        items[active_index]["active"] = True
+    return items, active_index, source
 
 
 # Below this many stored bars, every /ingest/bar response carries need_history=True so
@@ -94,6 +144,10 @@ class AppState:
         )
         self.risk = RiskGate(config)
         self.agent = build_agent_client(config)
+        # Strategy source NinjaTrader reports (UseAgentStrategies toggle), overriding the
+        # config default at runtime. None until the strategy first reports.
+        self.reported_strategy_source: str | None = None
+        self.agent.set_strategy_source(config.strategies.source)
         # Background worker: analyses run between bars, never on the ingest path.
         self.planner = Planner(config, self.agent) if config.planner.enabled else None
         self.journal = JournalStore(config.learning.journal_path)
@@ -116,6 +170,11 @@ class AppState:
     def effective_account(self) -> str:
         """Live NT account if the strategy has reported one, else the config default."""
         return self.reported_account or self.cfg.execution.account
+
+    def effective_strategy_source(self) -> str:
+        """NT-reported strategy source (UseAgentStrategies) if any, else the config
+        default. "agent" = brain authors its own playbook; "custom" = on-disk playbooks."""
+        return self.reported_strategy_source or self.cfg.strategies.source
 
     def _on_trade_closed(self, trade) -> None:
         lc = self.cfg.learning
@@ -178,6 +237,7 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "allow_live": cfg.execution.allow_live,
             "account": st.effective_account(),
             "nt_allow_live": st.reported_allow_live,
+            "strategy_source": st.effective_strategy_source(),
         }
 
     @app.get("/session/status", response_model=AccountState)
@@ -209,14 +269,98 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         )
         return {"levels": [z.model_dump() for z in zones]}
 
+    @app.get("/strategy")
+    def strategy(request: Request) -> dict:
+        """The active playbook so you can SEE what the agent invented (or which custom
+        files are loaded). In agent mode: the self-authored playbook + the file it was
+        persisted to. In custom mode: the concatenated on-disk playbooks (null if the
+        strategies/ dirs are empty)."""
+        st = _state(request)
+        source = st.effective_strategy_source()
+        if source == "agent":
+            playbook = st.agent.generated_strategy()
+            return {
+                "source": "agent",
+                **_strategy_block(st),
+                "path": getattr(st.agent, "_generated_path", None),
+                "playbook": playbook,
+            }
+        from .agent_client import load_playbook_files
+        playbook = load_playbook_files(cfg.agent.claude.context_dir) or None
+        return {"source": "custom", "generated": False, "name": None, "summary": None,
+                "regime": None, "active_index": None, "active_source": None, "list": [],
+                "path": None, "playbook": playbook}
+
     # ---- dashboard -----------------------------------------------------------
+    def _declared_strategy(st: AppState) -> str | None:
+        """The setup name the brain says it is trading, from the currently armed plan
+        (agent mode). None when there is no planner / no plan / it named none."""
+        if st.planner is None:
+            return None
+        plan = st.planner.current_plan()
+        if plan is None:
+            return None
+        return (getattr(plan, "active_strategy", "") or "").strip() or None
+
+    def _strategy_block(st: AppState) -> dict:
+        """The agent-authored strategy for the dashboards: every named setup the agent
+        wrote (``list``), the live regime, and which setup is active — the one the brain
+        declared in its plan, else the one matching the regime (``active_source`` says
+        which). ``name``/``summary`` are a single-line headline = the active setup (else the
+        first), for the legacy panel keys. All display-only — never gates trading."""
+        if st.effective_strategy_source() != "agent":
+            # Custom mode trades the on-disk playbooks, not an authored roster. The agent
+            # client keeps its last authored list cached across a runtime source toggle, so
+            # gate on the effective source here — never list a stale agent roster as if it
+            # were what's being traded.
+            return {"generated": False, "regime": None, "active_index": None,
+                    "active_source": None, "list": [], "name": None, "summary": None}
+        strategies = st.agent.generated_strategies()
+        regime = current_regime(st.engine.last_context)
+        items, active_index, active_source = strategy_list_with_active(
+            strategies, regime, _declared_strategy(st))
+        head = items[active_index] if active_index is not None else (items[0] if items else None)
+        return {
+            "generated": st.agent.generated_strategy() is not None,
+            "regime": regime,
+            "active_index": active_index,
+            "active_source": active_source,
+            "list": items,
+            "name": head["name"] if head else None,
+            "summary": head["summary"] if head else None,
+            # Authoring telemetry so a static-looking list can be told apart from a never-
+            # re-authored one: how many playbooks have installed, how long ago (in bars), and
+            # why the latest fired. None until the first author lands.
+            "authored": _authoring_view(st),
+        }
+
+    def _authoring_view(st: AppState) -> dict | None:
+        """The agent's authoring telemetry with the age expressed in bars of the live
+        timeframe (more meaningful than wall-clock and unit-consistent with the cadence
+        config). None when nothing has been authored yet."""
+        status = st.agent.authoring_status()
+        if not status:
+            return None
+        bars_ago: int | None = None
+        at = status.get("authored_at_bar_ts")
+        last = st.store.last()
+        if at and last is not None:
+            tf_s = timeframe_seconds(cfg.instrument.timeframe)
+            if tf_s > 0:
+                bars_ago = int(max(0.0, last.ts - at) // tf_s)
+        return {
+            "count": status.get("count", 0),
+            "reason": status.get("reason", ""),
+            "bars_ago": bars_ago,
+        }
+
     def _levels(st: AppState) -> dict | None:
-        """The agent's current support/resistance + EMAs (from the last bar's context)."""
+        """The agent's current swing support/resistance (from the last bar's context).
+        Regime now comes from structure, so there are no EMA lines to plot."""
         lc = st.engine.last_context
         if lc is None:
             return None
-        return {"swing_high": lc.swing_high, "swing_low": lc.swing_low,
-                "ema_fast": lc.ema_fast, "ema_slow": lc.ema_slow}
+        return {"swing_high": lc.swing_high, "swing_low": lc.swing_low}
 
     def _agent_model() -> str:
         """Model label for the dashboard header (e.g. claude · sonnet)."""
@@ -234,6 +378,11 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "brain": st.engine.agent.describe(),
             "model": _agent_model(),
             "strategy_id": cfg.strategy_id,
+            "strategy_source": st.effective_strategy_source(),
+            # The agent-authored strategy for this session (agent mode): every named setup
+            # the brain wrote (`list`) and which one is active for the live regime, so the
+            # dashboard can show them all and highlight the active one. Display only.
+            "strategy": {"source": st.effective_strategy_source(), **_strategy_block(st)},
             "account": st.effective_account(),
             "instrument": cfg.instrument.symbol,
             "timeframe": cfg.instrument.timeframe,
@@ -354,7 +503,18 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         if name:
             st.reported_account = name
         st.reported_allow_live = report.allow_live
-        return {"ok": True, "account": st.effective_account()}
+        # Strategy source toggle (UseAgentStrategies). Reported before history so the
+        # pre-session study authors (agent) or skips authoring (custom) correctly.
+        if report.use_agent_strategies is not None:
+            source = "agent" if report.use_agent_strategies else "custom"
+            if source != st.reported_strategy_source:
+                print(f"[hermes-bridge] strategy source is now '{source}' "
+                      f"(NinjaTrader UseAgentStrategies={report.use_agent_strategies})",
+                      flush=True)
+            st.reported_strategy_source = source
+            st.agent.set_strategy_source(source)
+        return {"ok": True, "account": st.effective_account(),
+                "strategy_source": st.effective_strategy_source()}
 
     @app.post("/ingest/fill")
     def ingest_fill(request: Request, fill: Fill) -> dict:
@@ -438,6 +598,32 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
     @app.post("/control/curate")
     def control_curate(request: Request) -> dict:
         return {"ok": True, "applied": _state(request).reflector.curate()}
+
+    @app.post("/control/reauthor")
+    def control_reauthor(request: Request) -> dict:
+        """Force a FRESH pre-session study: re-author the agent playbook from the current
+        stored history without a bridge restart (agent mode only). Use this when you want a
+        new playbook within a running bridge — by default the study runs once per process and
+        a NinjaTrader re-enable reuses the existing one. The new study runs in the background;
+        the dashboard shows "authoring…" until it lands, and any open position stays protected
+        by its resting bracket meanwhile."""
+        st = _state(request)
+        if st.planner is None:
+            return {"ok": False, "note": "planner disabled; nothing to re-author"}
+        if st.effective_strategy_source() != "agent":
+            return {"ok": False, "note": "strategy source is custom; the agent authors nothing"}
+        bars = st.store.all()
+        if len(bars) < HISTORY_MIN_BARS:
+            return {"ok": False,
+                    "note": f"need >= {HISTORY_MIN_BARS} bars of history, have {len(bars)}"}
+        with st.lock:
+            st.planner.clear_session()           # so on_history re-runs the study, not skips it
+            st.agent.clear_generated_strategy()  # dashboard shows "authoring…" until the new lands
+            st.engine.on_history(bars)           # kick the fresh study + initial plan
+        print(f"[hermes-bridge] re-authoring agent strategy from {len(bars)} bars "
+              "(manual /control/reauthor)", flush=True)
+        return {"ok": True, "source": "agent", "bars": len(bars),
+                "status": st.planner.snapshot()["status"]}
 
     return app
 

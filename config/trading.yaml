@@ -17,9 +17,8 @@ instrument:
 
 # Deterministic strategy parameters (used by the rules/mock engine and shown to the LLM).
 strategy:
-  ema_fast: 9
-  ema_slow: 21
   atr_period: 14
+  swing_lookback: 3     # bars each side of a pivot to confirm a swing high/low (regime structure)
   atr_stop_mult: 1.5    # protective stop = 1.5 * ATR
   atr_target_mult: 2.0  # target = 2.0 * ATR (~1.33R)
   pullback_atr: 0.9     # RELAXED (test): wider tag tolerance → more pullbacks qualify (was 0.5)
@@ -82,6 +81,27 @@ planner:
   plan_timeout_s: 75           # budget for each between-bars plan analysis
   session_timeout_s: 180       # budget for the one-time pre-session history study
   max_plan_age_bars: 2         # a plan based on a bar this many closes old no longer fires
+
+# Where the regime playbooks (the swappable "strategy") come from. NinjaTrader's
+# UseAgentStrategies toggle OVERRIDES `source` at runtime (reported over /ingest/account);
+# this is just the default until the strategy connects.
+strategies:
+  source: agent                # agent: the brain authors its own playbook from the chart's
+                               #   pre-session history and trades that ("always use what it
+                               #   invented"). custom: trade the user's own playbook files
+                               #   under context/strategies/** (empty dirs => the agent WAITs).
+  generated_dir: hermes/generated  # authored playbooks written here (per-session + latest.md)
+                                   # for review; gitignored runtime artifacts.
+  max_chars: 6000              # cap on the authored playbook fed back into the system prompt
+  reauthor:                    # structure-driven re-authoring (agent mode): refresh the playbook
+    enabled: true             #   mid-session when the live market drifts off the authored read.
+    confirm_bars: 3            # a structural change (trend flip / uncovered regime) must persist
+                               #   this many closes before re-authoring (anti-thrash)
+    min_interval_bars: 10      # debounce floor — never re-author more often than this
+    max_interval_bars: 60      # freshness ceiling — re-author at least this often even when calm
+    retry_bars: 5              # if a study authored no playbook, re-attempt after this many bars
+    baseline_atr_period: 100   # longer-window ATR = the "normal" volatility reference (shock only)
+    shock_ratio: 2.0           # current/baseline ATR past this (or its inverse) = a volatility shock
 
 # Swing-pivot S/R zones — served at GET /levels for the chart overlay and included
 # in the plan-analysis prompt.

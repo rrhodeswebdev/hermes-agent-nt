@@ -27,6 +27,10 @@ CONTINUITY.md
 # Raw episodic trade journal (local runtime state)
 bridge/state/
 
+# Agent-authored strategies (session artifacts written at runtime; one per session +
+# latest.md). Local only — they are regenerated from the chart's history each session.
+hermes/generated/
+
 # Per-trader learned memory — stays local, never pushed (each dev/agent learns its own).
 # Templates ship as *.example.md; copy them to the live names to seed a fresh checkout.
 hermes/learned/trader-profile.md

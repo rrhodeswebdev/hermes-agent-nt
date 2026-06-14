@@ -53,12 +53,11 @@ class InstrumentConfig(BaseModel):
 
 
 class StrategyParams(BaseModel):
-    ema_fast: int = 9
-    ema_slow: int = 21
     atr_period: int = 14
+    swing_lookback: int = 3        # bars each side of a pivot to confirm a swing high/low
     atr_stop_mult: float = 1.5
     atr_target_mult: float = 2.0
-    pullback_atr: float = 0.5      # how deep a pullback to the fast EMA counts as a setup
+    pullback_atr: float = 0.5      # how close (in ATR) to the swing still counts as a pullback
     min_confidence: float = 0.55   # engine ignores Decisions below this confidence
 
 
@@ -148,6 +147,64 @@ class PlannerConfig(BaseModel):
     max_plan_age_bars: int = 2
 
 
+class ReauthorConfig(BaseModel):
+    """Structure-driven re-authoring (agent mode): when the brain re-runs the pre-session
+    study to refresh its playbook WHILE a session is live.
+
+    The playbook is a STRUCTURAL artifact (a regime read + setups built around specific
+    levels), so re-authoring is triggered by playbook *invalidation* — not by raw
+    volatility, which is orthogonal to whether the setups still fit:
+
+    - **trend flip**: the live trend turned opposite to the trend the playbook was authored
+      under (a long-biased uptrend playbook is simply wrong in a downtrend),
+    - **uncovered regime**: no authored setup is tagged for the live regime, so the brain is
+      benched with nothing to arm,
+    - **volatility shock** (secondary): an ATR spike/collapse mis-scales the playbook's
+      ATR-based stops/targets even when structure holds — kept because bracket sizing IS a
+      genuinely volatility-driven concern.
+
+    A structural change must persist ``confirm_bars`` closes before it fires, so a one-bar
+    wobble through "transitional" doesn't thrash the playbook. ``min_interval_bars`` is a hard
+    debounce floor; ``max_interval_bars`` is a freshness ceiling that re-authors even in a
+    calm, unchanging market. If the study failed to author any playbook, ``retry_bars``
+    re-attempts instead of leaving the brain stuck in WAIT. All intervals are in BARS, so they
+    auto-scale with the chart timeframe. Re-authoring is seamless: the old playbook keeps
+    trading until the new one lands (no WAIT gap)."""
+
+    enabled: bool = True
+    confirm_bars: int = 3            # a structural change must persist this many closes to fire
+    min_interval_bars: int = 10      # debounce floor — never re-author more often than this
+    max_interval_bars: int = 60      # freshness ceiling — re-author at least this often
+    retry_bars: int = 5              # re-attempt this many bars after a failed/empty author
+    baseline_atr_period: int = 100   # longer-window ATR = the "normal" volatility reference
+    shock_ratio: float = 2.0         # |current/baseline ATR| past this (or its inverse) = a shock
+
+
+class StrategyAuthoringConfig(BaseModel):
+    """Where the regime playbooks (the swappable "strategy") come from.
+
+    - ``custom``: load the user's own playbooks from ``context_dir/strategies/**`` — the
+      brain invents nothing (the legacy behavior). Empty dirs ⇒ no playbook ⇒ WAIT.
+    - ``agent``: the brain AUTHORS its own playbook from the one-time session history
+      study and trades that instead of any on-disk playbook ("always use what it
+      invented"). The framework files (regime/order-flow/risk/goal + hard rules) are
+      still loaded in both modes; only the regime playbooks are swapped.
+
+    NinjaTrader's ``UseAgentStrategies`` toggle overrides ``source`` at runtime (reported
+    over ``/ingest/account``), exactly like the reported account name overrides
+    ``execution.account``. Failure to author / not-yet-authored degrades to WAIT.
+    """
+
+    source: Literal["custom", "agent"] = "agent"
+    # Authored playbooks are written here (one file per session) for review/audit, plus a
+    # stable ``latest.md``. Created on demand. Gitignored — they are session artifacts.
+    generated_dir: str = "hermes/generated"
+    # Cap on the authored playbook fed back into the system prompt (keeps it bounded).
+    max_chars: int = 6000
+    # Structure-driven re-authoring cadence (agent mode).
+    reauthor: ReauthorConfig = Field(default_factory=ReauthorConfig)
+
+
 class LevelsConfig(BaseModel):
     """Swing-pivot S/R detection (levels.py) for `GET /levels` + the plan prompt."""
 
@@ -198,6 +255,7 @@ class BridgeConfig(BaseModel):
     session: SessionWindow = Field(default_factory=SessionWindow)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     planner: PlannerConfig = Field(default_factory=PlannerConfig)
+    strategies: StrategyAuthoringConfig = Field(default_factory=StrategyAuthoringConfig)
     levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)

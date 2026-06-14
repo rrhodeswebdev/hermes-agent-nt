@@ -26,7 +26,7 @@ def cfg() -> BridgeConfig:
     return BridgeConfig(
         strategy_id="test-es",
         instrument=InstrumentConfig(symbol="ES", timeframe="5m", tick_size=0.25, tick_value=12.5),
-        strategy=StrategyParams(ema_fast=9, ema_slow=21, atr_period=14, min_confidence=0.55),
+        strategy=StrategyParams(atr_period=14, swing_lookback=3, min_confidence=0.55),
         risk=RiskParams(
             max_contracts=2, max_risk_per_trade=250.0, max_trades_per_day=10,
             default_stop_ticks=16,
@@ -51,11 +51,13 @@ def make_range_bar(ts: float, hi: float, lo: float) -> Bar:
 
 
 def synthetic_bars(n: int = 400, start_ts: int = 1_700_000_000, step: int = 300) -> list[Bar]:
-    """Uptrend with periodic pullbacks toward the moving averages."""
+    """Uptrend with frequent pullbacks: a steady +0.5/bar drift plus a ~19-bar oscillation,
+    so even short windows print several higher-highs/higher-lows (readable swing structure)
+    and regular pullbacks for the rules client to enter on."""
     bars: list[Bar] = []
     for i in range(n):
-        base = 4000.0 + i * 0.5 + math.sin(i / 8.0) * 6.0
-        drift = 1.0 if math.cos(i / 8.0) > 0 else -0.8
+        base = 4000.0 + i * 0.5 + math.sin(i / 3.0) * 6.0
+        drift = 1.0 if math.cos(i / 3.0) > 0 else -0.8
         o = base
         c = base + drift
         h = max(o, c) + 1.0
@@ -78,9 +80,8 @@ def make_session(cfg: BridgeConfig) -> SessionState:
 def make_agent_request(cfg: BridgeConfig, mode: str = "seek_entry",
                        bars: list[Bar] | None = None) -> AgentRequest:
     bars = bars if bars is not None else synthetic_bars(120)
-    ctx = build_context(bars, ema_fast=cfg.strategy.ema_fast,
-                        ema_slow=cfg.strategy.ema_slow,
-                        atr_period=cfg.strategy.atr_period)
+    ctx = build_context(bars, atr_period=cfg.strategy.atr_period,
+                        swing_lookback=cfg.strategy.swing_lookback)
     return AgentRequest(mode=mode, context=ctx, recent_bars=bars,
                         account=make_session(cfg).account_state(mark_price=bars[-1].close))
 

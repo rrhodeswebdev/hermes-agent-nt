@@ -14,8 +14,8 @@ from tests.conftest import synthetic_bars
 
 def _req(cfg):
     bars = synthetic_bars(120)
-    ctx = build_context(bars, ema_fast=cfg.strategy.ema_fast,
-                        ema_slow=cfg.strategy.ema_slow, atr_period=cfg.strategy.atr_period)
+    ctx = build_context(bars, atr_period=cfg.strategy.atr_period,
+                        swing_lookback=cfg.strategy.swing_lookback)
     sess = SessionState(cfg.instrument.symbol, cfg.instrument.timeframe,
                         cfg.instrument.tick_size, cfg.instrument.tick_value,
                         cfg.daily_goal.profit_target, cfg.daily_goal.max_daily_loss)

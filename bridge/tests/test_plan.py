@@ -25,9 +25,11 @@ from hermes_bridge.store import BarStore
 from tests.conftest import (
     make_agent_request,
     make_claude_client,
-    make_close_bar as _bar,
     make_session,
     synthetic_bars,
+)
+from tests.conftest import (
+    make_close_bar as _bar,
 )
 
 
@@ -376,7 +378,7 @@ def test_mock_manage_plan_arms_trend_flip_exit(cfg):
     plan = MockAgentClient(cfg).propose_plan(preq)
     assert plan.mode == "manage_position"
     assert plan.triggers == []
-    assert plan.exit is not None and plan.exit.exit_below == preq.context.ema_slow
+    assert plan.exit is not None and plan.exit.exit_below == preq.context.swing_low
 
 
 def test_replay_with_planner_finds_entries(cfg):
@@ -428,6 +430,7 @@ def test_claude_session_brief_is_free_text(fake_claude):
     captured = fake_claude(
         json.dumps({"is_error": False, "result": "Regime: trending up. Key levels..."}))
     c = make_claude_client()
+    c.set_strategy_source("custom")  # the free-text brief is the custom-mode study
     brief = c.analyze_session(_preq(c.cfg), synthetic_bars(120))
     assert brief.startswith("Regime: trending up")
     assert "--json-schema" not in captured["cmd"]

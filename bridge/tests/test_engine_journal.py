@@ -27,7 +27,7 @@ def test_engine_on_fill_journals_round_trip(cfg, tmp_path):
     bars = synthetic_bars(60)
     for b in bars:
         eng.store.append(b)
-    ctx = build_context(bars, ema_fast=9, ema_slow=21, atr_period=14)
+    ctx = build_context(bars, atr_period=14)
     entry_px = bars[-1].close
     # Simulate the engine having approved an entry this bar (full memo shape — the
     # fill-time matcher checks cmd_id/ts/side before attributing the trade):

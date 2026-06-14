@@ -119,10 +119,16 @@ class AccountReport(BaseModel):
     """NinjaTrader tells the bridge which account its strategy is actually trading on,
     and whether live trading is permitted there. The bridge uses this for display /
     logging only (NinjaTrader's own account guard is the execution interlock), so the
-    dashboard and /health reflect the live account instead of the config default."""
+    dashboard and /health reflect the live account instead of the config default.
+
+    `use_agent_strategies` carries the strategy's UseAgentStrategies toggle: True ⇒ the
+    brain authors its own playbook ("agent" source), False ⇒ use the on-disk user
+    playbooks ("custom"). None means the strategy didn't report it (keep the config
+    default). Reported before history so the source is known when the study runs."""
 
     account: str = ""
     allow_live: bool = False
+    use_agent_strategies: bool | None = None
 
 
 class Level(BaseModel):

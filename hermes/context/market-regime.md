@@ -8,41 +8,39 @@ before you have answered "**what kind of market is this?**"
 
 ## What you classify from
 
-You receive each bar: `trend` (EMA cross), `ema_fast` (9), `ema_slow` (21), `atr` (14),
-`swing_high`, `swing_low`, `recent_delta`, and the last ~30 bars of OHLCV. The features
-are computed over a longer window than the raw bars show — they are your link to the
-historical baseline. The `trend` field is a **crude filter only** — inside a range the
-EMAs whipsaw and will happily say "up" or "down". Your structural read of the bars
-overrides the label.
+You receive each bar: `regime` (trending / ranging / transitional) and `trend`
+(up / down / flat) read from swing **structure**, `recent_pivots` (the actual swing
+highs/lows the read is built from), `atr` (14), `swing_high`, `swing_low`, `recent_delta`,
+and the last ~30 bars of OHLCV. The features are computed over a longer window than the raw
+bars show — they are your link to the historical baseline. The `regime`/`trend` labels are
+a **mechanical first read** (it compares the last couple of swing highs and lows); confirm
+it against the bars and `recent_pivots` yourself, and downgrade to transitional the moment
+the structure turns mixed.
 
 ## The three regimes
 
 ### Trending (up or down)
 
-- **Structure**: a chain of higher highs + higher lows (up) or lower highs + lower
-  lows (down) across the recent bars. Swings keep *advancing*.
-- **EMAs**: fast clearly separated from slow (spread ≳ 0.5 × ATR) and both sloping the
-  same way; price spends most bars on ONE side of the fast EMA, and pullbacks to it
-  hold.
+- **Structure** (the read): a chain of higher highs + higher lows (up) or lower highs +
+  lower lows (down) across `recent_pivots`. Swings keep *advancing*, and each pullback
+  holds above the prior higher-low (up) / below the prior lower-high (down).
 - **Bars**: directional bars with bodies in the trend direction outnumber and out-size
   counter-trend bars; pullbacks are shallow (2–5 bars, overlapping, small bodies).
 - **Flow**: `recent_delta` persistently agrees with the direction.
-- → Open `strategies/trending/`.
+- → Apply the active playbook's **trending** setup(s) (strategy.md).
 
 ### Ranging
 
-- **Structure**: swings stop advancing. Highs form near prior highs, lows near prior
-  lows — a horizontal box. `swing_high` and `swing_low` act as the box edges and have
-  each been respected at least twice.
-- **EMAs**: flat, braided, repeatedly crossing; spread ≲ 0.5 × ATR; price oscillates
-  freely through both EMAs without follow-through.
+- **Structure** (the read): swings stop advancing — highs form near prior highs, lows
+  near prior lows (a horizontal box). `swing_high` and `swing_low` are the box edges and
+  have each been respected at least twice.
 - **Bars**: heavy overlap, frequent direction flips, wicks at the edges; pushes toward
   an edge stall instead of extending.
 - **Flow**: delta flips sign frequently; strong delta into an edge produces little
   price progress (absorption).
 - **Tradeable only if the box is wide enough**: edge-to-edge ≳ 3 × ATR. A narrower box
   cannot pay for its stop — stand aside.
-- → Open `strategies/ranging/`.
+- → Apply the active playbook's **ranging** setup(s) (strategy.md).
 
 ### Transitional / unclear (no playbook — WAIT)
 
@@ -59,12 +57,12 @@ overrides the label.
 ## Current vs. historical — always anchor the read
 
 Classify the **current** behavior against the longest baseline you have. The raw bars
-show the last ~30; `atr`, the EMAs, and the swings summarize the longer window — use
-them as the historical anchor:
+show the last ~30; `atr`, `recent_pivots`, and the swings summarize the longer window —
+use them as the historical anchor:
 
 - **Volatility context**: compare the last few bars' ranges to `atr` (the recent
   norm). Bars running well **below** ATR = compression — inside a range it often
-  precedes a breakout (be ready for the `failed-breakout` vs `breakout-continuation`
+  precedes a breakout (be ready for the failed-breakout vs breakout-continuation
   resolution). Bars suddenly running far **above** ATR = a volatility shock; after a
   long trend leg, expansion usually marks exhaustion, not acceleration.
 - **Location in the bigger picture**: where is `last_close` relative to `swing_high`
