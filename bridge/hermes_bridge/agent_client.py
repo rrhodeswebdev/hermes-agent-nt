@@ -32,7 +32,7 @@ if TYPE_CHECKING:  # plan.py imports this module at runtime; annotations only he
     from .plan import PlanRequest, TradePlan
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentRequest:
     mode: Mode
     context: MarketContext

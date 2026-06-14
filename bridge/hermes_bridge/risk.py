@@ -30,7 +30,7 @@ from .session import SessionState
 from .stops import clamp_stop_ticks, size_for_confidence, vol_stop_floor_ticks
 
 
-@dataclass
+@dataclass(frozen=True)
 class RiskDecision:
     approved: bool
     command: OrderCommand | None

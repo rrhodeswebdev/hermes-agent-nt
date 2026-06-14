@@ -20,17 +20,17 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from .agent_client import AgentRequest
-from .models import Action, Bar, BrainTimeout, Decision, Level, Mode
+from .models import Action, Bar, BrainTimeout, Decision, FrozenModel, Level, Mode
 
 if TYPE_CHECKING:
     from .agent_client import AgentClient
     from .config import BridgeConfig
 
 
-class EntryTrigger(BaseModel):
+class EntryTrigger(FrozenModel):
     """One mechanical entry condition on the NEXT bar's close price.
 
     Fires when `min_close <= close <= max_close` (each bound optional, at least
@@ -71,7 +71,7 @@ class EntryTrigger(BaseModel):
         return f"{self.direction}[{' and '.join(parts) or 'never'}]"
 
 
-class ExitRule(BaseModel):
+class ExitRule(FrozenModel):
     """Invalidation thresholds for an open position, checked at the next close.
 
     The resting bracket in NinjaTrader still protects the trade intrabar; this
@@ -99,7 +99,7 @@ class ExitRule(BaseModel):
         return " or ".join(parts) or "none"
 
 
-class TradePlan(BaseModel):
+class TradePlan(FrozenModel):
     """What one analysis armed for the next bar close.
 
     `mode` and `based_on_bar_ts` are stamped by the bridge (never trusted from
@@ -166,7 +166,7 @@ def evaluate_plan(plan: TradePlan, bar: Bar, position: int) -> Decision:
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class PlanRequest(AgentRequest):
     """Snapshot handed to the between-bars analysis (built at bar close).
 
@@ -305,9 +305,9 @@ class Planner:
         if plan is None:
             self._set_status("error", "plan_analysis:no_plan_returned")
             return
-        # The bridge is authoritative for mode + basis bar; never trust the LLM.
-        plan.mode = preq.mode
-        plan.based_on_bar_ts = preq.bar_ts
+        # The bridge is authoritative for mode + basis bar; never trust the LLM. Stamp them
+        # by building a new plan (the models are frozen — values, not mutated in place).
+        plan = plan.model_copy(update={"mode": preq.mode, "based_on_bar_ts": preq.bar_ts})
         self.arm(plan)
 
     def arm(self, plan: TradePlan) -> None:

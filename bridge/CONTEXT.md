@@ -52,6 +52,12 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 
 - **Run everything from the venv:** `bridge/.venv/bin/pytest` and
   `bridge/.venv/bin/hermes-bridge …`. Tests must pass and `ruff` must be clean before commit.
+- **Value/message types are immutable (functional core).** `Bar`, `Decision`, `OrderCommand`,
+  `Fill`, `AccountState`, `Level` and friends (`MarketContext`, `TradePlan`, `EntryTrigger`,
+  `ExitRule`, `RiskDecision`, `EngineResult`, `ClosedTrade`, `AgentRequest`/`PlanRequest`) are
+  **frozen** — never assign to a field; build a changed instance with `model_copy(update=…)`
+  (Pydantic) or `dataclasses.replace(…)`. The mutable runtime state lives only in the shell
+  classes (`SessionState`, `BarStore`, `CommandQueue`, `Planner`, `TradeTracker`).
 - **The `RiskGate` is invariant.** Never add an order path that bypasses it. Config in
   `trading.yaml` is the enforced source of truth — context prose only guides the brain.
 - **Any brain failure degrades to `WAIT`;** open positions stay protected by the resting

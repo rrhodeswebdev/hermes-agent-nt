@@ -17,7 +17,7 @@ from .indicators import MarketContext
 from .models import Bar, Side
 
 
-@dataclass
+@dataclass(frozen=True)
 class ClosedTrade:
     entry_ts: float
     exit_ts: float

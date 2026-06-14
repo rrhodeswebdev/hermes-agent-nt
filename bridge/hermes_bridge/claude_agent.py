@@ -375,15 +375,15 @@ class ClaudeAgentClient(AgentClient):
             plan = TradePlan.model_validate(data)
         except Exception:  # noqa: BLE001 — malformed plan = no plan, never a crash
             return None
-        self._bind_plan_setups(plan)
-        return plan
+        return self._bind_plan_setups(plan)
 
-    def _bind_plan_setups(self, plan: TradePlan) -> None:
+    def _bind_plan_setups(self, plan: TradePlan) -> TradePlan:
         """Validate each trigger/exit ``setup`` against the authored roster (unknown → None,
-        never a guess) and derive ``plan.active_strategy`` from what is actually armed — the
-        first trigger carrying a setup (seek_entry) or the exit's setup (manage_position).
-        This is what makes the dashboard's highlighted setup the one the FIRING condition
-        belongs to, rather than a free-text label the brain could phrase any way."""
+        never a guess) and derive ``active_strategy`` from what is actually armed — the first
+        trigger carrying a setup (seek_entry) or the exit's setup (manage_position). This is
+        what makes the dashboard's highlighted setup the one the FIRING condition belongs to,
+        rather than a free-text label the brain could phrase any way. Returns a NEW plan (the
+        plan models are frozen — bound by copy, not in-place mutation)."""
         canon = {
             s["name"].strip().lower(): s["name"]
             for s in (self._generated_strategies or [])
@@ -393,14 +393,17 @@ class ClaudeAgentClient(AgentClient):
         def _canonical(name: str | None) -> str | None:
             return canon.get(name.strip().lower()) if name else None
 
-        for t in plan.triggers:
-            t.setup = _canonical(t.setup)
-        if plan.exit is not None:
-            plan.exit.setup = _canonical(plan.exit.setup)
-        armed = next((t.setup for t in plan.triggers if t.setup), None)
-        if armed is None and plan.exit is not None:
-            armed = plan.exit.setup
-        plan.active_strategy = armed
+        triggers = [t.model_copy(update={"setup": _canonical(t.setup)}) for t in plan.triggers]
+        exit_rule = (
+            plan.exit.model_copy(update={"setup": _canonical(plan.exit.setup)})
+            if plan.exit is not None else None
+        )
+        armed = next((t.setup for t in triggers if t.setup), None)
+        if armed is None and exit_rule is not None:
+            armed = exit_rule.setup
+        return plan.model_copy(
+            update={"triggers": triggers, "exit": exit_rule, "active_strategy": armed}
+        )
 
     def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
         """One-time history study on `session_model` (falls back to `model`).

@@ -44,7 +44,7 @@ from .store import BarStore
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
 
 
-@dataclass
+@dataclass(frozen=True)
 class EngineResult:
     decision: Decision
     command: OrderCommand | None = None
