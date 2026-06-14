@@ -37,7 +37,10 @@ def is_volatility_shock(
 ) -> bool:
     """An extreme volatility shift: current ATR is ``shock_ratio``× the baseline (a spike)
     or ≤ 1/``shock_ratio`` of it (a collapse). Either way the regime read likely changed."""
-    if not cur_atr or not baseline_atr or baseline_atr <= 0 or shock_ratio <= 1:
+    # `is None`, not truthiness: a current ATR of exactly 0.0 is a real reading (a total
+    # volatility collapse), not missing data — let it through so the collapse is detected
+    # (r = 0 ≤ 1/shock_ratio). baseline_atr <= 0 still guards the division below.
+    if cur_atr is None or baseline_atr is None or baseline_atr <= 0 or shock_ratio <= 1:
         return False
     r = cur_atr / baseline_atr
     return r >= shock_ratio or r <= 1.0 / shock_ratio

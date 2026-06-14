@@ -22,8 +22,9 @@ def test_volatility_shock_detection():
     assert is_volatility_shock(25, 10, 2.0) is True    # 2.5× spike
     assert is_volatility_shock(4, 10, 2.0) is True     # 0.4× collapse (≤ 1/2)
     assert is_volatility_shock(15, 10, 2.0) is False   # 1.5×, inside the band
-    assert is_volatility_shock(None, 10, 2.0) is False
-    assert is_volatility_shock(10, 0, 2.0) is False
+    assert is_volatility_shock(0, 10, 2.0) is True     # cur ATR exactly 0 = total collapse
+    assert is_volatility_shock(None, 10, 2.0) is False  # missing current ATR ≠ a reading
+    assert is_volatility_shock(10, 0, 2.0) is False    # baseline 0 is meaningless (guarded)
 
 
 # ---- pure reducer (no engine) ------------------------------------------------
