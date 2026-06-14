@@ -42,22 +42,6 @@ from .store import BarStore
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
 
 
-def reauthor_interval_bars(
-    cur_atr: float | None, baseline_atr: float | None,
-    base_bars: int, min_bars: int, max_bars: int,
-) -> float:
-    """Bars to wait before re-authoring, scaled **inversely** with volatility: at the
-    baseline norm the interval is ``base_bars``; twice as volatile (current ATR = 2×
-    baseline) halves it; half as volatile doubles it. Clamped to [min, max]. With no
-    volatility read (too little history) it falls back to ``base_bars``."""
-    if not cur_atr or not baseline_atr or baseline_atr <= 0:
-        return float(base_bars)
-    vol_ratio = cur_atr / baseline_atr
-    if vol_ratio <= 0:
-        return float(max_bars)
-    return max(float(min_bars), min(float(max_bars), base_bars / vol_ratio))
-
-
 def is_volatility_shock(
     cur_atr: float | None, baseline_atr: float | None, shock_ratio: float
 ) -> bool:
@@ -102,8 +86,15 @@ class TradingEngine:
         self.on_close = on_close
         self._prefilter = MockAgentClient(config) if config.agent.prefilter == "mock" else None
         self.last_context: MarketContext | None = None  # agent regime / S/R for the dashboard
-        # Bars seen since the agent last authored — drives the volatility-adaptive re-author.
+        # Re-author governor state (agent mode; see _maybe_reauthor). _bars_since_author drives
+        # the debounce floor / freshness ceiling / failed-author retry; _struct_change_bars
+        # counts consecutive closes the live structure has diverged from the authored playbook
+        # (reset the moment it fits again); the _authored_* anchor records the regime/trend the
+        # live playbook was authored under, so a flip away from it is detectable.
         self._bars_since_author = 0
+        self._struct_change_bars = 0
+        self._authored_regime: str | None = None
+        self._authored_trend: str | None = None
         # Last Claude-DECLINED prefilter candidate: {action, price, ts}. Near-identical
         # candidates are answered from this memo instead of burning another Claude call
         # (extended trends produce the same candidate bar after bar). See _duplicate_decline.
@@ -273,6 +264,11 @@ class TradingEngine:
         account = self.session.account_state(mark_price=bars[-1].close)
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
         self._bars_since_author = 0
+        self._struct_change_bars = 0
+        # Anchor the structural staleness check to what this study authors from, so the next
+        # re-author fires when the live market drifts off THIS read (not the previous one).
+        self._authored_regime = ctx.regime
+        self._authored_trend = ctx.trend
         self.planner.schedule_session_analysis(bars, PlanRequest(
             mode=mode, context=ctx, recent_bars=recent, account=account,
             bar_ts=bars[-1].ts, assumed_position=self.session.position,
@@ -280,27 +276,71 @@ class TradingEngine:
         ), force=force)
 
     def _maybe_reauthor(self, ctx: MarketContext) -> None:
-        """Volatility-adaptive re-author (agent mode): once enough bars have passed for the
-        current volatility — sooner when volatile, later when calm — re-run the study so the
-        playbook tracks the market. An extreme volatility shift forces it early. The old
-        playbook keeps trading until the new one lands (seamless; never a WAIT gap)."""
+        """Structure-driven re-author (agent mode): refresh the playbook when the live market
+        no longer matches the one the brain authored — the trend flipped against it, or no
+        authored setup covers the live regime — confirmed over ``confirm_bars`` closes so a
+        one-bar wobble doesn't thrash it. A volatility shock (mis-scaled brackets) and a
+        freshness ceiling are secondary triggers, and a failed author is retried rather than
+        left in WAIT. The old playbook keeps trading until the new one lands (no WAIT gap)."""
         rc = self.cfg.strategies.reauthor
         if (not rc.enabled or self.planner is None
                 or self.agent.strategy_source() != "agent"
-                or self.agent.generated_strategy() is None        # nothing authored yet
                 or self.planner.is_analyzing_session()):          # one already in flight
             return
         self._bars_since_author += 1
+
+        # A failed/empty author left no playbook to trade: retry on a short clock instead of
+        # sitting in WAIT forever (the old governor skipped here and never recovered).
+        if self.agent.generated_strategy() is None:
+            if self._bars_since_author >= rc.retry_bars:
+                self._reauthor_now(ctx, "author_retry")
+            return
+
+        # How long the live structure has been at odds with the authored playbook.
+        stale = self._playbook_stale(ctx)
+        self._struct_change_bars = self._struct_change_bars + 1 if stale else 0
+
         baseline = atr(self.store.recent(rc.baseline_atr_period + 1), rc.baseline_atr_period)
-        interval = reauthor_interval_bars(
-            ctx.atr, baseline, rc.base_interval_bars, rc.min_interval_bars, rc.max_interval_bars)
-        shock = (self._bars_since_author >= rc.min_interval_bars
-                 and is_volatility_shock(ctx.atr, baseline, rc.shock_ratio))
-        if self._bars_since_author >= interval or shock:
-            why = "volatility_shock" if shock else f"interval({interval:.0f}b)"
-            print(f"[reauthor] re-authoring after {self._bars_since_author} bars "
-                  f"({why}; atr={ctx.atr} baseline={baseline})", flush=True)
-            self._trigger_session_study(self.store.all(), force=True, outcome=f"reauthor:{why}")
+        past_floor = self._bars_since_author >= rc.min_interval_bars
+        if self._bars_since_author >= rc.max_interval_bars:
+            self._reauthor_now(ctx, f"ceiling({rc.max_interval_bars}b)")
+        elif past_floor and stale and self._struct_change_bars >= rc.confirm_bars:
+            self._reauthor_now(ctx, f"{stale} x{self._struct_change_bars}b")
+        elif past_floor and is_volatility_shock(ctx.atr, baseline, rc.shock_ratio):
+            self._reauthor_now(ctx, "volatility_shock")
+
+    def _playbook_stale(self, ctx: MarketContext) -> str | None:
+        """Why the authored playbook no longer fits the live market, or None if it still does.
+
+        - ``trend_flip``: the live trend turned opposite to the trend the playbook was authored
+          under — its directional setups are now on the wrong side.
+        - ``no_setup_for``: no authored setup is tagged for the live regime, so the brain has
+          nothing to arm (benched) and a fresh playbook is needed for this market.
+
+        A trend read of "flat" (off-trend) is not a flip; an untagged setup covers any regime
+        (see ``_regime_covered``) so a missing tag never forces a re-author on its own."""
+        a_trend = self._authored_trend
+        if (a_trend in ("up", "down") and ctx.trend in ("up", "down")
+                and ctx.trend != a_trend):
+            return f"trend_flip({a_trend}->{ctx.trend})"
+        if not self._regime_covered(ctx.regime):
+            return f"no_setup_for({ctx.regime})"
+        return None
+
+    def _regime_covered(self, live_regime: str) -> bool:
+        """Does any authored setup apply in ``live_regime``? An untagged setup (no clean regime
+        tag) is treated as covering any regime, so a missing tag never benches the brain."""
+        setups = self.agent.generated_strategies() or []
+        return any(
+            (s.get("regime") or "").strip().lower() in ("", live_regime)
+            for s in setups
+        )
+
+    def _reauthor_now(self, ctx: MarketContext, why: str) -> None:
+        print(f"[reauthor] {why}: bars_since_author={self._bars_since_author} "
+              f"live={ctx.regime}/{ctx.trend} "
+              f"authored={self._authored_regime}/{self._authored_trend}", flush=True)
+        self._trigger_session_study(self.store.all(), force=True, outcome=f"reauthor:{why}")
 
     def _levels(self, bars: list[Bar]) -> list[Level]:
         lc = self.cfg.levels

@@ -148,20 +148,34 @@ class PlannerConfig(BaseModel):
 
 
 class ReauthorConfig(BaseModel):
-    """Volatility-adaptive re-authoring (agent mode): how often the brain re-runs the
-    pre-session study to refresh its playbook WHILE a session is live.
+    """Structure-driven re-authoring (agent mode): when the brain re-runs the pre-session
+    study to refresh its playbook WHILE a session is live.
 
-    The cadence scales **inversely with volatility** — current ATR vs a longer-window
-    baseline ATR. Calm market (current < baseline) ⇒ longer interval; volatile (current >
-    baseline) ⇒ shorter; an extreme shift either way (ratio crosses ``shock_ratio``)
-    forces an immediate re-author once past ``min_interval_bars``. Re-authoring is seamless:
-    the old playbook keeps trading until the new one lands (no WAIT gap). All intervals are
-    in BARS, so they auto-scale with the chart timeframe."""
+    The playbook is a STRUCTURAL artifact (a regime read + setups built around specific
+    levels), so re-authoring is triggered by playbook *invalidation* — not by raw
+    volatility, which is orthogonal to whether the setups still fit:
+
+    - **trend flip**: the live trend turned opposite to the trend the playbook was authored
+      under (a long-biased uptrend playbook is simply wrong in a downtrend),
+    - **uncovered regime**: no authored setup is tagged for the live regime, so the brain is
+      benched with nothing to arm,
+    - **volatility shock** (secondary): an ATR spike/collapse mis-scales the playbook's
+      ATR-based stops/targets even when structure holds — kept because bracket sizing IS a
+      genuinely volatility-driven concern.
+
+    A structural change must persist ``confirm_bars`` closes before it fires, so a one-bar
+    wobble through "transitional" doesn't thrash the playbook. ``min_interval_bars`` is a hard
+    debounce floor; ``max_interval_bars`` is a freshness ceiling that re-authors even in a
+    calm, unchanging market. If the study failed to author any playbook, ``retry_bars``
+    re-attempts instead of leaving the brain stuck in WAIT. All intervals are in BARS, so they
+    auto-scale with the chart timeframe. Re-authoring is seamless: the old playbook keeps
+    trading until the new one lands (no WAIT gap)."""
 
     enabled: bool = True
-    base_interval_bars: int = 60     # cadence at the baseline volatility norm
-    min_interval_bars: int = 15      # floor — never re-author more often than this
-    max_interval_bars: int = 240     # ceiling — re-author at least this often even when calm
+    confirm_bars: int = 3            # a structural change must persist this many closes to fire
+    min_interval_bars: int = 10      # debounce floor — never re-author more often than this
+    max_interval_bars: int = 60      # freshness ceiling — re-author at least this often
+    retry_bars: int = 5              # re-attempt this many bars after a failed/empty author
     baseline_atr_period: int = 100   # longer-window ATR = the "normal" volatility reference
     shock_ratio: float = 2.0         # |current/baseline ATR| past this (or its inverse) = a shock
 
@@ -187,7 +201,7 @@ class StrategyAuthoringConfig(BaseModel):
     generated_dir: str = "hermes/generated"
     # Cap on the authored playbook fed back into the system prompt (keeps it bounded).
     max_chars: int = 6000
-    # Volatility-adaptive re-authoring cadence (agent mode).
+    # Structure-driven re-authoring cadence (agent mode).
     reauthor: ReauthorConfig = Field(default_factory=ReauthorConfig)
 
 

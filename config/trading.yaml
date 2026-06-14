@@ -93,13 +93,15 @@ strategies:
   generated_dir: hermes/generated  # authored playbooks written here (per-session + latest.md)
                                    # for review; gitignored runtime artifacts.
   max_chars: 6000              # cap on the authored playbook fed back into the system prompt
-  reauthor:                    # volatility-adaptive re-authoring (agent mode): refresh the
-    enabled: true             #   playbook mid-session, more often when volatile, less when calm.
-    base_interval_bars: 60     # cadence at the baseline volatility norm (bars; scales w/ timeframe)
-    min_interval_bars: 15      # floor — never re-author more often than this
-    max_interval_bars: 240     # ceiling — re-author at least this often even when calm
-    baseline_atr_period: 100   # longer-window ATR = the "normal" volatility reference
-    shock_ratio: 2.0           # current/baseline ATR past this (or its inverse) forces an early re-author
+  reauthor:                    # structure-driven re-authoring (agent mode): refresh the playbook
+    enabled: true             #   mid-session when the live market drifts off the authored read.
+    confirm_bars: 3            # a structural change (trend flip / uncovered regime) must persist
+                               #   this many closes before re-authoring (anti-thrash)
+    min_interval_bars: 10      # debounce floor — never re-author more often than this
+    max_interval_bars: 60      # freshness ceiling — re-author at least this often even when calm
+    retry_bars: 5              # if a study authored no playbook, re-attempt after this many bars
+    baseline_atr_period: 100   # longer-window ATR = the "normal" volatility reference (shock only)
+    shock_ratio: 2.0           # current/baseline ATR past this (or its inverse) = a volatility shock
 
 # Swing-pivot S/R zones — served at GET /levels for the chart overlay and included
 # in the plan-analysis prompt.
