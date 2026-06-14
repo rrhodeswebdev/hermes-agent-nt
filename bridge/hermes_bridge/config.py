@@ -67,6 +67,13 @@ class StrategyParams(BaseModel):
     # stops.atr_band_stop_ticks. Enforced as the final word by the RiskGate on every order.
     min_stop_ticks: int = 0
     max_stop_ticks: int = 0
+    # Volatility-scaled stop FLOOR, enforced by the RiskGate on EVERY entry regardless of
+    # which brain set the stop. The minimum protective-stop distance is
+    # round(min_stop_atr_mult × ATR) in ticks (still capped by max_stop_ticks). This is the
+    # fix for a brain that proposes a razor-thin stop while ATR is large: a fixed tick floor
+    # can't adapt, so a 2-tick stop against a 40pt ATR slips through. 0 = disabled (neutral
+    # default; only the fixed min_stop_ticks applies). See stops.vol_stop_floor_ticks.
+    min_stop_atr_mult: float = 0.0
     # Winner management — enforced deterministically by the engine (brain-agnostic, like the
     # RiskGate), NOT delegated to the LLM. Once a position runs breakeven_r × (initial stop
     # distance) in our favor, the working stop is pulled to breakeven; with trail_enabled it
@@ -91,6 +98,13 @@ class RiskParams(BaseModel):
     # 0.5 = halve size in a shock; size clamps down accordingly). 1.0 disables scaling
     # (the neutral default). See stops.risk_scale_for_atr.
     shock_risk_scale: float = 1.0
+    # Confidence-scaled sizing. When True, an entry's size ramps with the decision's
+    # confidence: 1 contract at strategy.min_confidence (the lowest confidence an entry is
+    # taken at) up to the full budget — the lesser of max_contracts and the per-trade
+    # dollar cap — at full_size_confidence. When False (the neutral default), size is the
+    # brain's requested qty clamped DOWN to the caps (legacy). See stops.size_for_confidence.
+    confidence_sizing: bool = False
+    full_size_confidence: float = 0.85   # confidence at/above which the full budget is used
 
 
 class DailyGoal(BaseModel):

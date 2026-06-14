@@ -27,9 +27,16 @@ strategy:
   min_confidence: 0.40  # RELAXED (test): admit lower-conviction entries (was 0.55)
   # --- Stop band (vol-scaled stop, then CLAMPED) — the fix for too-tight stops. The protective
   #     stop is round(atr_stop_mult * ATR) in ticks, clamped into [min,max]. MNQ tick = 0.25pt.
-  min_stop_ticks: 24    # FLOOR: >= 6 pts ($12) — clears 1m wick noise so a stop can't sit inside
-                        #   the bar's chop (this is what caused the same-bar stop-outs).
-  max_stop_ticks: 120   # CEILING: <= 30 pts ($60) — sanity cap in a spike; size clamps to fit.
+  min_stop_ticks: 24    # ABSOLUTE floor in ticks (>= 6 pts) — the backstop when ATR is unknown.
+                        #   The real floor is volatility-scaled below; this just guards ATR=0.
+  max_stop_ticks: 280   # CEILING: <= 70 pts — raised from 120 so the vol-scaled stop tracks
+                        #   ATR (15-32pt here) instead of flat-lining at 30pts; size clamps to fit.
+  # VOLATILITY FLOOR — the real fix for "stops too close". Enforced on EVERY entry, including
+  # the Claude brain's own stop (it was authoring stops at 0.05-0.67x ATR, then only getting
+  # clamped to the fixed 24t floor while ATR was ~20pts). The protective stop is now never
+  # tighter than min_stop_atr_mult x ATR. At the median ~20pt ATR that's ~30pts (120t) vs the
+  # old ~6pts. Raise toward atr_stop_mult (2.0) for even more room; 0 disables.
+  min_stop_atr_mult: 1.5
   # --- Winner management (enforced by the engine, brain-agnostic). Once a trade runs +1R in our
   #     favor the stop goes to breakeven, then trails behind each new swing — so the WIDER stop
   #     above never lets a trade that worked turn into a big give-back (the +15..+31pt round-trips
@@ -42,7 +49,7 @@ strategy:
 # so even a 2.0*ATR stop risks only ~$40/contract; these are scaled ~10x down from the NQ
 # values. max_risk_per_trade must admit at least a 1-contract trade or entries are rejected.
 risk:
-  max_contracts: 2             # micros are small; allow a couple while validating on Sim
+  max_contracts: 5             # ceiling on size; confidence_sizing ramps UP toward this
   max_risk_per_trade: 250.0    # USD per-trade ceiling (effective cap is the lesser of this
                                # and remaining daily-loss room; see daily_goal.max_daily_loss).
                                # A wider stop just clamps SIZE down to stay under this cap.
@@ -52,6 +59,13 @@ risk:
   shock_risk_scale: 0.5        # ATR-regime sizing: HALVE the per-trade $ budget when current ATR
                                # >= strategies.reauthor.shock_ratio (2.0) x the baseline ATR — i.e.
                                # trade smaller in a volatility spike. 1.0 disables.
+  # Confidence-scaled sizing: ramp UP from 1 contract at strategy.min_confidence (0.40 here)
+  # to the full budget — lesser of max_contracts (5) and the max_risk_per_trade dollar cap —
+  # at full_size_confidence. Without this the brain always emits qty=1 and the gate only
+  # clamps down, so you never size up past 1. (Mock confidence runs ~0.5–0.95, so a mock
+  # entry sizes ~2 at the low end up to 5 near full conviction.)
+  confidence_sizing: true
+  full_size_confidence: 0.85   # confidence at/above which the full budget is taken
 
 # Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
 daily_goal:

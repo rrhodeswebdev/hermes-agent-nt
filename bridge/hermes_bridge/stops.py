@@ -29,10 +29,15 @@ from .config import BridgeConfig
 from .models import Side
 
 
-def clamp_stop_ticks(ticks: int, cfg: BridgeConfig) -> int:
+def clamp_stop_ticks(ticks: int, cfg: BridgeConfig, floor_ticks: int | None = None) -> int:
     """Clamp a stop distance (in ticks) into the configured band. A bound of 0 means
-    "unbounded". Never returns < 1 — a zero/negative stop is not protective."""
+    "unbounded". ``floor_ticks`` (the volatility floor; see ``vol_stop_floor_ticks``) raises
+    the effective floor above the fixed ``min_stop_ticks`` when supplied. The ceiling still
+    wins last, so even the vol floor can't push a stop past ``max_stop_ticks`` in a spike.
+    Never returns < 1 — a zero/negative stop is not protective."""
     lo = cfg.strategy.min_stop_ticks
+    if floor_ticks is not None and floor_ticks > lo:
+        lo = floor_ticks
     hi = cfg.strategy.max_stop_ticks
     t = int(ticks)
     if lo > 0:
@@ -40,6 +45,22 @@ def clamp_stop_ticks(ticks: int, cfg: BridgeConfig) -> int:
     if hi > 0:
         t = min(t, hi)
     return max(1, t)
+
+
+def vol_stop_floor_ticks(atr: float | None, cfg: BridgeConfig) -> int | None:
+    """The volatility-scaled MINIMUM protective-stop distance in ticks:
+    ``round(min_stop_atr_mult × ATR / tick_size)``. None when disabled
+    (``min_stop_atr_mult`` <= 0) or ATR is unavailable.
+
+    This is the floor the RiskGate enforces on EVERY entry — including one whose stop a brain
+    (the Claude plan author especially) set far too tight. A fixed tick floor can't adapt to
+    volatility, so a 2-tick stop against a 40pt ATR otherwise slips through; this scales the
+    minimum with ATR so the trade gets room to breathe regardless of what the brain proposed."""
+    m = cfg.strategy.min_stop_atr_mult
+    if m <= 0 or not atr or atr <= 0:
+        return None
+    tick = cfg.instrument.tick_size or 0.25
+    return max(1, round(m * atr / tick))
 
 
 def atr_band_stop_ticks(atr: float | None, cfg: BridgeConfig) -> int | None:
@@ -70,6 +91,29 @@ def risk_scale_for_atr(
     if not cur_atr or not baseline_atr or baseline_atr <= 0 or trip <= 1:
         return 1.0
     return scale if cur_atr / baseline_atr >= trip else 1.0
+
+
+def size_for_confidence(
+    confidence: float | None, budget_max: int, lo: float, hi: float
+) -> int:
+    """Scale entry size with the decision's confidence.
+
+    Ramps linearly from 1 contract at ``lo`` (``strategy.min_confidence`` — the lowest
+    confidence an entry is taken at) up to ``budget_max`` contracts at ``hi``
+    (``full_size_confidence``). Below ``lo`` it is the minimum (1); at/above ``hi`` it is
+    the full budget. ``budget_max`` is already the most contracts BOTH the position cap and
+    the per-trade dollar budget allow, so the result never exceeds either limit. Returns
+    ``budget_max`` (0 or 1) when there is no room to scale, and the minimum (1) when
+    ``confidence`` is unknown."""
+    if budget_max <= 1:
+        return max(0, budget_max)
+    if confidence is None:
+        return 1
+    if hi <= lo:  # degenerate band → step function at the threshold
+        return budget_max if confidence >= hi else 1
+    frac = (confidence - lo) / (hi - lo)
+    frac = max(0.0, min(1.0, frac))
+    return int(1 + round(frac * (budget_max - 1)))
 
 
 def managed_stop_price(

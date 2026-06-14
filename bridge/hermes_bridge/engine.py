@@ -196,7 +196,8 @@ class TradingEngine:
                 else 1.0
             )
             rd = self.risk.evaluate(
-                cmd, self.session, last_price=bar.close, now_ts=bar.ts, risk_scale=scale
+                cmd, self.session, last_price=bar.close, now_ts=bar.ts, risk_scale=scale,
+                confidence=decision.confidence, atr=ctx.atr,
             )
             if rd.approved and rd.command is not None and decision.action in (
                 Action.ENTER_LONG, Action.ENTER_SHORT
