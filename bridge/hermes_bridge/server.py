@@ -477,8 +477,27 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
                       f"(NinjaTrader UseAgentStrategies={report.use_agent_strategies})",
                       flush=True)
             st.agent.set_strategy_source(source)
+        # Prop-firm account selected in the strategy settings (cascading dropdowns). Apply at
+        # runtime — load the firm context + enforce the account's limits — but DON'T persist:
+        # the chart's selection is live state, like the reported account name. Only act on a
+        # CHANGE (the strategy re-reports on every reconnect) so it's idempotent + quiet. A
+        # blank prop_firm is "unspecified" (keep the current selection), like the toggle above.
+        if report.prop_firm:
+            sel = st.account_profile_selection()
+            changed = (report.prop_firm != sel["prop_firm"]
+                       or report.account_type != sel["account_type"]
+                       or report.account_size != sel["account_size"])
+            if changed:
+                with st.lock:
+                    result = st.select_account_profile(
+                        report.prop_firm, report.account_type, report.account_size,
+                        persist=False)
+                if not result.get("ok"):
+                    print(f"[hermes-bridge] NinjaTrader prop-firm selection ignored: "
+                          f"{result.get('note')}", flush=True)
         return {"ok": True, "account": st.effective_account(),
-                "strategy_source": st.effective_strategy_source()}
+                "strategy_source": st.effective_strategy_source(),
+                "account_profile": st.account_profile_selection()}
 
     @app.post("/ingest/fill")
     def ingest_fill(request: Request, fill: Fill) -> dict:

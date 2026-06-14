@@ -35,6 +35,14 @@ Uses `Calculate.OnBarClose` — exactly one decision per closed bar.
   history. **false**: trades your `hermes/context/strategies/{trending,ranging}/` files. Reported
   to the bridge before history so the study runs in the right mode. Overrides `strategies.source`.
 - `AllowLive` — leave **false**. The strategy refuses non-Sim/Playback accounts unless true.
+- `PropFirm` / `AccountType` / `AccountSize` — **cascading dropdowns** (pick firm → its types →
+  that type's sizes). Reported to the bridge over `/ingest/account`; the bridge loads that firm's
+  context file into the brain and **enforces** the account's daily-loss + max-contracts limits.
+  Runtime only (not persisted, like the account name); blank `PropFirm` = no firm selected. The
+  firm/type/size **names** live in `PropFirmCatalog` (bottom of the .cs) and **must mirror**
+  `config/prop-firms.yaml` — the bridge owns the numbers and validates the combo (an unknown one
+  is ignored + logged, never enforced). NT's grid may need the dialog reopened to refresh a child
+  dropdown after changing its parent.
 - Dashboard button knobs: `RefreshSeconds`, `FontSize`.
 
 ## On-chart dashboard

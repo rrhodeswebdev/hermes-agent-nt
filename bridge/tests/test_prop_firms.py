@@ -260,3 +260,50 @@ def test_startup_seeds_configured_profile(tmp_path):
     assert st.cfg.risk.max_contracts == 5
     assert st.cfg.daily_goal.max_daily_loss == 1000
     assert st.agent.prop_firm_context() == "topstep.md"
+
+
+# ---- NinjaTrader strategy-settings selection (reported over /ingest/account) -
+def test_ingest_account_applies_prop_firm_without_persisting(tmp_path):
+    cfg, path = _server_cfg(tmp_path)
+    c = TestClient(create_app(cfg, config_path=path))
+    r = c.post("/ingest/account", json={
+        "account": "Sim101", "allow_live": False,
+        "prop_firm": "Topstep", "account_type": "Trading Combine", "account_size": 50000,
+    }).json()
+    assert r["account_profile"]["prop_firm"] == "Topstep"
+    # Enforced numbers applied + firm context loaded (visible on /health + /dashboard).
+    assert c.get("/health").json()["account_profile"]["context_file"] == "topstep.md"
+    assert c.get("/dashboard").json()["goal"]["max_daily_loss"] == 1000
+    # NOT persisted — a reported (chart) selection is runtime state, like the account name.
+    assert not (tmp_path / "trading.local.yaml").exists()
+
+
+def test_ingest_account_invalid_prop_firm_ignored(tmp_path):
+    cfg, path = _server_cfg(tmp_path)
+    c = TestClient(create_app(cfg, config_path=path))
+    r = c.post("/ingest/account", json={
+        "account": "Sim101", "allow_live": False,
+        "prop_firm": "Topstep", "account_type": "Trading Combine", "account_size": 7,
+    }).json()
+    assert r["account_profile"]["prop_firm"] is None  # bad combo → nothing applied
+
+
+def test_ingest_account_blank_prop_firm_keeps_selection(tmp_path):
+    cfg, path = _server_cfg(tmp_path)
+    c = TestClient(create_app(cfg, config_path=path))
+    c.post("/ingest/account", json={"account": "Sim101", "allow_live": False,
+        "prop_firm": "Topstep", "account_type": "Trading Combine", "account_size": 50000})
+    # A later report omitting prop_firm must NOT clear the current selection (unspecified).
+    r = c.post("/ingest/account", json={"account": "Sim101", "allow_live": False}).json()
+    assert r["account_profile"]["prop_firm"] == "Topstep"
+
+
+def test_ingest_account_resend_same_is_noop(tmp_path):
+    cfg, path = _server_cfg(tmp_path)
+    c = TestClient(create_app(cfg, config_path=path))
+    body = {"account": "Sim101", "allow_live": False,
+            "prop_firm": "Topstep", "account_type": "Trading Combine", "account_size": 50000}
+    assert c.post("/ingest/account", json=body).json()["account_profile"]["prop_firm"] == "Topstep"
+    # Re-reporting the identical selection (every reconnect does) is safe + stays applied.
+    assert c.post("/ingest/account", json=body).json()["account_profile"]["prop_firm"] == "Topstep"
+    assert c.get("/dashboard").json()["goal"]["max_daily_loss"] == 1000

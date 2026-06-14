@@ -137,6 +137,14 @@ class AccountReport(BaseModel):
     account: str = ""
     allow_live: bool = False
     use_agent_strategies: bool | None = None
+    # Prop-firm account selected in the strategy settings (cascading dropdowns). All three
+    # must be set to apply; a blank `prop_firm` means "unspecified" (keep the current
+    # selection), exactly like `use_agent_strategies=None`. Applied at runtime by the bridge
+    # (loads the firm context + enforces the account's limits); not persisted (the chart's
+    # selection is live state, like the reported account name).
+    prop_firm: str | None = None
+    account_type: str | None = None
+    account_size: float | None = None
 
 
 class Level(FrozenModel):
