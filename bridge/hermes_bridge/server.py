@@ -118,6 +118,11 @@ class AppState:
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
+        # Dedicated lock for the decisions ring: the dashboard snapshots it (list(deque)) on a
+        # worker thread while /ingest/bar appends on another, and an unsynchronized list(deque)
+        # raises "deque mutated during iteration". Kept OFF st.lock so a dashboard poll never
+        # blocks on a slow on_bar (the dashboard reads all other state lock-free by design).
+        self.decisions_lock = threading.Lock()
         # Server-side (true-UTC) arrival stamp of the latest realtime bar, so "data age"
         # is correct regardless of the timezone the strategy stamps bar.ts in.
         self.last_bar_received_at: float | None = None
@@ -343,16 +348,17 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
         print(f"[decision] close={payload.bar.close} {d.action} [{result.mode}] "
               f"conf={d.confidence:.2f} lat={elapsed:.1f}s -> {queued}{why} | {d.rationale[:160]}",
               flush=True)
-        st.decisions.append({
-            "ts": payload.bar.ts,
-            "close": payload.bar.close,
-            "action": str(d.action),
-            "confidence": round(d.confidence, 2),
-            "mode": result.mode,
-            "latency_s": round(elapsed, 1),
-            "rationale": d.rationale,
-            "queued": f"{cmd.action}:{cmd.qty}" if cmd is not None else None,
-        })
+        with st.decisions_lock:
+            st.decisions.append({
+                "ts": payload.bar.ts,
+                "close": payload.bar.close,
+                "action": str(d.action),
+                "confidence": round(d.confidence, 2),
+                "mode": result.mode,
+                "latency_s": round(elapsed, 1),
+                "rationale": d.rationale,
+                "queued": f"{cmd.action}:{cmd.qty}" if cmd is not None else None,
+            })
         return d
 
     @app.post("/ingest/account")

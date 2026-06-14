@@ -152,7 +152,10 @@ def build_dashboard_payload(st: AppState) -> dict:
     last = st.store.last()
     acct = st.session.account_state(mark_price=last.close if last else None)
     now = time.time()
-    recent = list(st.decisions)[-15:]
+    # Snapshot the decisions ring under its lock — a bare list(deque) raises
+    # "deque mutated during iteration" if /ingest/bar appends concurrently.
+    with st.decisions_lock:
+        recent = list(st.decisions)[-15:]
     return {
         "agent": cfg.agent.client,
         "brain": st.engine.agent.describe(),
