@@ -17,7 +17,7 @@ you'll understand every piece without needing to read the code.
 Think of it as a small team, each with one job:
 
 | Part | Plain-English role | Lives on | File(s) |
-|------|--------------------|----------|---------|
+| --- | --- | --- | --- |
 | **NinjaTrader 8** | The TV showing the live market | Windows (Parallels) | — |
 | **The Strategy** | The mail carrier: mails each new bar to the bridge, places the orders it's told to | Windows (inside NT) | `ninjatrader/HermesBridgeStrategy.cs` |
 | **The Bridge** | The desk + safety guard: keeps history, computes indicators, asks the brain, checks every order, keeps score | Mac | `bridge/hermes_bridge/*` |
@@ -263,7 +263,7 @@ every bar. Want it to trade differently? Edit the notes, restart the bridge. The
 the order the brain reads them:
 
 | File | What it teaches the brain |
-|------|---------------------------|
+| --- | --- |
 | `HERMES.md` | The operating loop and the non-negotiables ("always use a stop," "when unsure, WAIT," "one position at a time"). |
 | `strategy.md` | **The setups it trades:** structure-based plays (trend pullback to the higher-low, breakouts, range-edge fades) selected by the swing-structure regime, confirmed by order flow, with ATR-based brackets. |
 | `order-flow.md` | How to read buying vs. selling pressure (delta, absorption, exhaustion) — the *confirmation* layer. |
@@ -418,7 +418,7 @@ For testing, the entry rules are currently **loosened on purpose** so the agent 
 often (every change is tagged `RELAXED (test)` in the files):
 
 | Setting | Default | Now | Effect |
-|---------|---------|-----|--------|
+| --- | --- | --- | --- |
 | `min_confidence` | 0.55 | **0.40** | Accepts lower-conviction entries |
 | `pullback_atr` | 0.5 | **0.9** | More dips count as a valid setup |
 | `max_trades_per_day` | 10 | **20** | More entries allowed per session |

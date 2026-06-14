@@ -38,8 +38,9 @@ drawn as an on-chart card now lives entirely in that HTML dashboard.
      and invents nothing — if those dirs are empty it simply WAITs. The toggle is reported
      to the bridge before history so the study runs in the right mode. The agent names each
      setup it authors; the HTML **dashboard** lists them all and highlights the active one —
-     the setup the brain declared in its plan, or else the one matching the live regime. See the full authored playbook
-     anytime at `GET /strategy` (also written to `hermes/generated/`). Risk limits are identical
+     the setup the brain declared in its plan, or else the one matching the live regime. See
+     the full authored playbook anytime at `GET /strategy` (also written to `hermes/generated/`).
+     Risk limits are identical
      either way.
    - `AllowLive` → leave **false**; the strategy refuses to trade a live (brokerage)
      account unless this is explicitly true. Simulated **Sim*** and **Playback** accounts
@@ -52,7 +53,7 @@ drawn as an on-chart card now lives entirely in that HTML dashboard.
 ## What it does
 
 | Event | Action |
-|-------|--------|
+| --- | --- |
 | Historical → realtime transition | `POST /ingest/history` with every loaded bar |
 | Each closed realtime bar | `POST /ingest/bar`, then `GET /commands/next` |
 | Command returned | executes `EnterLong/EnterShort` (+ stop/target bracket) or exit, on the strategy thread via `TriggerCustomEvent` |

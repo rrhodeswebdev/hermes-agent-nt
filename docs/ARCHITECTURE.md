@@ -2,7 +2,7 @@
 
 ## Components
 
-```
+```text
 ┌─────────────────────────┐     HTTP/JSON      ┌───────────────────────────┐
 │   NinjaTrader 8 (Win)    │  ───────────────▶  │   hermes-bridge (Python)  │
 │  HermesBridgeStrategy.cs │   bars, fills      │   FastAPI server          │

@@ -7,7 +7,7 @@ context, risk rules, and daily goal — **in plain English, no code**. Edit the 
 restart the bridge, and the agent trades the new way.
 
 | File | What it teaches the brain |
-|------|---------------------------|
+| --- | --- |
 | `context/HERMES.md` | the operating loop and non-negotiables (always use a stop, when unsure WAIT, one position at a time) |
 | `context/strategy.md` | how the **active playbook** is selected (agent-authored vs your custom files) and the hard rules every setup obeys (bracket everything, never widen a stop, never flip in one step) |
 | `context/order-flow.md` | reading buying vs. selling pressure (delta, absorption, exhaustion) — the confirmation layer |

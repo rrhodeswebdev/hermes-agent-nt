@@ -7,10 +7,10 @@ account.
 
 ## 0. Prerequisites
 
-- `uv` (Python manager) — https://docs.astral.sh/uv/
+- `uv` (Python manager) — <https://docs.astral.sh/uv/>
 - NinjaTrader 8 (Windows) for live/sim chart trading
 - The **Claude Code CLI**, logged in on your Claude subscription (no API key) — optional
-  until step 2. Install: https://claude.com/claude-code. Verify with `claude --version`.
+  until step 2. Install: <https://claude.com/claude-code>. Verify with `claude --version`.
 
 ## 1. Bridge — verify the loop with the mock engine
 
