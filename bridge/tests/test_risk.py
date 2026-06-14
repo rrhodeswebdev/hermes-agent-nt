@@ -1,6 +1,6 @@
 from hermes_bridge.models import Action, OrderCommand
 from hermes_bridge.news import NewsEvent
-from hermes_bridge.risk import RiskGate
+from hermes_bridge.risk import RiskGate, evaluate_risk
 from hermes_bridge.session import SessionState
 
 
@@ -17,6 +17,17 @@ def _cmd(action, qty=1, stop_ticks=None, target_ticks=None, stop_price=None):
         id="c1", strategy_id="test-es", action=action, qty=qty,
         stop_ticks=stop_ticks, target_ticks=target_ticks, stop_price=stop_price,
     )
+
+
+def test_evaluate_risk_is_a_pure_function(cfg):
+    # The gate's logic is a module-level pure function; RiskGate is just an adapter over it.
+    s = _session(cfg)
+    cmd = _cmd(Action.ENTER_LONG, stop_ticks=8, target_ticks=16)
+    direct = evaluate_risk(cfg, cmd, s, last_price=5000.0)
+    via_gate = RiskGate(cfg).evaluate(cmd, s, last_price=5000.0)
+    assert direct.approved
+    assert direct == via_gate                 # same inputs → identical (frozen, value-compared)
+    assert s.position == 0                     # the session snapshot is read, never mutated
 
 
 def test_exit_always_approved_even_when_halted(cfg):
