@@ -148,10 +148,11 @@ class AppState:
         self.news = NewsGuard(config)
         self.risk = RiskGate(config, news=self.news)
         self.agent = build_agent_client(config)
-        # Strategy source NinjaTrader reports (UseAgentStrategies toggle), overriding the
-        # config default at runtime. None until the strategy first reports.
-        self.reported_strategy_source: str | None = None
-        self.agent.set_strategy_source(config.strategies.source)
+        # The strategy source (agent vs custom) lives in ONE place: the agent client. It is
+        # seeded from config in the client's __init__ and overridden at runtime by
+        # NinjaTrader's UseAgentStrategies toggle (set_strategy_source); effective_strategy_source()
+        # reads it back. Keeping a second copy here was a split-brain waiting to happen — the
+        # engine read the agent's copy while the dashboard read the server's.
         # Background worker: analyses run between bars, never on the ingest path.
         self.planner = Planner(config, self.agent) if config.planner.enabled else None
         self.journal = JournalStore(config.learning.journal_path)
@@ -190,9 +191,11 @@ class AppState:
         return self.reported_account or self.cfg.execution.account
 
     def effective_strategy_source(self) -> str:
-        """NT-reported strategy source (UseAgentStrategies) if any, else the config
-        default. "agent" = brain authors its own playbook; "custom" = on-disk playbooks."""
-        return self.reported_strategy_source or self.cfg.strategies.source
+        """The single source of truth for the strategy source, owned by the agent client:
+        NinjaTrader's UseAgentStrategies override if it has reported one, else the config
+        default it was seeded with. "agent" = brain authors its own playbook; "custom" =
+        on-disk playbooks."""
+        return self.agent.strategy_source()
 
     def _on_trade_closed(self, trade) -> None:
         lc = self.cfg.learning
@@ -524,14 +527,14 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             st.reported_account = name
         st.reported_allow_live = report.allow_live
         # Strategy source toggle (UseAgentStrategies). Reported before history so the
-        # pre-session study authors (agent) or skips authoring (custom) correctly.
+        # pre-session study authors (agent) or skips authoring (custom) correctly. The agent
+        # client is the single store — set it, and read it back for the changed-log compare.
         if report.use_agent_strategies is not None:
             source = "agent" if report.use_agent_strategies else "custom"
-            if source != st.reported_strategy_source:
+            if source != st.agent.strategy_source():
                 print(f"[hermes-bridge] strategy source is now '{source}' "
                       f"(NinjaTrader UseAgentStrategies={report.use_agent_strategies})",
                       flush=True)
-            st.reported_strategy_source = source
             st.agent.set_strategy_source(source)
         return {"ok": True, "account": st.effective_account(),
                 "strategy_source": st.effective_strategy_source()}

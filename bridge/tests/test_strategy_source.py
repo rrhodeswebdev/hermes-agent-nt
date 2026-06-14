@@ -384,7 +384,7 @@ def test_dashboard_omits_agent_list_in_custom_mode(tmp_path):
     # the dashboard must NOT show it as if it were being traded (custom trades the on-disk
     # playbooks, not the authored roster).
     app = _claude_app_with_strategies(tmp_path, regime="ranging")
-    app.state.appstate.reported_strategy_source = "custom"
+    app.state.appstate.agent.set_strategy_source("custom")
     strat = TestClient(app).get("/dashboard").json()["strategy"]
     assert strat["source"] == "custom"
     assert strat["list"] == [] and strat["active_index"] is None and strat["name"] is None
@@ -591,7 +591,7 @@ def test_clear_generated_strategy_resets(tmp_path):
 
 def test_reauthor_guard_custom_source(tmp_path):
     app = _claude_app_with_strategies(tmp_path)
-    app.state.appstate.reported_strategy_source = "custom"  # effective source → custom
+    app.state.appstate.agent.set_strategy_source("custom")  # the one store → custom
     r = TestClient(app).post("/control/reauthor").json()
     assert r["ok"] is False and "custom" in r["note"]
 
