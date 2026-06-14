@@ -306,6 +306,37 @@ class LearningConfig(BaseModel):
     max_lessons: int = 40             # cap applied lessons per reflection
 
 
+class NewsConfig(BaseModel):
+    """Major-news blackout. The bridge fetches an economic calendar and the RiskGate
+    blocks new ENTRIES (exits always allowed) within ``window_minutes`` of a high-impact
+    event for the configured currencies. Deterministic + server-side — never the LLM. Fails
+    OPEN: a fetch error keeps the last-good calendar, and with none cached, trading proceeds.
+    Disabled by default (neutral); turn it on in ``config/trading.yaml``."""
+
+    enabled: bool = False
+    # Where the calendar comes from:
+    #   "json"         — fetch ``feed_url`` (stable, sanctioned, RECOMMENDED).
+    #   "forexfactory" — scrape ``forexfactory_url`` directly (the embedded calendar blob).
+    #     Same events, but a more brittle path (internal markup) behind Cloudflare; use as an
+    #     alternate/fallback source. Both still fail OPEN.
+    source: Literal["json", "forexfactory"] = "json"
+    # Economic-calendar JSON. Default = the free ForexFactory weekly mirror (no key); items
+    # carry {title, country (currency code), date (ISO8601), impact}. Any source with the
+    # same shape works. Used when source == "json".
+    feed_url: str = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    # The ForexFactory calendar page scraped when source == "forexfactory".
+    forexfactory_url: str = "https://www.forexfactory.com/calendar"
+    # Only events whose currency is in this list trigger a blackout (MNQ/ES/NQ ⇒ USD).
+    currencies: list[str] = Field(default_factory=lambda: ["USD"])
+    # Which impact tiers count as "major". The feed uses High | Medium | Low | Holiday.
+    block_impacts: list[str] = Field(default_factory=lambda: ["High"])
+    # Block entries within ± this many minutes of a matching event's scheduled time.
+    window_minutes: float = Field(default=2.0, ge=0)
+    # Background refetch cadence (the weekly feed is near-static, so this is cheap).
+    refresh_minutes: float = Field(default=30.0, gt=0)
+    fetch_timeout_s: float = Field(default=10.0, gt=0)
+
+
 class BridgeConfig(BaseModel):
     strategy_id: str = "hermes-default"
     instrument: InstrumentConfig = Field(default_factory=InstrumentConfig)
@@ -320,6 +351,7 @@ class BridgeConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)
+    news: NewsConfig = Field(default_factory=NewsConfig)
 
     def apply_env(self) -> BridgeConfig:
         host = os.getenv("HERMES_BRIDGE_HOST")

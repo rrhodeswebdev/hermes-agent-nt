@@ -85,6 +85,16 @@ def render_text(d: dict | None) -> str:
         if pl.get("session_error"):
             # The pre-session study failed: every plan runs without the brief.
             lines.append(f"session ERROR: {pl['session_error']}"[:60])
+    nw = d.get("news")
+    if nw and nw.get("enabled"):
+        if nw.get("blackout_active"):
+            lines.append(f"news: BLACKOUT {nw.get('active_event', '')}"[:60])
+        elif not nw.get("ok"):
+            lines.append("news: feed down (trading)"[:60])
+        else:
+            nxt = nw.get("next_event")
+            tail = f" · next {nxt['title']} {_hhmmss(nxt['ts'])}" if nxt else ""
+            lines.append(f"news: clear{tail}"[:60])
     lines.append("-" * 40)
     ld = d.get("last_decision")
     if ld:
@@ -173,6 +183,17 @@ def render_panel(d: dict | None) -> str:
         lines.append(f"planner_error={_oneline(pl['last_error'])}")
     if pl.get("session_error"):
         lines.append(f"session_error={_oneline(pl['session_error'])}")
+    # Major-news blackout (emitted only when the feature is on).
+    nw = d.get("news") or {}
+    if nw.get("enabled"):
+        lines.append("news_enabled=1")
+        lines.append(f"news_ok={1 if nw.get('ok') else 0}")
+        lines.append(f"news_blackout={1 if nw.get('blackout_active') else 0}")
+        if nw.get("active_event"):
+            lines.append(f"news_active={_oneline(nw['active_event'])}")
+        nxt = nw.get("next_event")
+        if nxt:
+            lines.append(f"news_next={_oneline(nxt.get('title', ''))}")
     for it in (strat.get("list") or []):
         name = _oneline(it.get("name", "")).replace("|", "/")
         regime = _oneline(it.get("regime", "")).replace("|", "/")
@@ -259,6 +280,10 @@ DASHBOARD_HTML = """<!doctype html>
   .schip{display:inline-block;padding:0 7px;border-radius:10px;font-size:10px;font-weight:600;
     margin-left:8px;background:#21262d;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
   .srow.active .schip{background:rgba(63,185,80,.18);color:var(--grn)}
+  .news{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:10px 14px;margin-bottom:16px}
+  .news.blk{border-color:var(--red);background:rgba(248,81,73,.10)}
+  .news .nlabel{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
 </style></head>
 <body>
 <header><h1>HERMES · <span id="inst">—</span></h1><div id="conn">connecting…</div></header>
@@ -275,6 +300,9 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card"><div class="label">Realized P&L</div><div class="val" id="rpnl">—</div></div>
     <div class="card"><div class="label">Trades / Goal</div><div class="val" id="trades">—</div></div>
     <div class="card"><div class="label">Data age</div><div class="val" id="age">—</div></div>
+  </div>
+  <div class="news" id="news" style="display:none">
+    <span class="nlabel">News</span><span id="nstatus" class="dim"></span>
   </div>
   <div class="last"><div class="act" id="lact">—</div><div class="rat" id="lrat"></div></div>
   <table><thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Close</th><th>Order</th><th>Rationale</th></tr></thead>
@@ -329,6 +357,24 @@ async function tick(){
     document.getElementById('trades').textContent=s.trades_today+' · +'+d.goal.profit_target+'/-'+d.goal.max_daily_loss;
     const age=d.data_age_seconds; const ae=document.getElementById('age');
     ae.textContent=(age==null?'?':Math.round(age)+'s'); ae.className='val '+(age==null?'dim':age>120?'red':'grn');
+    // Major-news blackout. textContent only (feed titles are third-party) → no HTML injection.
+    const nw=d.news; const ne=document.getElementById('news'); const ns=document.getElementById('nstatus');
+    if(nw&&nw.enabled){
+      ne.style.display='';
+      if(nw.blackout_active){
+        ne.className='news blk'; ns.className='red';
+        ns.textContent='⛔ BLACKOUT · '+(nw.active_event||'high-impact event');
+      }else if(!nw.ok){
+        ne.className='news'; ns.className='amber';
+        ns.textContent='feed unavailable — trading (fail-open)'+(nw.error?' · '+nw.error:'');
+      }else{
+        ne.className='news'; ns.className='grn';
+        let t='clear ('+(nw.event_count||0)+' today)';
+        if(nw.next_event){const nt=new Date(nw.next_event.ts*1000).toLocaleTimeString();
+          t+=' · next: '+nw.next_event.currency+' '+nw.next_event.title+' @ '+nt;}
+        ns.textContent=t;
+      }
+    }else{ ne.style.display='none'; }
     const ld=d.last_decision;
     if(ld){const a=document.getElementById('lact');
       a.textContent=ld.action+'  ·  conf '+ld.confidence.toFixed(2)+(s.halted?'  ·  HALTED':'');
