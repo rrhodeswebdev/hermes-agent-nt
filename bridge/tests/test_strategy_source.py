@@ -20,7 +20,8 @@ from hermes_bridge.claude_agent import (
 )
 from hermes_bridge.config import BridgeConfig, load_config
 from hermes_bridge.plan import PlanRequest, TradePlan
-from hermes_bridge.server import create_app, current_regime, strategy_list_with_active
+from hermes_bridge.server import create_app
+from hermes_bridge.views import current_regime, strategy_list_with_active
 from tests.conftest import make_agent_request, make_bar, synthetic_bars
 
 FRAMEWORK_MARK = "FRAMEWORK-HERMES-MARK"

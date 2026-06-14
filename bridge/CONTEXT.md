@@ -38,7 +38,8 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 | `reflect.py` | Post-trade self-improvement: proposes lesson/notes/profile updates into `hermes/learned/`. |
 | `memory.py` | Loads learned memory (lessons, agent notes, profile, similar past trades) for the decision prompt. |
 | `journal.py` | Episodic trade journal (`bridge/state/journal.jsonl`). |
-| `dashboard.py` | Text + self-contained auto-refreshing HTML dashboard. |
+| `dashboard.py` | Text + self-contained auto-refreshing HTML dashboard (the renderers). |
+| `views.py` | Dashboard projection — turns the live `AppState` into the JSON/text payload the dashboards render (active-setup highlight, authoring telemetry, data-age). Read-only; testable without the FastAPI app. |
 | `replay_sim.py` | Offline replay simulator (full enter→manage→exit→daily-goal loop, no NT/LLM). |
 
 ## Where things live
