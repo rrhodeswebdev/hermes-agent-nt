@@ -9,10 +9,18 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # The engine's two decision contexts: hunting an entry vs managing an open position.
 Mode = Literal["seek_entry", "manage_position"]
+
+
+class FrozenModel(BaseModel):
+    """Base for the immutable value/message types. Assignment after construction raises, so
+    these flow through the engine and the risk gate as values, never mutated in place. Build a
+    changed instance with ``model_copy(update={...})`` (already the convention in risk.py)."""
+
+    model_config = ConfigDict(frozen=True)
 
 
 class BrainTimeout(Exception):
@@ -44,7 +52,7 @@ class Side(StrEnum):
     FLAT = "FLAT"
 
 
-class Bar(BaseModel):
+class Bar(FrozenModel):
     """A single OHLCV bar. `ts` is epoch seconds (UTC) at bar close."""
 
     ts: float
@@ -71,7 +79,7 @@ class BarIngest(BaseModel):
     bar: Bar
 
 
-class Decision(BaseModel):
+class Decision(FrozenModel):
     """What the agent (LLM or rules) wants to do on this bar."""
 
     action: Action = Action.WAIT
@@ -89,7 +97,7 @@ class Decision(BaseModel):
     need_history: bool = False
 
 
-class OrderCommand(BaseModel):
+class OrderCommand(FrozenModel):
     """A risk-approved instruction for NinjaTrader to execute on the Sim account."""
 
     id: str
@@ -103,7 +111,7 @@ class OrderCommand(BaseModel):
     reason: str = ""
 
 
-class Fill(BaseModel):
+class Fill(FrozenModel):
     """Execution report sent back from NinjaTrader."""
 
     order_id: str | None = None
@@ -131,7 +139,7 @@ class AccountReport(BaseModel):
     use_agent_strategies: bool | None = None
 
 
-class Level(BaseModel):
+class Level(FrozenModel):
     """One support/resistance zone from swing-pivot clustering (levels.py).
 
     Served by `GET /levels` for the chart overlay and fed into the plan-analysis
@@ -146,7 +154,7 @@ class Level(BaseModel):
     kind: Literal["support", "resistance", "pivot"]
 
 
-class AccountState(BaseModel):
+class AccountState(FrozenModel):
     instrument: str
     timeframe: str
     position: int = 0                 # signed contracts

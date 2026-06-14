@@ -20,7 +20,8 @@ from hermes_bridge.claude_agent import (
 )
 from hermes_bridge.config import BridgeConfig, load_config
 from hermes_bridge.plan import PlanRequest, TradePlan
-from hermes_bridge.server import create_app, current_regime, strategy_list_with_active
+from hermes_bridge.server import create_app
+from hermes_bridge.views import current_regime, strategy_list_with_active
 from tests.conftest import make_agent_request, make_bar, synthetic_bars
 
 FRAMEWORK_MARK = "FRAMEWORK-HERMES-MARK"
@@ -384,7 +385,7 @@ def test_dashboard_omits_agent_list_in_custom_mode(tmp_path):
     # the dashboard must NOT show it as if it were being traded (custom trades the on-disk
     # playbooks, not the authored roster).
     app = _claude_app_with_strategies(tmp_path, regime="ranging")
-    app.state.appstate.reported_strategy_source = "custom"
+    app.state.appstate.agent.set_strategy_source("custom")
     strat = TestClient(app).get("/dashboard").json()["strategy"]
     assert strat["source"] == "custom"
     assert strat["list"] == [] and strat["active_index"] is None and strat["name"] is None
@@ -591,7 +592,7 @@ def test_clear_generated_strategy_resets(tmp_path):
 
 def test_reauthor_guard_custom_source(tmp_path):
     app = _claude_app_with_strategies(tmp_path)
-    app.state.appstate.reported_strategy_source = "custom"  # effective source → custom
+    app.state.appstate.agent.set_strategy_source("custom")  # the one store → custom
     r = TestClient(app).post("/control/reauthor").json()
     assert r["ok"] is False and "custom" in r["note"]
 

@@ -167,7 +167,7 @@ def session_for_ts(ts: float) -> str:
     return "RTH" if 570 <= minutes < 960 else "ETH"  # 09:30 = 570, 16:00 = 960
 
 
-@dataclass
+@dataclass(frozen=True)
 class MarketContext:
     """Deterministic features handed to the agent each bar (LLM or rules).
 

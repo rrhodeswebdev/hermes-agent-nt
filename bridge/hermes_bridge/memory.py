@@ -47,7 +47,7 @@ def _render_lesson(meta: dict, body: str) -> str:
     return f"---\n{fm}\n---\n{body.strip()}\n"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Lesson:
     name: str
     status: str
