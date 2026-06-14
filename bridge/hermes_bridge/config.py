@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def timeframe_seconds(tf: str, default: float = 60.0) -> float:
@@ -53,27 +53,33 @@ class InstrumentConfig(BaseModel):
 
 
 class StrategyParams(BaseModel):
-    atr_period: int = 14
-    swing_lookback: int = 3        # bars each side of a pivot to confirm a swing high/low
-    atr_stop_mult: float = 1.5
-    atr_target_mult: float = 2.0
-    pullback_atr: float = 0.5      # how close (in ATR) to the swing still counts as a pullback
-    min_confidence: float = 0.55   # engine ignores Decisions below this confidence
+    atr_period: int = Field(default=14, ge=1)
+    swing_lookback: int = Field(  # bars each side of a pivot to confirm a swing high/low
+        default=3, ge=1
+    )
+    atr_stop_mult: float = Field(default=1.5, gt=0)
+    atr_target_mult: float = Field(default=2.0, gt=0)
+    pullback_atr: float = Field(  # how close (in ATR) to the swing still counts as a pullback
+        default=0.5, ge=0
+    )
+    min_confidence: float = Field(  # engine ignores Decisions below this confidence
+        default=0.55, ge=0.0, le=1.0
+    )
     # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
     # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
     # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is
     # unchanged). The floor is what stops a 1m noise wick from tagging a razor-thin stop;
     # the ceiling caps the stop in a vol spike (size then clamps down to fit max_risk). See
     # stops.atr_band_stop_ticks. Enforced as the final word by the RiskGate on every order.
-    min_stop_ticks: int = 0
-    max_stop_ticks: int = 0
+    min_stop_ticks: int = Field(default=0, ge=0)
+    max_stop_ticks: int = Field(default=0, ge=0)
     # Volatility-scaled stop FLOOR, enforced by the RiskGate on EVERY entry regardless of
     # which brain set the stop. The minimum protective-stop distance is
     # round(min_stop_atr_mult × ATR) in ticks (still capped by max_stop_ticks). This is the
     # fix for a brain that proposes a razor-thin stop while ATR is large: a fixed tick floor
     # can't adapt, so a 2-tick stop against a 40pt ATR slips through. 0 = disabled (neutral
     # default; only the fixed min_stop_ticks applies). See stops.vol_stop_floor_ticks.
-    min_stop_atr_mult: float = 0.0
+    min_stop_atr_mult: float = Field(default=0.0, ge=0.0)
     # Winner management — enforced deterministically by the engine (brain-agnostic, like the
     # RiskGate), NOT delegated to the LLM. Once a position runs breakeven_r × (initial stop
     # distance) in our favor, the working stop is pulled to breakeven; with trail_enabled it
@@ -81,35 +87,52 @@ class StrategyParams(BaseModel):
     # tightening. breakeven_r = 0 disables it entirely (static bracket, the legacy default),
     # so a wider initial stop never turns a trade that worked into a big give-back. See
     # stops.managed_stop_price.
-    breakeven_r: float = 0.0
+    breakeven_r: float = Field(default=0.0, ge=0.0)
     trail_enabled: bool = False
+
+    @model_validator(mode="after")
+    def _check_stop_band(self) -> StrategyParams:
+        # A bound of 0 = "unbounded", so only a band where BOTH ends are active can invert.
+        lo, hi = self.min_stop_ticks, self.max_stop_ticks
+        if lo > 0 and hi > 0 and lo > hi:
+            raise ValueError(
+                f"min_stop_ticks ({lo}) must not exceed max_stop_ticks ({hi}); "
+                "the stop band is inverted"
+            )
+        return self
 
 
 class RiskParams(BaseModel):
-    max_contracts: int = 2
-    max_risk_per_trade: float = 250.0   # USD
-    max_trades_per_day: int = 10
+    max_contracts: int = Field(default=2, ge=1)
+    max_risk_per_trade: float = Field(default=250.0, gt=0)   # USD
+    max_trades_per_day: int = Field(default=10, ge=1)
     # Injected only if a decision lacks a stop. Kept within max_risk_per_trade for a
     # single contract (16 ticks * $12.50 = $200 < $250) so the safety net is usable.
-    default_stop_ticks: int = 16
+    default_stop_ticks: int = Field(default=16, ge=1)
     # ATR-regime risk scaling. When the current ATR is >= strategies.reauthor.shock_ratio ×
     # the longer-window baseline ATR (a volatility spike — the SAME shock the re-author
     # governor reacts to), the per-trade dollar budget is multiplied by this factor (e.g.
     # 0.5 = halve size in a shock; size clamps down accordingly). 1.0 disables scaling
     # (the neutral default). See stops.risk_scale_for_atr.
-    shock_risk_scale: float = 1.0
+    shock_risk_scale: float = Field(default=1.0, gt=0)
     # Confidence-scaled sizing. When True, an entry's size ramps with the decision's
     # confidence: 1 contract at strategy.min_confidence (the lowest confidence an entry is
     # taken at) up to the full budget — the lesser of max_contracts and the per-trade
     # dollar cap — at full_size_confidence. When False (the neutral default), size is the
     # brain's requested qty clamped DOWN to the caps (legacy). See stops.size_for_confidence.
     confidence_sizing: bool = False
-    full_size_confidence: float = 0.85   # confidence at/above which the full budget is used
+    full_size_confidence: float = Field(  # confidence at/above which the full budget is used
+        default=0.85, ge=0.0, le=1.0
+    )
 
 
 class DailyGoal(BaseModel):
-    profit_target: float = 500.0   # USD — halt new entries for the day when reached
-    max_daily_loss: float = 400.0  # USD — flatten + halt when reached (stored positive)
+    profit_target: float = Field(  # USD — halt new entries for the day when reached
+        default=500.0, gt=0
+    )
+    max_daily_loss: float = Field(  # USD — flatten + halt when reached (stored positive)
+        default=400.0, gt=0
+    )
 
 
 class SessionWindow(BaseModel):
