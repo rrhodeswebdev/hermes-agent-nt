@@ -161,3 +161,39 @@ def test_fill_updates_account_and_flatten_kill_switch(cfg):
     assert r.json()["halted"] is True
     cmd = c.get("/commands/next", params={"strategy_id": cfg.strategy_id}).json()["command"]
     assert cmd["action"] == "FLATTEN"
+
+
+def test_decisions_ring_snapshot_is_thread_safe(cfg):
+    # The dashboard snapshots st.decisions (list(deque)) on one worker thread while
+    # /ingest/bar appends on another. Both take st.decisions_lock, so the snapshot can't
+    # raise "deque mutated during iteration". Mirror that contention here: a writer hammers
+    # the ring (under the lock, like ingest_bar) while we build the dashboard payload — which
+    # must never raise. Drop either lock and this fails (flakily) with a RuntimeError.
+    import threading
+
+    from hermes_bridge.views import build_dashboard_payload
+
+    st = create_app(cfg).state.appstate
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        i = 0
+        while not stop.is_set():
+            with st.decisions_lock:
+                st.decisions.append({"ts": i, "action": "WAIT"})
+            i += 1
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        for _ in range(2000):
+            try:
+                build_dashboard_payload(st)
+            except BaseException as exc:  # noqa: BLE001 — record any concurrency failure
+                errors.append(exc)
+                break
+    finally:
+        stop.set()
+        t.join(timeout=2)
+    assert not errors, f"dashboard snapshot raced with the writer: {errors[0]!r}"

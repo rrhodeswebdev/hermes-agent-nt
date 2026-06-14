@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from .models import AccountState, Fill, Side
 
 
-@dataclass
+@dataclass(frozen=True)
 class _DayKey:
     """Identifies the trading day for resets. Epoch-seconds floored to UTC day by
     default; a real deployment can key on the session timezone instead."""

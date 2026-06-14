@@ -31,9 +31,8 @@ def test_bar_delta_sign():
 
 
 def test_bar_delta_uses_real_orderflow_when_present():
-    b = make_bar(0, 100, 101, 99, 100, 1000)
-    b.ask_volume = 700
-    b.bid_volume = 300
+    b = make_bar(0, 100, 101, 99, 100, 1000).model_copy(
+        update={"ask_volume": 700, "bid_volume": 300})
     assert bar_delta(b) == 400
 
 

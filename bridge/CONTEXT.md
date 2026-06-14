@@ -25,18 +25,21 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 | `news.py` | `NewsGuard` — fetches an economic calendar (`source: json` feed, or `forexfactory` direct-scrape); the `RiskGate` blocks entries within ±`window_minutes` of a high-impact event for the configured currencies (exits always allowed). Fails open (cached, then trade). Surfaced on `/health` + dashboard. |
 | `engine.py` | `TradingEngine` — turns a `Decision` into an `OrderCommand`; enforces engine-side, brain-agnostic breakeven + trail. |
 | `stops.py` | Vol-scaled, band-clamped stop sizing; breakeven/trail math. |
+| `reauthor.py` | `ReauthorGovernor` — agent-mode decision for WHEN to re-author the playbook (trend-flip / uncovered-regime / vol-shock / ceiling / failed-author retry). Pure state machine; the engine owns the guards + the act. |
 | `session.py` | `SessionState` — P&L, daily goal, halt/flatten state. |
 | `store.py` | `BarStore` — in-memory bar history. |
 | `indicators.py` | ATR, swings, delta, swing-**structure** regime classification (HH/HL vs LH/LL vs contained). |
 | `levels.py` | Swing-pivot S/R zones (served at `GET /levels`, fed to the plan prompt). |
 | `plan.py` | Pre-armed plan cycle — analysis runs *between* bars, arms close conditions; each bar close answers from the armed plan (LLM off the critical path). |
 | `agent_client.py` | `AgentClient` protocol + `MockAgentClient` (the deterministic rules engine / safe fallback). |
-| `claude_agent.py` | `ClaudeAgentClient` — builds the system prompt from context files, asks for a schema-validated `Decision`. |
+| `claude_agent.py` | `ClaudeAgentClient` — gathers the live knowledge/learned/playbook pieces, runs the call, parses a schema-validated `Decision`. |
+| `prompts.py` | Pure system-prompt assembly: composes the brain's prompt (framework knowledge + active playbook + learned memory + task instruction) from its parts. The single place "what the brain sees" is built. |
 | `claude_cli.py` | Low-level `claude -p --safe-mode` invocation (oneshot + persistent session). |
 | `reflect.py` | Post-trade self-improvement: proposes lesson/notes/profile updates into `hermes/learned/`. |
 | `memory.py` | Loads learned memory (lessons, agent notes, profile, similar past trades) for the decision prompt. |
 | `journal.py` | Episodic trade journal (`bridge/state/journal.jsonl`). |
-| `dashboard.py` | Text + self-contained auto-refreshing HTML dashboard. |
+| `dashboard.py` | Text + self-contained auto-refreshing HTML dashboard (the renderers). |
+| `views.py` | Dashboard projection — turns the live `AppState` into the JSON/text payload the dashboards render (active-setup highlight, authoring telemetry, data-age). Read-only; testable without the FastAPI app. |
 | `replay_sim.py` | Offline replay simulator (full enter→manage→exit→daily-goal loop, no NT/LLM). |
 
 ## Where things live
@@ -49,6 +52,12 @@ Package lives in `bridge/hermes_bridge/`; installed editable as the `hermes-brid
 
 - **Run everything from the venv:** `bridge/.venv/bin/pytest` and
   `bridge/.venv/bin/hermes-bridge …`. Tests must pass and `ruff` must be clean before commit.
+- **Value/message types are immutable (functional core).** `Bar`, `Decision`, `OrderCommand`,
+  `Fill`, `AccountState`, `Level` and friends (`MarketContext`, `TradePlan`, `EntryTrigger`,
+  `ExitRule`, `RiskDecision`, `EngineResult`, `ClosedTrade`, `AgentRequest`/`PlanRequest`) are
+  **frozen** — never assign to a field; build a changed instance with `model_copy(update=…)`
+  (Pydantic) or `dataclasses.replace(…)`. The mutable runtime state lives only in the shell
+  classes (`SessionState`, `BarStore`, `CommandQueue`, `Planner`, `TradeTracker`).
 - **The `RiskGate` is invariant.** Never add an order path that bypasses it. Config in
   `trading.yaml` is the enforced source of truth — context prose only guides the brain.
 - **Any brain failure degrades to `WAIT`;** open positions stay protected by the resting

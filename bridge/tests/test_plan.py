@@ -347,9 +347,8 @@ def test_low_confidence_trigger_suppressed(cfg):
     class TimidAgent(_StubAgent):
         def propose_plan(self, preq: PlanRequest) -> TradePlan:
             plan = super().propose_plan(preq)
-            for t in plan.triggers:
-                t.confidence = 0.1
-            return plan
+            triggers = [t.model_copy(update={"confidence": 0.1}) for t in plan.triggers]
+            return plan.model_copy(update={"triggers": triggers})
 
     engine, session, planner = _engine(cfg, TimidAgent(cfg))
     bars = synthetic_bars(3)

@@ -32,6 +32,7 @@ from .journal import JournalStore, select_similar
 from .memory import LearnedStore
 from .models import Action, Bar, BrainTimeout, Decision
 from .plan import PlanRequest, TradePlan
+from .prompts import agent_knowledge, authored_playbook_block, system_prompt
 
 # JSON Schema for `--json-schema`: the Decision shape the agent must return.
 DECISION_JSON_SCHEMA = json.dumps(
@@ -374,15 +375,15 @@ class ClaudeAgentClient(AgentClient):
             plan = TradePlan.model_validate(data)
         except Exception:  # noqa: BLE001 — malformed plan = no plan, never a crash
             return None
-        self._bind_plan_setups(plan)
-        return plan
+        return self._bind_plan_setups(plan)
 
-    def _bind_plan_setups(self, plan: TradePlan) -> None:
+    def _bind_plan_setups(self, plan: TradePlan) -> TradePlan:
         """Validate each trigger/exit ``setup`` against the authored roster (unknown → None,
-        never a guess) and derive ``plan.active_strategy`` from what is actually armed — the
-        first trigger carrying a setup (seek_entry) or the exit's setup (manage_position).
-        This is what makes the dashboard's highlighted setup the one the FIRING condition
-        belongs to, rather than a free-text label the brain could phrase any way."""
+        never a guess) and derive ``active_strategy`` from what is actually armed — the first
+        trigger carrying a setup (seek_entry) or the exit's setup (manage_position). This is
+        what makes the dashboard's highlighted setup the one the FIRING condition belongs to,
+        rather than a free-text label the brain could phrase any way. Returns a NEW plan (the
+        plan models are frozen — bound by copy, not in-place mutation)."""
         canon = {
             s["name"].strip().lower(): s["name"]
             for s in (self._generated_strategies or [])
@@ -392,14 +393,17 @@ class ClaudeAgentClient(AgentClient):
         def _canonical(name: str | None) -> str | None:
             return canon.get(name.strip().lower()) if name else None
 
-        for t in plan.triggers:
-            t.setup = _canonical(t.setup)
-        if plan.exit is not None:
-            plan.exit.setup = _canonical(plan.exit.setup)
-        armed = next((t.setup for t in plan.triggers if t.setup), None)
-        if armed is None and plan.exit is not None:
-            armed = plan.exit.setup
-        plan.active_strategy = armed
+        triggers = [t.model_copy(update={"setup": _canonical(t.setup)}) for t in plan.triggers]
+        exit_rule = (
+            plan.exit.model_copy(update={"setup": _canonical(plan.exit.setup)})
+            if plan.exit is not None else None
+        )
+        armed = next((t.setup for t in triggers if t.setup), None)
+        if armed is None and exit_rule is not None:
+            armed = exit_rule.setup
+        return plan.model_copy(
+            update={"triggers": triggers, "exit": exit_rule, "active_strategy": armed}
+        )
 
     def analyze_session(self, preq: PlanRequest, history: list[Bar]) -> str:
         """One-time history study on `session_model` (falls back to `model`).
@@ -525,12 +529,9 @@ class ClaudeAgentClient(AgentClient):
     def _system_prompt(self, instruction: str, *, include_active_strategy: bool = True) -> str:
         # Rebuilt per call (cheaply): the learned block changes as reflection curates
         # lessons, so it must not be frozen in a cache. The static knowledge stays cached.
-        parts = [self._strategy_knowledge(include_active_strategy=include_active_strategy)]
-        learned = self._learned_block()
-        if learned:
-            parts.append(learned)
-        parts.append(instruction)
-        return "\n\n".join(parts)
+        # Composition lives in prompts.py; this just gathers the live pieces.
+        knowledge = self._strategy_knowledge(include_active_strategy=include_active_strategy)
+        return system_prompt(knowledge, self._learned_block(), instruction)
 
     def _strategy_knowledge(self, *, include_active_strategy: bool = True) -> str:
         """The knowledge block: framework + the active strategy for the current source.
@@ -548,32 +549,13 @@ class ClaudeAgentClient(AgentClient):
                 )
             if not include_active_strategy:
                 return self._framework
-            return self._framework + "\n\n---\n\n" + self._authored_playbook_block()
+            return agent_knowledge(
+                self._framework,
+                authored_playbook_block(self._generated_strategy, self._generated_strategies),
+            )
         if self._knowledge is None:
             self._knowledge = load_context_files(c.context_dir) or c.context_hint
         return self._knowledge
-
-    def _authored_playbook_block(self) -> str:
-        if self._generated_strategy:
-            roster = ""
-            if self._generated_strategies:
-                # Enumerate the canonical setup names so the brain tags each trigger's
-                # `setup` with an EXACT string the bridge validates and the dashboard matches.
-                header = "\n\nYour setups (set each trigger's `setup` to the one it trades):\n"
-                roster = header + "\n".join(
-                    f"- {s['name']}" + (f" ({s['regime']})" if s.get("regime") else "")
-                    for s in self._generated_strategies
-                )
-            return (
-                "=== ACTIVE STRATEGY (you authored this from the pre-session history "
-                "study — it is binding for this session) ===\n" + self._generated_strategy
-                + roster
-            )
-        return (
-            "=== ACTIVE STRATEGY ===\n"
-            "No strategy has been authored yet (the pre-session study has not produced "
-            "one). Until one is in place, WAIT on every bar and arm NO entry triggers."
-        )
 
     def _learned_block(self) -> str:
         lc = self.cfg.learning
