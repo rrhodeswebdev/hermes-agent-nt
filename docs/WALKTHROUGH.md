@@ -17,7 +17,7 @@ you'll understand every piece without needing to read the code.
 Think of it as a small team, each with one job:
 
 | Part | Plain-English role | Lives on | File(s) |
-|------|--------------------|----------|---------|
+| --- | --- | --- | --- |
 | **NinjaTrader 8** | The TV showing the live market | Windows (Parallels) | — |
 | **The Strategy** | The mail carrier: mails each new bar to the bridge, places the orders it's told to | Windows (inside NT) | `ninjatrader/HermesBridgeStrategy.cs` |
 | **The Bridge** | The desk + safety guard: keeps history, computes indicators, asks the brain, checks every order, keeps score | Mac | `bridge/hermes_bridge/*` |
@@ -43,7 +43,7 @@ approved.
 flowchart LR
     subgraph WIN["🪟 Windows / Parallels"]
         NT["NinjaTrader 8<br/>(live chart)"]
-        STRAT["HermesBridgeStrategy<br/>mails bars · places orders · S/R lines"]
+        STRAT["HermesBridgeStrategy<br/>mails bars · places orders"]
         PANEL["HERMES button<br/>(opens dashboard window)"]
         NT --- STRAT
         NT --- PANEL
@@ -71,7 +71,7 @@ flowchart LR
     BRAIN -. "client: claude" .-> CLAUDE
     BRAIN -. "client: mock" .-> MOCK
     ENG --> RISK --> SESS
-    PANEL -- "GET /health · /levels.txt" --> SRV
+    PANEL -- "GET /health" --> SRV
     PANEL -. "click → opens" .-> WEB
     WEB -- "GET /dashboard" --> SRV
 ```
@@ -263,7 +263,7 @@ every bar. Want it to trade differently? Edit the notes, restart the bridge. The
 the order the brain reads them:
 
 | File | What it teaches the brain |
-|------|---------------------------|
+| --- | --- |
 | `HERMES.md` | The operating loop and the non-negotiables ("always use a stop," "when unsure, WAIT," "one position at a time"). |
 | `strategy.md` | **The setups it trades:** structure-based plays (trend pullback to the higher-low, breakouts, range-edge fades) selected by the swing-structure regime, confirmed by order flow, with ATR-based brackets. |
 | `order-flow.md` | How to read buying vs. selling pressure (delta, absorption, exhaustion) — the *confirmation* layer. |
@@ -321,11 +321,11 @@ what the robot is thinking:
 - **Web dashboard** — open `http://localhost:8787/` (or the Mac's LAN IP from Windows). A
   live page showing position, P&L, trade count vs. goal, data freshness, the latest decision
   with its reason, and a scrolling history of recent decisions. Auto-refreshes every 3s.
-- **From the chart** — `HermesBridgeStrategy` draws the agent's S/R lines plus a small,
-  draggable **"HERMES — DASHBOARD"** button (with a green/amber/red bridge-status dot).
-  Clicking it opens that same web dashboard **inside a NinjaTrader window** via an embedded
-  WebView2 (or your default browser if WebView2 isn't installed). The button polls only
-  `/health` and `/levels.txt`; the rich panel is the HTML page itself.
+- **From the chart** — `HermesBridgeStrategy` draws a small, draggable **"HERMES —
+  DASHBOARD"** button (with a green/amber/red bridge-status dot). Clicking it opens that
+  same web dashboard **inside a NinjaTrader window** via an embedded WebView2 (or your
+  default browser if WebView2 isn't installed). The button polls only `/health`; the S/R
+  levels and the rich panel both live in the HTML page itself.
 
 ### G. Starting it all — *`start.sh`, scripts, Makefile*
 
@@ -418,7 +418,7 @@ For testing, the entry rules are currently **loosened on purpose** so the agent 
 often (every change is tagged `RELAXED (test)` in the files):
 
 | Setting | Default | Now | Effect |
-|---------|---------|-----|--------|
+| --- | --- | --- | --- |
 | `min_confidence` | 0.55 | **0.40** | Accepts lower-conviction entries |
 | `pullback_atr` | 0.5 | **0.9** | More dips count as a valid setup |
 | `max_trades_per_day` | 10 | **20** | More entries allowed per session |

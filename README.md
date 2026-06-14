@@ -17,7 +17,7 @@ which reasons about the market using **order flow + price action**, trades on a
 > **safety authority** that actually places every order — identically in both strategy
 > modes.
 
-```
+```text
 NinjaTrader 8  ──bars──▶  hermes-bridge  ──asks──▶  Decision brain
 (NinjaScript C#)          (Python, risk gate)        (claude | mock)
        ▲                         │   ▲                 + trading context files
@@ -37,7 +37,7 @@ NinjaTrader 8  ──bars──▶  hermes-bridge  ──asks──▶  Decision
 ## Repository map
 
 | Path | What |
-|------|------|
+| --- | --- |
 | `bridge/` | Python bridge: ingest, risk gate, session/daily-goal, engine, server, tests |
 | `ninjatrader/HermesBridgeStrategy.cs` | NinjaScript Strategy (streams bars, executes orders) |
 | `hermes/context/` | the trading knowledge/strategy/risk/goal (context files; fed to whichever brain) |

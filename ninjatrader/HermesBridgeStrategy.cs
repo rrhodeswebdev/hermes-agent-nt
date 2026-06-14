@@ -27,8 +27,8 @@ using DXVec = SharpDX.Vector2;
 //  HermesBridgeStrategy  (strategy + on-chart dashboard button)
 // -----------------------------------------------------------------------------
 //  Streams chart data to the Python "hermes-bridge", executes the risk-approved
-//  orders it returns (Sim by default), draws the agent's S/R levels on the chart,
-//  and shows a small on-chart "HERMES — DASHBOARD" button. Clicking the button
+//  orders it returns (Sim by default), and shows a small on-chart
+//  "HERMES — DASHBOARD" button. Clicking the button
 //  opens the bridge's full HTML dashboard (http://<host>:<port>/) inside a
 //  NinjaTrader window via an embedded WebView2 (Chromium); if WebView2 isn't
 //  available it falls back to the system default browser. There is no longer an
@@ -44,13 +44,13 @@ using DXVec = SharpDX.Vector2;
 //      dashboard/logs follow the chart's account selection, not a static config default.
 //
 //  ON-CHART BUTTON + DASHBOARD:
-//    * A background timer polls /health (reachability) + /levels.txt (S/R) — NO
-//      chart/UI/dispatcher calls from the timer (AGENTS.md #17).
+//    * A background timer polls /health (reachability) — NO chart/UI/dispatcher
+//      calls from the timer (AGENTS.md #17).
 //    * The button is drawn in OnRender (SharpDX only, no Draw.* there — #13); a
 //      small dot shows bridge reachability (green ok / amber connecting / red
-//      offline). S/R lines use Draw.* from the throttled OnBarUpdate. Brushes are
-//      device resources created eagerly in OnRenderTargetChanged with a self-heal
-//      in OnRender (§5b). _terminated (set first in Terminated) gates DX teardown.
+//      offline). Brushes are device resources created eagerly in
+//      OnRenderTargetChanged with a self-heal in OnRender (§5b). _terminated
+//      (set first in Terminated) gates DX teardown.
 //    * The button is click-draggable (double-click resets; a clean click opens the
 //      dashboard). Its position persists via serialized ButtonOffsetX/Y.
 //    * The dashboard window is embedded WebView2, loaded by reflection so the
@@ -128,11 +128,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Timer _timer;
         private int _pollBusy;   // Interlocked gate: timer ticks must not overlap
 
-        private volatile string _levelsText = "";   // raw /levels.txt, parsed on the chart thread
         private volatile string _error;             // last poll failure (null when healthy)
         private volatile bool _everPolled;          // a /health poll has succeeded at least once
-
-        private DateTime _lastDrawUtc = DateTime.MinValue;  // throttle for Draw.* (S/R lines)
 
         // ---- dashboard window (embedded WebView2, opened by reflection) ----------
         private System.Windows.Window _dashWin;      // NT NTWindow when resolvable, else a plain WPF window; null once closed
@@ -168,7 +165,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private D2D.RenderTarget _lastSeenRT;       // target the brush palette was created against
         private bool _dxInitialized;                // palette valid for _lastSeenRT
         private int _renderErrorCount;              // bounded error prints
-        private int _barErrorCount;
         private int _stateErrorCount;
 
         private DW.TextFormat _fHead, _fSub;
@@ -181,9 +177,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         // this if the button reads too small on a high-DPI / 4K chart.
         [NinjaScriptProperty]
         public int FontSize { get; set; } = 18;
-
-        [NinjaScriptProperty]
-        public bool ShowLevels { get; set; } = true;   // plot the agent's S/R (swing) lines
 
         // Dragged button position (px offset from the default top-left anchor). Not
         // browsable — set by dragging; serialized so it persists with the workspace.
@@ -242,7 +235,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (State == State.SetDefaults)
             {
                 Description = "Streams bars to the Hermes bridge, executes approved orders (Sim), "
-                    + "draws the agent's S/R levels, and shows an on-chart button that opens the "
+                    + "and shows an on-chart button that opens the "
                     + "HTML dashboard in a NinjaTrader (WebView2) window.";
                 Name = "HermesBridgeStrategy";
                 Calculate = Calculate.OnBarClose;          // one decision per closed bar
@@ -255,8 +248,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.DataLoaded)
             {
-                // Background poll (/health for the button's status dot + /levels.txt for
-                // S/R). Cheap; the chart render path reads only cached fields.
+                // Background poll (/health for the button's status dot). Cheap; the
+                // chart render path reads only cached fields.
                 if (_timer == null)
                     _timer = new Timer(Poll, null, 0, Math.Max(1, RefreshSeconds) * 1000);
             }
@@ -296,8 +289,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 _terminated = true;   // FIRST: stop OnRender touching DX before we dispose it
                 if (_timer != null) { try { _timer.Dispose(); } catch { } _timer = null; }
                 UnhookMouse();        // async if off the UI thread — never a sync Invoke here
-                try { RemoveLevelDrawings(); }
-                catch { }
                 try { DisposeOps(); } catch { }
                 try { DisposeBrushes(); } catch { }
                 try { DisposeFormats(); } catch { }
@@ -306,22 +297,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnBarUpdate()
         {
-            // Dashboard S/R lines: redraw (throttled) independent of trading state, so
-            // the levels show even before BarsRequiredToTrade and outside realtime.
-            if ((DateTime.UtcNow - _lastDrawUtc).TotalMilliseconds >= 200)
-            {
-                _lastDrawUtc = DateTime.UtcNow;
-                try { DrawAgentLevels(); }
-                catch (Exception ex)
-                {
-                    if (_barErrorCount < 5)
-                    {
-                        _barErrorCount++;
-                        Print("[Hermes] OnBarUpdate draw error #" + _barErrorCount + ": " + ex.Message);
-                    }
-                }
-            }
-
             // Trading: one decision per CLOSED realtime bar.
             if (BarsInProgress != 0) return;
             if (CurrentBar < BarsRequiredToTrade) return;
@@ -679,8 +654,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         // =====================================================================
         //  Background poll — ONLY fetch + cache. No chart / UI / dispatcher calls
-        //  here (AGENTS.md #17). /health drives the button's status dot; /levels.txt
-        //  feeds the on-chart S/R lines. The rich panel now lives in the HTML dash.
+        //  here (AGENTS.md #17). /health drives the button's status dot. The rich
+        //  panel now lives in the HTML dash.
         // =====================================================================
         private async void Poll(object state)
         {
@@ -701,21 +676,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 _error = null;
                 _everPolled = true;
-
-                // S/R levels are best-effort: a hiccup here must not turn the dot red.
-                if (ShowLevels)
-                {
-                    try
-                    {
-                        using (var cts2 = new CancellationTokenSource(Math.Max(2, RefreshSeconds) * 1000))
-                        using (var resp2 = await Http.GetAsync(BaseUrl + "/levels.txt", cts2.Token))
-                        {
-                            if (resp2.IsSuccessStatusCode)
-                                _levelsText = await resp2.Content.ReadAsStringAsync() ?? "";
-                        }
-                    }
-                    catch { /* keep the last good levels; the dot stays green */ }
-                }
             }
             catch (Exception ex)
             {
@@ -725,56 +685,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 Interlocked.Exchange(ref _pollBusy, 0);
             }
-        }
-
-        private void DrawAgentLevels()
-        {
-            if (!ShowLevels)
-            {
-                RemoveLevelDrawings();
-                return;
-            }
-            string lv = _levelsText;
-            double r = GetLevel(lv, "swing_high");
-            double s = GetLevel(lv, "swing_low");
-            if (!double.IsNaN(r))
-            {
-                Draw.HorizontalLine(this, "HermesResistance", r, Brushes.Red);
-                Draw.Text(this, "HermesResLabel", "R (agent)", 0, r, Brushes.Red);
-            }
-            else { RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel"); }
-            if (!double.IsNaN(s))
-            {
-                Draw.HorizontalLine(this, "HermesSupport", s, Brushes.LimeGreen);
-                Draw.Text(this, "HermesSupLabel", "S (agent)", 0, s, Brushes.LimeGreen);
-            }
-            else { RemoveDrawObject("HermesSupport"); RemoveDrawObject("HermesSupLabel"); }
-        }
-
-        // Remove all four agent S/R draw objects (resistance + support, line + label).
-        // Idempotent: RemoveDrawObject is a no-op when the tag isn't on the chart.
-        private void RemoveLevelDrawings()
-        {
-            RemoveDrawObject("HermesResistance"); RemoveDrawObject("HermesResLabel");
-            RemoveDrawObject("HermesSupport");    RemoveDrawObject("HermesSupLabel");
-        }
-
-        private double GetLevel(string text, string key)
-        {
-            if (string.IsNullOrEmpty(text)) return double.NaN;
-            foreach (var raw in text.Split('\n'))
-            {
-                string line = raw.Trim();
-                int eq = line.IndexOf('=');
-                if (eq > 0 && line.Substring(0, eq) == key)
-                {
-                    double v;
-                    if (double.TryParse(line.Substring(eq + 1), NumberStyles.Float,
-                        CultureInfo.InvariantCulture, out v))
-                        return v;
-                }
-            }
-            return double.NaN;
         }
 
         // =====================================================================

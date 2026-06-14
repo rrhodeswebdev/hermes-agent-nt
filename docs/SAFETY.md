@@ -11,7 +11,7 @@ through `RiskGate.evaluate()` before it can be queued for NinjaTrader. The agent
 bypass it. The gate enforces:
 
 | Rule | Behaviour |
-|------|-----------|
+| --- | --- |
 | Halted / daily goal hit | entries rejected; only EXIT/FLATTEN allowed |
 | Flat-only entries | no pyramiding, averaging down, or one-step flips |
 | Max trades/day | entries rejected past the cap |

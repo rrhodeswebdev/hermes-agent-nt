@@ -5,7 +5,7 @@ The Python connector between **NinjaTrader 8** (NinjaScript Strategy, C#) and th
 gate**, tracks the trading session + **daily goal**, and queues risk-approved order
 commands for NinjaTrader to execute on the **Sim** account.
 
-```
+```text
 NinjaTrader 8 ──HTTP──▶ hermes-bridge ──asks──▶ Claude CLI (LLM)
    (C# Strategy)         (this package)         reasons on context files
                             ▲   risk gate / session / queue │
@@ -56,7 +56,7 @@ entry, the daily-loss projection, and the halt/flatten on the daily goal. See
 ## HTTP contract
 
 | Method & path | Caller | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `POST /ingest/history` | NinjaTrader | bulk-load all historical bars on start |
 | `POST /ingest/bar` | NinjaTrader | one newly-closed bar → returns the `Decision` |
 | `GET /commands/next?strategy_id=` | NinjaTrader | poll the next risk-approved order |

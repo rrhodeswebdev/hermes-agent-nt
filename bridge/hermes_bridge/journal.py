@@ -69,6 +69,14 @@ class TradeTracker:
         e["mfe"] = max(e["mfe"], fav)
         e["mae"] = min(e["mae"], adv)
 
+    def open_excursion(self) -> tuple[float, float] | None:
+        """(MAE, MFE) in points for the OPEN trade so far, or None when flat. Lets the
+        engine's deterministic trade manager know how far the position has run in our
+        favor (MFE) before deciding to arm breakeven / trail the stop."""
+        if self._e is None:
+            return None
+        return self._e["mae"], self._e["mfe"]
+
     def on_exit(self, *, ts: float, price: float, realized_pnl: float) -> ClosedTrade | None:
         e = self._e
         if e is None:

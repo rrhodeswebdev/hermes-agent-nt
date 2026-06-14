@@ -1,0 +1,18 @@
+{
+  // Markdown lint config for project docs (CLAUDE.md / CONTEXT.md / README / docs).
+  // Line length is aligned to the repo's 100-col code convention (ruff line-length = 100),
+  // not markdownlint's 80-col default. Tables and code blocks can't be reflowed, so they
+  // are exempt from the length check. All other rules stay at their defaults.
+  "default": true,
+  "MD013": {
+    "line_length": 100,
+    "code_blocks": false,
+    "tables": false
+  },
+  // The walkthrough docs intentionally stack several blockquote "callout" boxes
+  // separated by blank lines. GitHub-flavored Markdown renders these as distinct
+  // blocks (the intended design); MD028 only warns about a cross-implementation
+  // ambiguity that does not apply here, so it is disabled rather than merging the
+  // callouts into one box.
+  "MD028": false
+}

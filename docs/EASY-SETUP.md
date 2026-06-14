@@ -13,7 +13,7 @@ this! 💪
 Think of it like a small team of helpers:
 
 | The part | Think of it like… | What it does |
-|---|---|---|
+| --- | --- | --- |
 | **NinjaTrader 8** | A TV that shows the price going up and down | Shows the market chart (lives on the Windows side) |
 | **The Strategy** (`HermesBridgeStrategy`) | A mail carrier 📬 | Every minute it mails the new price to the robot, and does what the robot says (buy / sell / wait) |
 | **The Bridge** | The robot's desk + a safety guard 👮 | Keeps the rule book, checks every order is safe, and remembers the score |
@@ -52,7 +52,7 @@ claude --version
 If it shows a version number, the brain is ready — skip to Step 2! ✅
 
 Only if it says "command not found", install it from the official page:
-**https://claude.com/claude-code** — then run `claude --version` again.
+**<https://claude.com/claude-code>** — then run `claude --version` again.
 
 **How do you know it worked?** `claude --version` shows a version number.
 
@@ -123,7 +123,7 @@ In **NinjaTrader**:
 4. Right-click the chart → **Strategies…** → add **HermesBridgeStrategy**, and set:
 
 | Box | Value |
-|---|---|
+| --- | --- |
 | `BridgeHost` | `127.0.0.1` |
 | `BridgePort` | `8787` |
 | `StrategyId` | `hermes-default` |
@@ -135,7 +135,7 @@ Whatever account you pick here is the one the robot uses — the strategy tells 
 which account you chose, so the watching window shows it. You don't set the account anywhere
 else.
 
-5. Make sure the chart is on your **real-time** feed (not delayed), then click **Enable**. 🟢
+1. Make sure the chart is on your **real-time** feed (not delayed), then click **Enable**. 🟢
 
 **Worked?** The **NinjaScript Output** window shows a line like
 `Hermes: sent … historical bars` — the mail carrier just shipped the price history to the
@@ -177,14 +177,14 @@ The window shows its reason every time, like:
 
 To make it **stop and close everything right now**, run this in a terminal:
 
-```
+```bash
 curl -X POST http://127.0.0.1:8787/control/flatten
 ```
 
 This is the **kill switch** — it flattens everything and stops new trades for the day. To
 let it trade again later:
 
-```
+```bash
 curl -X POST http://127.0.0.1:8787/control/resume
 ```
 
@@ -209,7 +209,7 @@ To **stop the desk completely**, click the Bridge window and press **Ctrl + C**.
 ## 😟 Oops! Something's not working
 
 | What you see | What it probably means | What to do |
-|---|---|---|
+| --- | --- | --- |
 | Nothing in NinjaTrader's output | That's **normal** — it only prints history/errors | Watch the **dashboard** instead |
 | "A task was canceled" | The robot needed more time to think | Raise `HttpTimeoutMs` (e.g. `115000`) and re-enable the strategy |
 | Dashboard "data age" is big (like 600s) | Delayed chart data, or the strategy needs re-enabling after a bridge restart | Switch to **real-time** data and **re-enable** the strategy |

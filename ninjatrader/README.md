@@ -5,10 +5,10 @@ data to the Python `hermes-bridge` and executes the risk-approved orders the bri
 returns, on whatever account is selected in the strategy — a simulated **Sim** or
 **Playback** account by default (it refuses a live account unless `AllowLive` is set),
 and it reports that selection to the bridge so the dashboard/logs follow it. It **also
-draws the agent's S/R levels on the chart and shows a small on-chart "HERMES —
-DASHBOARD" button** that opens the bridge's full HTML dashboard in a NinjaTrader
-window (embedded WebView2, with a browser fallback). The rich panel that used to be
-drawn as an on-chart card now lives entirely in that HTML dashboard.
+shows a small on-chart "HERMES — DASHBOARD" button** that opens the bridge's full HTML
+dashboard in a NinjaTrader window (embedded WebView2, with a browser fallback). The rich
+panel — and the agent's S/R levels — that used to be drawn on the chart now live entirely
+in that HTML dashboard.
 
 ## Install
 
@@ -38,8 +38,9 @@ drawn as an on-chart card now lives entirely in that HTML dashboard.
      and invents nothing — if those dirs are empty it simply WAITs. The toggle is reported
      to the bridge before history so the study runs in the right mode. The agent names each
      setup it authors; the HTML **dashboard** lists them all and highlights the active one —
-     the setup the brain declared in its plan, or else the one matching the live regime. See the full authored playbook
-     anytime at `GET /strategy` (also written to `hermes/generated/`). Risk limits are identical
+     the setup the brain declared in its plan, or else the one matching the live regime. See
+     the full authored playbook anytime at `GET /strategy` (also written to `hermes/generated/`).
+     Risk limits are identical
      either way.
    - `AllowLive` → leave **false**; the strategy refuses to trade a live (brokerage)
      account unless this is explicitly true. Simulated **Sim*** and **Playback** accounts
@@ -52,7 +53,7 @@ drawn as an on-chart card now lives entirely in that HTML dashboard.
 ## What it does
 
 | Event | Action |
-|-------|--------|
+| --- | --- |
 | Historical → realtime transition | `POST /ingest/history` with every loaded bar |
 | Each closed realtime bar | `POST /ingest/bar`, then `GET /commands/next` |
 | Command returned | executes `EnterLong/EnterShort` (+ stop/target bracket) or exit, on the strategy thread via `TriggerCustomEvent` |
@@ -69,10 +70,10 @@ Order sizing, stops, daily goal, and all risk limits are enforced by the bridge'
 
 ## Dashboard — see what the agent is doing
 
-The strategy draws the agent's **support/resistance lines** on the chart and a small,
-draggable **"HERMES — DASHBOARD"** button (top-left by default). The button has a status
-dot — **green** = bridge reachable, **amber** = connecting, **red** = offline — and it
-polls only `GET /health` (for the dot) + `GET /levels.txt` (for the S/R lines).
+The strategy draws a small, draggable **"HERMES — DASHBOARD"** button (top-left by
+default). The button has a status dot — **green** = bridge reachable, **amber** =
+connecting, **red** = offline — and it polls only `GET /health` (for the dot). The agent's
+**support/resistance levels** are shown by the HTML dashboard, not drawn on the chart.
 
 **Click the button** to open the bridge's full HTML dashboard (position, P&L, trades,
 daily-goal status, data age, the last decision + rationale, recent decisions, the armed
@@ -80,7 +81,7 @@ plan, and the authored playbook). It opens **inside a NinjaTrader window** using
 embedded **WebView2** (Chromium); **drag** the button to move it, **double-click** to snap
 it back to the corner. Its position persists with the workspace.
 
-Button knobs on the strategy: `RefreshSeconds`, `FontSize`, `ShowLevels`.
+Button knobs on the strategy: `RefreshSeconds`, `FontSize`.
 
 ### Enabling the embedded window (WebView2)
 
