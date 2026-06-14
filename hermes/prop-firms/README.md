@@ -9,6 +9,7 @@ This directory is deliberately **outside** `hermes/context/` so the framework lo
 concatenates every firm's file into the prompt — only the **one** you select is loaded.
 
 ## Two layers, one selection
+
 Selecting an account in the dashboard does two things:
 
 1. **Enforced (server-side).** The account's daily loss limit and contract ceiling are written
@@ -23,6 +24,7 @@ Selecting an account in the dashboard does two things:
 > the limit and asked to stay well clear. Keep your own stop discipline.
 
 ## Naming
+
 Kebab-case `firm-name.md`, declarative prose, no code. Add a firm by adding a file here and a
 matching entry (with `context_file:` pointing at it) in `config/prop-firms.yaml`.
 

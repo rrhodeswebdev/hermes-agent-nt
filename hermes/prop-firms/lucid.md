@@ -7,6 +7,7 @@ the account **alive and compliant**: a breached daily loss limit or max loss lim
 account. Capital preservation outranks any single setup. Profit split is **90/10** in your favour.
 
 ## Hard limits (the bridge enforces the first two)
+
 - **Daily Loss Limit (DLL).** Your realised + open loss for the day must never reach the DLL. The
   bridge halts new entries and flattens at the configured daily loss — keep a buffer; never trade
   into the limit. Per size: 50K = $1,200, 100K = $1,800, 150K = $2,700. The **25K has no DLL**, so
@@ -22,11 +23,13 @@ account. Capital preservation outranks any single setup. Profit split is **90/10
   (end-of-day) equity and never round-trip a green day toward the trailed level.
 
 ## Pass the evaluation
+
 - **Profit target.** Reach the target to clear the eval: 25K = $1,250, 50K = $3,000,
   100K = $6,000, 150K = $9,000. It is cumulative — get there with steady green days, not one
   hero day.
 
 ## Program differences (trade accordingly)
+
 - **LucidPro** — evaluation then funded. Fixed DLL, EOD-drawdown MLL, no consistency rule on the
   eval. Standard, predictable; respect the DLL and the trailing MLL.
 - **LucidFlex** — EOD **trailing** drawdown that locks past the Initial Trail Balance, plus a
@@ -39,6 +42,7 @@ account. Capital preservation outranks any single setup. Profit split is **90/10
   consistency check.
 
 ## Behaviour Lucid rewards
+
 - **Consistency.** Repeatable, similarly-sized green days beat one big day — especially on
   LucidDirect (enforced) and for clean payouts everywhere.
 - **Protect the EOD high.** Because the MLL trails end-of-day balance, finishing green and keeping
