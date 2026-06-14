@@ -37,6 +37,7 @@ from .models import (
 from .plan import Planner, PlanRequest, TradePlan, evaluate_plan
 from .risk import RiskGate
 from .session import SessionState
+from .stops import managed_stop_price, risk_scale_for_atr
 from .store import BarStore
 
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
@@ -82,6 +83,15 @@ class TradingEngine:
         self.journal = journal
         self.tracker = TradeTracker()
         self._pending_entry: dict | None = None
+        # Initial protective-stop distance (ticks) of the OPEN position, promoted from the
+        # matching pending entry when the position actually FILLS (not at approval — a
+        # dropped/stale order must not leave a stale 1R behind). The trade manager uses it
+        # as 1R to decide when to pull the stop to breakeven / start trailing. None while flat.
+        self._active_stop_ticks: int | None = None
+        # High-water managed-stop price for the open trade — the trail RATCHETS through this so
+        # it can only ever tighten (a transient lower/looser swing never loosens a live stop).
+        # None until +1R engages the managed phase; reset to None on flat.
+        self._managed_level: float | None = None
         self._ids = count(1)
         self.on_close = on_close
         self._prefilter = MockAgentClient(config) if config.agent.prefilter == "mock" else None
@@ -158,6 +168,14 @@ class TradingEngine:
                 AgentRequest(mode=mode, context=ctx, recent_bars=bars, account=account)
             )
 
+        # Deterministic winner-management (breakeven after +1R, then structure trail),
+        # enforced HERE so it holds under both brains and the plan cycle — never delegated
+        # to the LLM. It can only force a tighter EXIT, never open or hold against the brain.
+        if mode == "manage_position":
+            forced = self._managed_exit(ctx, bar)
+            if forced is not None:
+                decision = forced
+
         # Gate entries by minimum confidence (exits always honored).
         if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
             if decision.confidence < self.cfg.strategy.min_confidence:
@@ -170,7 +188,16 @@ class TradingEngine:
         else:
             self._declined = None  # an actionable decision invalidates the memo
             cmd = self._to_command(decision)
-            rd = self.risk.evaluate(cmd, self.session, last_price=bar.close, now_ts=bar.ts)
+            # Shrink the per-trade dollar budget in a volatility shock (entries only;
+            # risk-reducing actions are never scaled).
+            scale = (
+                self._risk_scale(ctx)
+                if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT)
+                else 1.0
+            )
+            rd = self.risk.evaluate(
+                cmd, self.session, last_price=bar.close, now_ts=bar.ts, risk_scale=scale
+            )
             if rd.approved and rd.command is not None and decision.action in (
                 Action.ENTER_LONG, Action.ENTER_SHORT
             ):
@@ -181,6 +208,9 @@ class TradingEngine:
                     "context": ctx,
                     "rationale": decision.rationale,
                     "confidence": decision.confidence,
+                    # 1R for the trade manager — promoted to _active_stop_ticks only if/when
+                    # THIS order fills (see on_fill); a dropped order leaves nothing stale.
+                    "stop_ticks": self._command_stop_ticks(rd.command, bar.close),
                 }
             result = EngineResult(decision, rd.command if rd.approved else None, mode,
                                   rd.reasons)
@@ -413,6 +443,11 @@ class TradingEngine:
         if before_pos == 0 and after_pos != 0:
             side = Side.LONG if after_pos > 0 else Side.SHORT
             p = self._matching_pending(side, fill.ts)
+            # Arm the trade manager's 1R from THIS fill's order; an unattributed fill (no
+            # matching pending) leaves it None so breakeven/trail simply won't engage on a
+            # trade whose real stop we don't know — the resting bracket still protects it.
+            self._active_stop_ticks = p.get("stop_ticks") if p is not None else None
+            self._managed_level = None
             ctx = p["context"] if p is not None else self.last_context
             if ctx is not None:  # no context at all (fill before any bar): nothing to journal
                 self.tracker.on_entry(
@@ -424,6 +459,9 @@ class TradingEngine:
                 )
             self._pending_entry = None  # consumed or invalidated either way
         elif before_pos != 0 and after_pos == 0:
+            # Flat: the trade manager's 1R and trailed high-water no longer apply.
+            self._active_stop_ticks = None
+            self._managed_level = None
             trade = self.tracker.on_exit(
                 ts=fill.ts, price=fill.price,
                 realized_pnl=self.session.realized_pnl - before_pnl,
@@ -446,6 +484,63 @@ class TradingEngine:
         return OrderCommand(
             id=self._new_id(), strategy_id=self.cfg.strategy_id,
             action=Action.FLATTEN, qty=abs(self.session.position), reason=reason,
+        )
+
+    def _command_stop_ticks(self, cmd: OrderCommand, entry_price: float) -> int | None:
+        """The protective-stop distance in ticks of an approved entry (1R for the trade
+        manager). Prefers the explicit stop_ticks; derives it from a price stop otherwise."""
+        if cmd.stop_ticks is not None:
+            return cmd.stop_ticks
+        if cmd.stop_price is not None:
+            tick = self.cfg.instrument.tick_size or 0.25
+            return max(1, round(abs(entry_price - cmd.stop_price) / tick))
+        return None
+
+    def _risk_scale(self, ctx: MarketContext) -> float:
+        """Per-trade risk-budget multiplier for the live volatility regime (shrinks size in
+        a shock). Reuses the re-author baseline-ATR window + shock_ratio for one shock read."""
+        rc = self.cfg.strategies.reauthor
+        baseline = atr(self.store.recent(rc.baseline_atr_period + 1), rc.baseline_atr_period)
+        return risk_scale_for_atr(ctx.atr, baseline, self.cfg)
+
+    def _managed_exit(self, ctx: MarketContext, bar: Bar) -> Decision | None:
+        """A forced EXIT when the just-closed bar breaches the position's MANAGED stop
+        (breakeven once +1R favorable, then trailing behind structure). None means leave the
+        decision to the brain/plan — pre-+1R, the feature is off, or the stop isn't breached —
+        so the wide initial bracket and the brain's structural exit are unchanged until then."""
+        pos = self.session.position
+        if pos == 0:
+            return None
+        side = Side.LONG if pos > 0 else Side.SHORT
+        exc = self.tracker.open_excursion()
+        mfe = exc[1] if exc is not None else 0.0
+        level = managed_stop_price(
+            side=side, entry=self.session.avg_price,
+            initial_stop_ticks=self._active_stop_ticks, mfe=mfe,
+            swing_low=ctx.swing_low, swing_high=ctx.swing_high, cfg=self.cfg,
+        )
+        if level is None:
+            return None
+        # Ratchet: the managed stop can only ever TIGHTEN toward price (up for a long, down
+        # for a short), so a transient looser swing never loosens a live stop.
+        if self._managed_level is None:
+            self._managed_level = level
+        elif side == Side.LONG:
+            self._managed_level = max(self._managed_level, level)
+        else:
+            self._managed_level = min(self._managed_level, level)
+        level = self._managed_level
+        close = bar.close
+        breached = (
+            (side == Side.LONG and close <= level)
+            or (side == Side.SHORT and close >= level)
+        )
+        if not breached:
+            return None
+        return Decision(
+            action=Action.EXIT, confidence=0.95, qty=abs(pos),
+            rationale=f"managed_stop({side.value.lower()} @{level:g}): "
+                      f"breakeven/trail hit on close {close:g}",
         )
 
     def _to_command(self, d: Decision) -> OrderCommand:

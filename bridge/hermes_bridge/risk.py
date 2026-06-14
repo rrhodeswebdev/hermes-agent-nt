@@ -9,7 +9,10 @@ NinjaTrader. The gate is pure and fully unit-tested. Rules:
   * Entries require a flat position (no pyramiding/flips in v1).
   * Entries respect max trades/day and the position cap (qty is clamped down).
   * Every entry must carry a protective stop; a default is injected if missing.
-  * Per-trade dollar risk must not exceed max_risk_per_trade (qty clamped down).
+  * The protective stop is CLAMPED into the configured tick band (min/max_stop_ticks):
+    a vol-noise floor so it can't be razor-thin, a spike ceiling so it can't run away.
+  * Per-trade dollar risk must not exceed max_risk_per_trade — itself scaled down by
+    ``risk_scale`` in a volatility shock (qty clamped to fit the scaled budget).
   * An entry whose worst-case stop-out would breach max_daily_loss is rejected.
   * Optional trading-hours window can reject entries outside RTH.
 """
@@ -23,6 +26,7 @@ from zoneinfo import ZoneInfo
 from .config import BridgeConfig
 from .models import Action, OrderCommand
 from .session import SessionState
+from .stops import clamp_stop_ticks
 
 
 @dataclass
@@ -46,6 +50,7 @@ class RiskGate:
         *,
         last_price: float | None = None,
         now_ts: float | None = None,
+        risk_scale: float = 1.0,
     ) -> RiskDecision:
         # Risk-reducing actions are never blocked.
         if command.action in (Action.EXIT, Action.FLATTEN):
@@ -85,18 +90,33 @@ class RiskGate:
         if qty <= 0:
             return RiskDecision(False, None, ["zero_qty"])
 
-        # 6) Mandatory protective stop (inject default if missing).
+        # 6) Mandatory protective stop (inject default if missing), clamped to the band.
         stop_ticks = command.stop_ticks
-        if stop_ticks is None and command.stop_price is None:
+        stop_price = command.stop_price
+        if stop_ticks is None and stop_price is None:
             stop_ticks = self.cfg.risk.default_stop_ticks
             reasons.append(f"default_stop_injected:{stop_ticks}")
+        # The band is the final word on stop size regardless of source (rules brain, the
+        # Claude brain's nudge, or the injected default): a vol-noise floor and a spike
+        # ceiling. A price stop is widened/capped by adjusting the price to the band.
+        if stop_ticks is not None:
+            clamped = clamp_stop_ticks(stop_ticks, self.cfg)
+            if clamped != stop_ticks:
+                reasons.append(f"stop_band_clamped:{stop_ticks}->{clamped}")
+            stop_ticks = clamped
+        elif stop_price is not None and last_price is not None:
+            stop_price = self._band_clamp_price(stop_price, command.action, last_price, reasons)
 
-        # 7) Per-trade dollar risk (clamp qty down to fit).
-        risk_ticks = self._risk_ticks(stop_ticks, command.stop_price, command.action, last_price)
+        # 7) Per-trade dollar risk (clamp qty down to fit). The budget itself shrinks in a
+        # volatility shock via risk_scale, so wild conditions get smaller size.
+        risk_ticks = self._risk_ticks(stop_ticks, stop_price, command.action, last_price)
         if risk_ticks is None or risk_ticks <= 0:
             return RiskDecision(False, None, ["cannot_determine_stop_distance"])
         per_contract_risk = risk_ticks * self.cfg.instrument.tick_value
-        max_qty_by_risk = int(self.cfg.risk.max_risk_per_trade // per_contract_risk)
+        effective_max_risk = self.cfg.risk.max_risk_per_trade * max(0.0, risk_scale)
+        if risk_scale < 1.0:
+            reasons.append(f"risk_scaled:{risk_scale:g}")
+        max_qty_by_risk = int(effective_max_risk // per_contract_risk)
         if max_qty_by_risk < 1:
             return RiskDecision(
                 False, None, [f"single_contract_risk_exceeds_max:{per_contract_risk:.2f}"]
@@ -120,14 +140,33 @@ class RiskGate:
         approved = command.model_copy(
             update={
                 "qty": qty,
-                "stop_ticks": stop_ticks if command.stop_price is None else None,
-                "stop_price": command.stop_price,
+                "stop_ticks": stop_ticks if stop_price is None else None,
+                "stop_price": stop_price,
             }
         )
         reasons.append(f"approved:risk={trade_risk:.2f}")
         return RiskDecision(True, approved, reasons)
 
     # ---- helpers ------------------------------------------------------------
+    def _band_clamp_price(
+        self, stop_price: float, action: Action, last_price: float, reasons: list[str]
+    ) -> float:
+        """Pull a price stop into the tick band by adjusting its DISTANCE from the entry:
+        widen a too-tight stop to the floor, cap a too-wide one at the ceiling. Direction
+        is honored (a long's stop sits below entry, a short's above)."""
+        tick = self.cfg.instrument.tick_size or 0.25
+        dist_ticks = abs(last_price - stop_price) / tick
+        clamped = clamp_stop_ticks(round(dist_ticks), self.cfg)
+        if abs(clamped - dist_ticks) < 1e-9:
+            return stop_price
+        new_price = (
+            last_price - clamped * tick
+            if action == Action.ENTER_LONG
+            else last_price + clamped * tick
+        )
+        reasons.append(f"stop_band_clamped:{stop_price:g}->{new_price:g}")
+        return new_price
+
     def _risk_ticks(
         self,
         stop_ticks: int | None,

@@ -59,6 +59,23 @@ class StrategyParams(BaseModel):
     atr_target_mult: float = 2.0
     pullback_atr: float = 0.5      # how close (in ATR) to the swing still counts as a pullback
     min_confidence: float = 0.55   # engine ignores Decisions below this confidence
+    # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
+    # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
+    # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is
+    # unchanged). The floor is what stops a 1m noise wick from tagging a razor-thin stop;
+    # the ceiling caps the stop in a vol spike (size then clamps down to fit max_risk). See
+    # stops.atr_band_stop_ticks. Enforced as the final word by the RiskGate on every order.
+    min_stop_ticks: int = 0
+    max_stop_ticks: int = 0
+    # Winner management — enforced deterministically by the engine (brain-agnostic, like the
+    # RiskGate), NOT delegated to the LLM. Once a position runs breakeven_r × (initial stop
+    # distance) in our favor, the working stop is pulled to breakeven; with trail_enabled it
+    # then trails behind each new swing (higher-low up / lower-high down), only ever
+    # tightening. breakeven_r = 0 disables it entirely (static bracket, the legacy default),
+    # so a wider initial stop never turns a trade that worked into a big give-back. See
+    # stops.managed_stop_price.
+    breakeven_r: float = 0.0
+    trail_enabled: bool = False
 
 
 class RiskParams(BaseModel):
@@ -68,6 +85,12 @@ class RiskParams(BaseModel):
     # Injected only if a decision lacks a stop. Kept within max_risk_per_trade for a
     # single contract (16 ticks * $12.50 = $200 < $250) so the safety net is usable.
     default_stop_ticks: int = 16
+    # ATR-regime risk scaling. When the current ATR is >= strategies.reauthor.shock_ratio ×
+    # the longer-window baseline ATR (a volatility spike — the SAME shock the re-author
+    # governor reacts to), the per-trade dollar budget is multiplied by this factor (e.g.
+    # 0.5 = halve size in a shock; size clamps down accordingly). 1.0 disables scaling
+    # (the neutral default). See stops.risk_scale_for_atr.
+    shock_risk_scale: float = 1.0
 
 
 class DailyGoal(BaseModel):

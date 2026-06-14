@@ -110,3 +110,74 @@ def test_unsupported_action_rejected(cfg):
     rd = gate.evaluate(_cmd(Action.WAIT), s)
     assert not rd.approved
     assert any("unsupported_action" in r for r in rd.reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Risk rework: stop band + ATR-regime risk scaling                             #
+# --------------------------------------------------------------------------- #
+def test_stop_band_floor_widens_thin_tick_stop(cfg):
+    cfg.strategy.min_stop_ticks = 20  # ES: 20t * $12.50 = $250 = the per-trade cap
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, qty=2, stop_ticks=8), s, last_price=4000.0)
+    assert rd.approved
+    assert rd.command.stop_ticks == 20                      # widened off the noise floor
+    assert rd.command.qty == 1                              # wider stop → size clamps down
+    assert any("stop_band_clamped:8->20" in r for r in rd.reasons)
+
+
+def test_stop_band_ceiling_caps_wide_tick_stop(cfg):
+    cfg.strategy.max_stop_ticks = 12
+    cfg.risk.max_risk_per_trade = 1000.0  # don't let the dollar cap mask the tick ceiling
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, qty=1, stop_ticks=40), s, last_price=4000.0)
+    assert rd.approved
+    assert rd.command.stop_ticks == 12
+    assert any("stop_band_clamped:40->12" in r for r in rd.reasons)
+
+
+def test_stop_band_floor_applies_to_price_stop(cfg):
+    cfg.strategy.min_stop_ticks = 20  # 20 ticks * 0.25 = 5.0 points
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    # A 1-point (4-tick) price stop is too tight → widened to a 5-point distance below entry.
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, qty=1, stop_price=3999.0), s, last_price=4000.0)
+    assert rd.approved
+    assert rd.command.stop_price == 3995.0
+    assert any("stop_band_clamped" in r for r in rd.reasons)
+
+
+def test_default_injected_stop_is_band_clamped(cfg):
+    cfg.risk.default_stop_ticks = 8     # legacy thin default...
+    cfg.strategy.min_stop_ticks = 16    # ...lifted to the floor (16t * $12.50 = $200 < $250)
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, qty=1), s, last_price=4000.0)
+    assert rd.approved
+    assert rd.command.stop_ticks == 16
+    assert any("default_stop_injected" in r for r in rd.reasons)
+    assert any("stop_band_clamped:8->16" in r for r in rd.reasons)
+
+
+def test_risk_scale_shrinks_size_in_a_shock(cfg):
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    # 8 ticks → $100/contract. Unscaled, $250 cap admits 2; halved budget ($125) admits 1.
+    rd = gate.evaluate(
+        _cmd(Action.ENTER_LONG, qty=2, stop_ticks=8), s, last_price=4000.0, risk_scale=0.5
+    )
+    assert rd.approved
+    assert rd.command.qty == 1
+    assert any("risk_scaled:0.5" in r for r in rd.reasons)
+
+
+def test_risk_scale_can_reject_a_single_contract(cfg):
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    # 8 ticks → $100; scaled budget 0.2*$250 = $50 < $100 → even one contract is too big.
+    rd = gate.evaluate(
+        _cmd(Action.ENTER_LONG, qty=1, stop_ticks=8), s, last_price=4000.0, risk_scale=0.2
+    )
+    assert not rd.approved
+    assert any("single_contract_risk_exceeds_max" in r for r in rd.reasons)

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from .config import BridgeConfig
 from .indicators import MarketContext
 from .models import AccountState, Action, Bar, Decision, Mode
+from .stops import atr_band_stop_ticks
 
 if TYPE_CHECKING:  # plan.py imports this module at runtime; annotations only here
     from .plan import PlanRequest, TradePlan
@@ -135,7 +136,7 @@ class MockAgentClient(AgentClient):
         last = req.recent_bars[-1]
         atr = c.atr
         tol = p.pullback_atr * atr  # how close to the local swing still counts as a "tag"
-        stop_ticks = self._ticks(atr * p.atr_stop_mult)
+        stop_ticks = atr_band_stop_ticks(atr, self.cfg)  # vol-scaled, band-clamped
         target_ticks = self._ticks(atr * p.atr_target_mult)
         support, resistance = self._recent_sr(req.recent_bars)
 
@@ -195,7 +196,7 @@ class MockAgentClient(AgentClient):
             return TradePlan(mode="seek_entry", rationale="no trending structure; no-trade")
         p = self.cfg.strategy
         tol = p.pullback_atr * c.atr
-        stop_ticks = self._ticks(c.atr * p.atr_stop_mult)
+        stop_ticks = atr_band_stop_ticks(c.atr, self.cfg)  # vol-scaled, band-clamped
         target_ticks = self._ticks(c.atr * p.atr_target_mult)
         support, resistance = self._recent_sr(preq.recent_bars)
         # The decide() rule "pullback tagged the immediate higher-low, then closed back"
