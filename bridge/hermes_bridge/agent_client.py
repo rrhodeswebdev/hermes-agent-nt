@@ -74,6 +74,14 @@ class AgentClient(ABC):
         dicts (the dashboard lists them all), or None. Overridden by ClaudeAgentClient."""
         return None
 
+    def authoring_status(self) -> dict | None:
+        """Telemetry for the dashboard so re-authoring is observable: how many times a fresh
+        playbook has actually been installed (``count``), why the latest one was authored
+        (``reason`` — the trigger outcome), and the bar it was authored from
+        (``authored_at_bar_ts``). None when nothing has been authored. Overridden by
+        ClaudeAgentClient; base clients (mock/rules) author nothing."""
+        return None
+
     def clear_generated_strategy(self) -> None:  # noqa: B027 — intentional no-op default
         """Forget the authored playbook so the system prompt instructs WAIT until a fresh one
         is authored (used by /control/reauthor). Base no-op; overridden by ClaudeAgentClient."""

@@ -62,6 +62,14 @@ def render_text(d: dict | None) -> str:
     _sum_of = _active or (setups[0] if len(setups) == 1 else None)
     if _sum_of and _sum_of.get("summary"):
         lines.append(f"    ↳ {_sum_of['summary']}"[:58])
+    authored = (d.get("strategy") or {}).get("authored")
+    if authored:  # watch the count tick to confirm the playbook is actually re-authoring
+        ago = authored.get("bars_ago")
+        ago_str = f"{ago}b ago" if ago is not None else "just now"
+        line = f"  authored {authored.get('count', 0)}× · {ago_str}"
+        if authored.get("reason"):
+            line += f" · {authored['reason']}"
+        lines.append(line[:58])
     lines += [
         f"data age: {age_str}{delayed}",
         f"pos: {_pos_str(s['position'], s['avg_price'])}",
@@ -146,6 +154,24 @@ def render_panel(d: dict | None) -> str:
     if strat.get("active_source"):
         # "declared" = the brain named this setup in its plan; "regime" = regime fallback.
         lines.append(f"strategy_active_source={strat['active_source']}")
+    # Authoring telemetry: watch authored_count tick to confirm the playbook is refreshing;
+    # authored_bars_ago / authored_reason say how long ago and why the latest one was authored.
+    authored = strat.get("authored")
+    if authored:
+        lines.append(f"strategy_authored_count={authored.get('count', 0)}")
+        if authored.get("bars_ago") is not None:
+            lines.append(f"strategy_authored_bars_ago={authored['bars_ago']}")
+        if authored.get("reason"):
+            lines.append(f"strategy_authored_reason={_oneline(authored['reason'])}")
+    # Planner / authoring health — the card had no signal for "analyzing_session" or a failed
+    # study, so a re-author that never landed was invisible. Surface it here.
+    pl = d.get("planner") or {}
+    if pl.get("status"):
+        lines.append(f"planner_status={_oneline(pl['status'])}")
+    if pl.get("last_error"):
+        lines.append(f"planner_error={_oneline(pl['last_error'])}")
+    if pl.get("session_error"):
+        lines.append(f"session_error={_oneline(pl['session_error'])}")
     for it in (strat.get("list") or []):
         name = _oneline(it.get("name", "")).replace("|", "/")
         regime = _oneline(it.get("regime", "")).replace("|", "/")
@@ -273,7 +299,9 @@ async function tick(){
       const declared=strat.active_source==='declared';
       const aname=(strat.active_index!=null&&setups[strat.active_index])?setups[strat.active_index].name:null;
       const ctx=declared&&aname?' · trading '+aname:(strat.regime?' · '+strat.regime+' now':'');
-      document.getElementById('slabel').textContent='Agent strategies'+ctx;
+      const au=strat.authored;
+      const aud=au?(' · authored '+au.count+'×'+(au.bars_ago!=null?' ('+au.bars_ago+'b ago)':'')):'';
+      document.getElementById('slabel').textContent='Agent strategies'+ctx+aud;
       sl.innerHTML='';
       setups.forEach(it=>{
         const row=document.createElement('div'); row.className='srow'+(it.active?' active':'');

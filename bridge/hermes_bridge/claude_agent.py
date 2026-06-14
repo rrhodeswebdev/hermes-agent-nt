@@ -311,6 +311,12 @@ class ClaudeAgentClient(AgentClient):
         # None until/unless authored.
         self._generated_strategies: list[dict] | None = None
         self._generated_path: str | None = None
+        # Authoring telemetry for the dashboard (so re-authoring is observable): how many
+        # playbooks have actually installed, why the latest one was authored (the trigger
+        # outcome), and the bar it was authored from. Updated only on a successful install.
+        self._author_count = 0
+        self._last_author_reason: str = ""
+        self._authored_at_bar_ts: float | None = None
         # Persistent sessions keyed by schema (≈ call kind): one for decide() and one
         # for propose_plan(); analyze_session stays one-shot (it may run on a different
         # model). The system prompt is deliberately NOT in the key — it embeds the
@@ -455,6 +461,15 @@ class ClaudeAgentClient(AgentClient):
     def generated_strategies(self) -> list[dict] | None:
         return self._generated_strategies
 
+    def authoring_status(self) -> dict | None:
+        if self._author_count == 0:
+            return None
+        return {
+            "count": self._author_count,
+            "reason": self._last_author_reason,
+            "authored_at_bar_ts": self._authored_at_bar_ts,
+        }
+
     def clear_generated_strategy(self) -> None:
         """Forget the authored playbook + its setups so the next system prompt instructs
         WAIT until a fresh one lands (used by /control/reauthor before re-running the study).
@@ -472,6 +487,11 @@ class ClaudeAgentClient(AgentClient):
         playbook still drives trading)."""
         self._generated_strategy = playbook[: self.cfg.strategies.max_chars]
         self._generated_strategies = strategies
+        # Authoring telemetry: a fresh playbook actually installed. `outcome` is the trigger
+        # ("session_start", "reauthor:trend_flip(up->down) x3b", …); `bar_ts` is what it studied.
+        self._author_count += 1
+        self._last_author_reason = (preq.outcome or "").strip()
+        self._authored_at_bar_ts = preq.bar_ts or None
         try:
             d = Path(self.cfg.strategies.generated_dir)
             d.mkdir(parents=True, exist_ok=True)

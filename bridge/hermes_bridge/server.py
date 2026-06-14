@@ -21,7 +21,12 @@ from pydantic import BaseModel
 
 from . import __version__
 from .agent_client import build_agent_client
-from .config import BridgeConfig, effective_entry_freshness_s, load_config
+from .config import (
+    BridgeConfig,
+    effective_entry_freshness_s,
+    load_config,
+    timeframe_seconds,
+)
 from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
 from .journal import JournalStore
@@ -323,6 +328,30 @@ def create_app(config: BridgeConfig | None = None) -> FastAPI:
             "list": items,
             "name": head["name"] if head else None,
             "summary": head["summary"] if head else None,
+            # Authoring telemetry so a static-looking list can be told apart from a never-
+            # re-authored one: how many playbooks have installed, how long ago (in bars), and
+            # why the latest fired. None until the first author lands.
+            "authored": _authoring_view(st),
+        }
+
+    def _authoring_view(st: AppState) -> dict | None:
+        """The agent's authoring telemetry with the age expressed in bars of the live
+        timeframe (more meaningful than wall-clock and unit-consistent with the cadence
+        config). None when nothing has been authored yet."""
+        status = st.agent.authoring_status()
+        if not status:
+            return None
+        bars_ago: int | None = None
+        at = status.get("authored_at_bar_ts")
+        last = st.store.last()
+        if at and last is not None:
+            tf_s = timeframe_seconds(cfg.instrument.timeframe)
+            if tf_s > 0:
+                bars_ago = int(max(0.0, last.ts - at) // tf_s)
+        return {
+            "count": status.get("count", 0),
+            "reason": status.get("reason", ""),
+            "bars_ago": bars_ago,
         }
 
     def _levels(st: AppState) -> dict | None:

@@ -21,7 +21,7 @@ from hermes_bridge.claude_agent import (
 from hermes_bridge.config import BridgeConfig, load_config
 from hermes_bridge.plan import PlanRequest, TradePlan
 from hermes_bridge.server import create_app, current_regime, strategy_list_with_active
-from tests.conftest import make_agent_request, synthetic_bars
+from tests.conftest import make_agent_request, make_bar, synthetic_bars
 
 FRAMEWORK_MARK = "FRAMEWORK-HERMES-MARK"
 CUSTOM_MARK = "CUSTOM-TRENDING-PLAYBOOK-MARK"
@@ -389,6 +389,87 @@ def test_dashboard_omits_agent_list_in_custom_mode(tmp_path):
     assert strat["source"] == "custom"
     assert strat["list"] == [] and strat["active_index"] is None and strat["name"] is None
     assert "strategy_row=" not in TestClient(app).get("/panel.txt").text
+
+
+# ---- authoring telemetry (re-author observability) ---------------------------
+def _preq_with(cfg, outcome):
+    from dataclasses import replace
+    return replace(_preq(cfg), outcome=outcome)
+
+
+def test_authoring_status_none_until_authored(tmp_path):
+    assert _client_with_ctx(tmp_path, "agent").authoring_status() is None
+
+
+def test_authoring_status_counts_and_records_reason(tmp_path, fake_claude):
+    fake_claude(stdout=_author_response([
+        {"name": "Opening Drive", "regime": "trending", "summary": "ride it",
+         "detail": "ENTRY on the drive; STOP under the open; TARGET PDH"}]))
+    c = _client_with_ctx(tmp_path, "agent")
+    c.analyze_session(_preq_with(c.cfg, "session_start"), synthetic_bars(120))
+    st = c.authoring_status()
+    assert st["count"] == 1 and st["reason"] == "session_start"
+    assert st["authored_at_bar_ts"] is not None
+    # A fresh playbook installs on re-author → the count ticks and the reason updates, which is
+    # exactly the signal the dashboard now shows so "is it updating?" is no longer a guess.
+    c.analyze_session(_preq_with(c.cfg, "reauthor:trend_flip(up->down) x3b"), synthetic_bars(120))
+    st2 = c.authoring_status()
+    assert st2["count"] == 2 and st2["reason"].startswith("reauthor:trend_flip")
+
+
+def test_authoring_status_unchanged_when_author_empty(tmp_path, fake_claude):
+    # A failed/empty re-author installs no playbook → the count must NOT advance (otherwise the
+    # dashboard would imply a refresh that never happened).
+    fake_claude(stdout=_author_response([
+        {"name": "Keeper", "regime": "trending", "summary": "x", "detail": "ENTRY..."}]))
+    c = _client_with_ctx(tmp_path, "agent")
+    c.analyze_session(_preq_with(c.cfg, "session_start"), synthetic_bars(120))
+    assert c.authoring_status()["count"] == 1
+    fake_claude(stdout=_author_response(None, brief="no edge"))   # empty re-author
+    c.analyze_session(_preq_with(c.cfg, "reauthor:ceiling(60b)"), synthetic_bars(120))
+    assert c.authoring_status()["count"] == 1                     # unchanged
+
+
+def _app_with_authored(tmp_path, *, count, reason, bars_ago):
+    """A claude app with authored setups AND authoring telemetry installed (bypassing the LLM),
+    with a last bar placed ``bars_ago`` 5m-bars after the authored-from bar."""
+    app = _claude_app_with_strategies(tmp_path, regime="trending")
+    st = app.state.appstate
+    st.agent._author_count = count
+    st.agent._last_author_reason = reason
+    last_ts = 1_700_000_000.0
+    st.agent._authored_at_bar_ts = last_ts - bars_ago * 300      # 5m default → 300s/bar
+    st.store.append(make_bar(last_ts, 5000, 5001, 4999, 5000))
+    return app
+
+
+def test_dashboard_surfaces_authoring_telemetry(tmp_path):
+    app = _app_with_authored(tmp_path, count=2, reason="reauthor:trend_flip(up->down) x3b",
+                             bars_ago=5)
+    authored = TestClient(app).get("/dashboard").json()["strategy"]["authored"]
+    assert authored["count"] == 2 and authored["bars_ago"] == 5
+    assert authored["reason"].startswith("reauthor:trend_flip")
+
+
+def test_panel_txt_emits_authoring_and_planner_status(tmp_path):
+    app = _app_with_authored(tmp_path, count=3, reason="reauthor:no_setup_for(ranging) x3b",
+                             bars_ago=4)
+    st = app.state.appstate
+    st.planner._status = "analyzing_session"
+    st.planner._session_error = "session_analysis:timeout(180s bridge budget)"
+    panel = TestClient(app).get("/panel.txt").text
+    assert "strategy_authored_count=3" in panel
+    assert "strategy_authored_bars_ago=4" in panel
+    assert "strategy_authored_reason=reauthor:no_setup_for(ranging) x3b" in panel
+    assert "planner_status=analyzing_session" in panel
+    assert "session_error=session_analysis:timeout(180s bridge budget)" in panel
+
+
+def test_dashboard_txt_shows_authored_line(tmp_path):
+    app = _app_with_authored(tmp_path, count=3, reason="reauthor:no_setup_for(ranging) x3b",
+                             bars_ago=4)
+    txt = TestClient(app).get("/dashboard.txt").text
+    assert "authored 3×" in txt and "4b ago" in txt
 
 
 # ---- brain-declared active setup (plan.active_strategy) → highlight -----------

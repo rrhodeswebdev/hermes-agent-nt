@@ -715,6 +715,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             // vs "regime" fallback), and every authored setup as name|regime|summary|active.
             public string StrategySource = "", StrategyName = "", StrategySummary = "", StrategyActiveSource = "";
             public List<string[]> StrategyRows = new List<string[]>();  // name|regime|summary|active
+            // Authoring telemetry (re-author observability): how many playbooks have installed
+            // (count ticks => the strategy refreshed), how long ago, and why the latest fired.
+            // Count < 0 means the bridge sent no telemetry (old bridge / never authored).
+            public int StrategyAuthoredCount = -1, StrategyAuthoredBarsAgo = -1;
+            public string StrategyAuthoredReason = "";
+            // Planner / study health, so a re-author that never lands is visible on the card.
+            public string PlannerStatus = "", PlannerError = "", SessionError = "";
             public double AgeS = double.NaN, LastClose = double.NaN;
             public int Position, Trades;
             public double AvgPrice = double.NaN, Realized, Unrealized;
@@ -756,6 +763,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                         var sp = v.Split('|');               // name|regime|summary|active
                         if (sp.Length >= 4) p.StrategyRows.Add(sp);
                         break;
+                    case "strategy_authored_count":     p.StrategyAuthoredCount = (int)NumOr(v, -1); break;
+                    case "strategy_authored_bars_ago":  p.StrategyAuthoredBarsAgo = (int)NumOr(v, -1); break;
+                    case "strategy_authored_reason":    p.StrategyAuthoredReason = v; break;
+                    case "planner_status":              p.PlannerStatus = v; break;
+                    case "planner_error":               p.PlannerError = v; break;
+                    case "session_error":               p.SessionError = v; break;
                     case "age_s":        p.AgeS = Num(v); break;
                     case "last_close":   p.LastClose = Num(v); break;
                     case "position":     p.Position = (int)NumOr(v, 0); break;
@@ -1326,6 +1339,27 @@ namespace NinjaTrader.NinjaScript.Strategies
                           : p.StrategySource == "custom" ? "custom playbooks" : "—";
                 AddText(fb, _fBody, xL, y, ColMuted);
                 y += 16f * s;
+            }
+            // Authoring telemetry + study health: watch the count tick to confirm the playbook
+            // is refreshing; an analyzing_session status or a red session error shows a
+            // re-author in flight / failed (previously the card had no signal for either).
+            if (p.StrategyAuthoredCount >= 0)
+            {
+                string ago = p.StrategyAuthoredBarsAgo >= 0
+                    ? p.StrategyAuthoredBarsAgo + "b ago" : "just now";
+                AddText("authored " + p.StrategyAuthoredCount + "x · " + ago, _fSub, xL, y, ColDim);
+                if (p.PlannerStatus.Length > 0)
+                    AddTextRight(p.PlannerStatus, _fSub, xR, y,
+                        p.PlannerStatus == "analyzing_session" ? ColAmber : ColDim);
+                y += 14f * s;
+                string why = p.SessionError.Length > 0 ? p.SessionError
+                           : p.StrategyAuthoredReason;
+                if (why.Length > 0)
+                {
+                    AddText(why, _fRat, xL + 12f * s, y,
+                        p.SessionError.Length > 0 ? ColRed : ColMuted, innerW - 12f * s);
+                    y += 14f * s;
+                }
             }
             Divider(xL, xR, ref y);
 
