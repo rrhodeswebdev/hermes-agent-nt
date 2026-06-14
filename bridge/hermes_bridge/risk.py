@@ -130,13 +130,19 @@ class RiskGate:
         # confidence (1 at min_confidence → full budget at full_size_confidence); otherwise
         # take the requested qty clamped DOWN to the budget (legacy behavior).
         budget_max = min(cap, max_qty_by_risk)
-        if self.cfg.risk.confidence_sizing and confidence is not None:
+        if self.cfg.risk.confidence_sizing:
+            # Always confidence-size when enabled — a MISSING confidence must not fall through
+            # to the legacy requested-qty path (that let a manual/no-confidence entry size up to
+            # the full budget, bypassing the gate). size_for_confidence() returns the 1-contract
+            # minimum when confidence is None, so that conservative floor is enforced server-side
+            # for every entry path (engine, manual API, agent).
             qty = size_for_confidence(
                 confidence, budget_max,
                 self.cfg.strategy.min_confidence, self.cfg.risk.full_size_confidence,
             )
             if qty >= 1:
-                reasons.append(f"confidence_sized:{confidence:g}->{qty}")
+                conf_str = f"{confidence:g}" if confidence is not None else "none"
+                reasons.append(f"confidence_sized:{conf_str}->{qty}")
         else:
             qty = min(requested, budget_max)
             if requested > cap:

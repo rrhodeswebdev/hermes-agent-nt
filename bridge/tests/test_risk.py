@@ -218,6 +218,23 @@ def test_confidence_sizing_never_exceeds_dollar_budget(cfg):
     assert rd.command.qty == 2
 
 
+def test_confidence_sizing_missing_confidence_falls_back_to_one(cfg):
+    # confidence_sizing ON but NO confidence supplied (e.g. the manual /order API path).
+    # The gate must enforce size_for_confidence()'s 1-contract floor server-side, NOT the
+    # legacy min(requested, budget_max) that would honor the brain's requested qty and size up.
+    cfg.risk.confidence_sizing = True
+    cfg.risk.max_contracts = 5
+    cfg.risk.max_risk_per_trade = 5000.0      # don't let the dollar cap bind...
+    cfg.daily_goal.max_daily_loss = 10_000.0  # ...nor the daily-loss projection
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    # requested qty=5 and budget_max=5 → legacy would approve 5; confidence-sizing floors to 1.
+    rd = gate.evaluate(_cmd(Action.ENTER_LONG, qty=5, stop_ticks=8), s, last_price=4000.0)
+    assert rd.approved
+    assert rd.command.qty == 1
+    assert any("confidence_sized:none->1" in r for r in rd.reasons)
+
+
 def test_confidence_ignored_when_sizing_disabled(cfg):
     # Default cfg: confidence_sizing off → a qty=1 entry stays 1 even at full confidence
     # (the gate only clamps down; it never auto-sizes up). This is the legacy behavior.
