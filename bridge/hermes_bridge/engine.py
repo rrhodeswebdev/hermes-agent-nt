@@ -21,7 +21,7 @@ from itertools import count
 from .agent_client import AgentClient, AgentRequest, MockAgentClient
 from .config import BridgeConfig, effective_entry_freshness_s, timeframe_seconds
 from .indicators import MarketContext, atr, build_context
-from .journal import ClosedTrade, JournalStore, TradeTracker
+from .journal import ClosedTrade, DeclineLog, JournalStore, TradeTracker
 from .levels import detect_levels
 from .models import (
     AccountState,
@@ -52,6 +52,27 @@ class EngineResult:
     risk_reasons: list[str] = field(default_factory=list)
 
 
+@dataclass
+class PendingCounterfactual:
+    """An entry setup the brain ARMED but did not take — replayed forward to see whether
+    declining it was right. ``limit_price`` is the entry we wanted; once a later bar touches
+    it the replay is ``filled`` and tracked to its ATR bracket. Resolved outcomes
+    (would_win / would_lose / ambiguous / never_filled / no_resolution) land in the
+    DeclineLog — the over-blocking evidence a closed-trades journal can never carry."""
+
+    kind: str
+    side: Side
+    limit_price: float
+    stop_price: float
+    target_price: float
+    born_ts: float
+    bars_left: int
+    rationale: str
+    regime: str
+    filled: bool = False
+    entry_price: float = 0.0
+
+
 class TradingEngine:
     def __init__(
         self,
@@ -63,6 +84,7 @@ class TradingEngine:
         planner: Planner | None = None,
         journal: JournalStore | None = None,
         on_close: Callable[[ClosedTrade], None] | None = None,
+        declines: DeclineLog | None = None,
     ) -> None:
         self.cfg = config
         self.store = store
@@ -94,6 +116,11 @@ class TradingEngine:
         # candidates are answered from this memo instead of burning another Claude call
         # (extended trends produce the same candidate bar after bar). See _duplicate_decline.
         self._declined: dict | None = None
+        # Counterfactual replay of NOT-taken setups (gated by learning.counterfactuals_enabled).
+        # _cf_seen dedups by (direction, band-bucket) so the plan cycle's per-bar re-arm of the
+        # same entry zone is recorded once, not every bar. See _record_missed_triggers.
+        self.declines = declines
+        self._cf_pending: list[PendingCounterfactual] = []
 
     def _new_id(self) -> str:
         return f"{self.cfg.strategy_id}-{next(self._ids)}"
@@ -105,6 +132,9 @@ class TradingEngine:
         self.session.mark_bar(bar.ts)
         if self.session.position != 0:
             self.tracker.on_bar(bar)
+        # Advance any not-taken setups against this bar before the new decision (a setup
+        # recorded last bar first gets a touch/resolve chance here — never on its own bar).
+        self._resolve_counterfactuals(bar)
 
         # If the daily goal/limit was hit on a prior fill and we are still in a
         # position, flatten immediately regardless of what the agent thinks.
@@ -209,6 +239,7 @@ class TradingEngine:
         # the next plan can assume the optimistic post-fill position of anything
         # queued this close. With a synchronous planner this arms before we return.
         if self.planner is not None:
+            self._record_missed_triggers(armed, bar, ctx, result)
             self._schedule_followup(bar, ctx, bars, account, result)
         return result
 
@@ -375,6 +406,103 @@ class TradingEngine:
             return None
         return (f"prefilter:duplicate_decline({d['action']} @{d['price']:g}, "
                 f"bar {bars_elapsed + 1}/{knobs.prefilter_dedup_bars})")
+
+    # ---- counterfactual replay of not-taken setups --------------------------
+    def _resolve_counterfactuals(self, bar: Bar) -> None:
+        """Advance each pending not-taken setup against the just-closed bar; resolved
+        outcomes append to the DeclineLog. No-op when the feature is off or nothing pends."""
+        if self.declines is None or not self._cf_pending:
+            return
+        still: list[PendingCounterfactual] = []
+        for p in self._cf_pending:
+            outcome = self._cf_step(p, bar)
+            if outcome is None:
+                still.append(p)
+                continue
+            self.declines.append({
+                "kind": p.kind, "outcome": outcome, "side": p.side.value,
+                "limit_price": round(p.limit_price, 4),
+                "stop_price": round(p.stop_price, 4),
+                "target_price": round(p.target_price, 4),
+                "regime": p.regime, "rationale": p.rationale,
+            })
+        self._cf_pending = still
+
+    @staticmethod
+    def _cf_step(p: PendingCounterfactual, bar: Bar) -> str | None:
+        """One replay step; returns an outcome when resolved, else None (still pending).
+        Never credits a win/loss on the fill bar — intra-bar order is unknown, so a bar that
+        spans BOTH brackets is 'ambiguous', never a fabricated loss."""
+        if not p.filled:
+            touched = (bar.low <= p.limit_price if p.side == Side.LONG
+                       else bar.high >= p.limit_price)
+            if touched:
+                p.filled = True
+                p.entry_price = p.limit_price
+                return None  # resolution starts on the bar AFTER the fill
+            p.bars_left -= 1
+            return "never_filled" if p.bars_left <= 0 else None
+        if p.side == Side.LONG:
+            target_hit, stop_hit = bar.high >= p.target_price, bar.low <= p.stop_price
+        else:
+            target_hit, stop_hit = bar.low <= p.target_price, bar.high >= p.stop_price
+        if target_hit and stop_hit:
+            return "ambiguous"
+        if target_hit:
+            return "would_win"
+        if stop_hit:
+            return "would_lose"
+        p.bars_left -= 1
+        return "no_resolution" if p.bars_left <= 0 else None
+
+    def _record_missed_triggers(self, plan: TradePlan | None, bar: Bar,
+                                ctx: MarketContext, result: EngineResult) -> None:
+        """Record (deduped) the entry triggers the brain armed but did NOT fire this close,
+        so the replay can later score whether declining them was right. Gated off by default
+        (learning.counterfactuals_enabled). The trunk re-arms a plan every bar, so the dedup
+        is load-bearing: without it the same pullback band would log on every bar."""
+        if (self.declines is None or not self.cfg.learning.counterfactuals_enabled
+                or plan is None or plan.mode != "seek_entry"
+                or plan.based_on_bar_ts >= bar.ts or not plan.triggers):
+            return
+        if result.command is not None and result.command.action in (
+            Action.ENTER_LONG, Action.ENTER_SHORT
+        ):
+            return  # the plan fired — that's a real (journaled) trade, not a miss
+        atr_value = ctx.atr or 0.0
+        tick = self.cfg.instrument.tick_size or 0.25
+        for t in plan.triggers:
+            side = Side.LONG if t.direction == "long" else Side.SHORT
+            # Entry = the band edge price first reaches on its way into the zone.
+            limit = ((t.max_close if t.max_close is not None else t.min_close)
+                     if side == Side.LONG
+                     else (t.min_close if t.min_close is not None else t.max_close))
+            if limit is None:
+                continue
+            stop_ticks, target_ticks = t.stop_ticks, t.target_ticks
+            if stop_ticks is None and atr_value > 0:
+                stop_ticks = max(1, round(self.cfg.strategy.atr_stop_mult * atr_value / tick))
+            if target_ticks is None and atr_value > 0:
+                target_ticks = max(1, round(self.cfg.strategy.atr_target_mult * atr_value / tick))
+            if not stop_ticks or not target_ticks:
+                continue
+            if side == Side.LONG:
+                stop_price, target_price = limit - stop_ticks * tick, limit + target_ticks * tick
+            else:
+                stop_price, target_price = limit + stop_ticks * tick, limit - target_ticks * tick
+            # Dedup by proximity to a same-side pending: the plan cycle re-arms the same band
+            # every bar, so without this one missed pullback would log on every bar. tol uses
+            # the live ATR but the compare is on raw price, so it stays stable as ATR drifts.
+            tol = self.cfg.learning.counterfactual_dedup_atr * atr_value
+            if any(p.side == side and abs(p.limit_price - limit) <= tol
+                   for p in self._cf_pending):
+                continue
+            self._cf_pending.append(PendingCounterfactual(
+                kind="missed_trigger", side=side, limit_price=limit,
+                stop_price=stop_price, target_price=target_price, born_ts=bar.ts,
+                bars_left=self.cfg.learning.counterfactual_horizon_bars,
+                rationale=t.rationale or plan.rationale, regime=ctx.regime,
+            ))
 
     # ---- fill handling ------------------------------------------------------
     def on_fill(self, fill: Fill) -> OrderCommand | None:

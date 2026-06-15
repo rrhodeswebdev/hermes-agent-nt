@@ -326,6 +326,12 @@ class LearningConfig(BaseModel):
     # resolved would-win (the over-blocking signal), a reflection fires to consider
     # narrowing the lesson that vetoed them. Counts unreported would-wins; see DeclineLog.
     reflect_missed_wins: int = Field(3, ge=1)
+    # Counterfactual self-correction: replay entry setups the brain armed but did NOT take
+    # (the plan cycle re-arms every bar; the engine dedups by band so one missed pullback is
+    # logged once). Resolved outcomes feed reflect_on_missed. OFF by default (neutral).
+    counterfactuals_enabled: bool = False
+    counterfactual_horizon_bars: int = Field(20, ge=1)   # bars before a replay gives up
+    counterfactual_dedup_atr: float = Field(0.5, ge=0)   # bands within this x ATR = same setup
     max_lessons: int = 40             # cap applied lessons per reflection
     # Staggered distillation: a slower, deeper model periodically compresses the full
     # lesson/note corpus into ONE bounded distilled.md that the realtime decision prompt

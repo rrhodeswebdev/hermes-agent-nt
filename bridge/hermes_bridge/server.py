@@ -128,7 +128,8 @@ class AppState:
         self.reflector = Reflector(config, LearnedStore(config.learning.learned_dir), self.journal)
         self.engine = TradingEngine(
             config, self.store, self.session, self.agent, self.risk,
-            planner=self.planner, journal=self.journal, on_close=self._on_trade_closed)
+            planner=self.planner, journal=self.journal, on_close=self._on_trade_closed,
+            declines=self.declines)
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
@@ -480,6 +481,9 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
                 "rationale": d.rationale,
                 "queued": f"{cmd.action}:{cmd.qty}" if cmd is not None else None,
             })
+        # Flat-only, threshold-gated: when declines have resolved would-win and we're flat,
+        # reflect on whether a lesson is over-blocking (self-gates + runs off the lock).
+        st.maybe_reflect_missed()
         return d
 
     @app.post("/ingest/account")
