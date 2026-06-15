@@ -206,6 +206,11 @@ class TradingEngine:
         # brain that authored a setup can't fire it in chop. Exits/management pass through.
         decision = self._suppress_transitional(
             decision, ctx.regime, self.cfg.strategy.wait_in_transitional)
+        # Require order-flow confirmation: the armed plan trigger fires on a price band
+        # alone (plan.evaluate_plan is price-only), so the delta floor a setup specifies is
+        # enforced HERE — under both brains and the plan cycle. Exits/management pass through.
+        decision = self._suppress_low_delta(
+            decision, ctx.delta_ratio, self.cfg.strategy.delta_floor)
 
         if decision.action == Action.WAIT:
             self._remember_decline(candidate, bar)
@@ -264,6 +269,28 @@ class TradingEngine:
                 action=Action.WAIT,
                 rationale=f"transitional_regime_wait (suppressed {decision.action.value})")
         return decision
+
+    @staticmethod
+    def _suppress_low_delta(decision: Decision, delta_ratio: float, floor: float) -> Decision:
+        """Convert an ENTRY to WAIT when order-flow delta does not confirm the direction
+        (config-gated). The armed plan trigger fires on a price band alone, so the delta
+        floor a setup names is otherwise never enforced mechanically. Require
+        delta_ratio >= +floor for longs, <= -floor for shorts. floor <= 0 disables the gate
+        (the neutral default; also avoids suppressing replay/backtests with no order-flow
+        data). Exits and position management are never gated."""
+        if floor <= 0.0 or decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT):
+            return decision
+        confirmed = (
+            delta_ratio >= floor if decision.action == Action.ENTER_LONG
+            else delta_ratio <= -floor
+        )
+        if confirmed:
+            return decision
+        sign = "+" if decision.action == Action.ENTER_LONG else "-"
+        return Decision(
+            action=Action.WAIT,
+            rationale=f"delta_below_floor (delta={delta_ratio:+.3f} vs {sign}{floor:g}; "
+                      f"suppressed {decision.action.value})")
 
     # ---- pre-armed plan cycle -------------------------------------------------
     def _evaluate_armed_plan(self, plan: TradePlan | None, bar: Bar, mode: Mode) -> Decision:

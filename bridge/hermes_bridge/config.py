@@ -71,6 +71,14 @@ class StrategyParams(BaseModel):
     # A belt over the brain's judgment after it was observed firing authored setups in chop.
     # Exits and position management are never gated. False = neutral (trust the brain's read).
     wait_in_transitional: bool = False
+    # Deterministic order-flow gate: when > 0, the engine converts an ENTRY to WAIT unless
+    # delta_ratio confirms direction — a long needs delta_ratio >= +delta_floor, a short
+    # needs <= -delta_floor. The armed plan trigger (plan.evaluate_plan) fires on a price
+    # band ALONE, so without this the delta floor a setup names in its prose is never
+    # enforced mechanically. 0.0 = off (the neutral default; also avoids gating replay /
+    # backtests that carry no order-flow data). Only enable where real bid/ask delta is
+    # streamed (live NT8). Exits and position management are never gated.
+    delta_floor: float = Field(default=0.0, ge=0.0)
     # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
     # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
     # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is

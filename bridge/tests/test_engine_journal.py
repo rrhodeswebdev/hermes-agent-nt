@@ -106,3 +106,26 @@ def test_suppress_transitional_gate():
         enter, "transitional", False).action == Action.ENTER_LONG  # neutral default
     ex = Decision(action=Action.EXIT, confidence=0.9, rationale="e")
     assert TradingEngine._suppress_transitional(ex, "transitional", True).action == Action.EXIT
+
+
+def test_suppress_low_delta_gate():
+    """The deterministic order-flow belt: an ENTRY is suppressed unless delta_ratio clears
+    the floor (long needs >= +floor, short needs <= -floor). floor 0 disables it; exits are
+    never gated. Closes the gap where the armed price-band trigger fires without enforcing
+    the setup's delta floor (the delta values below are real entries from the 06-15 tape)."""
+    s = TradingEngine._suppress_low_delta
+    long_e = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    short_e = Decision(action=Action.ENTER_SHORT, confidence=0.8, rationale="x")
+    # Long: clears +0.05 -> fires; below or negative -> WAIT.
+    assert s(long_e, 0.09, 0.05).action == Action.ENTER_LONG     # +212 trade kept
+    assert s(long_e, 0.05, 0.05).action == Action.ENTER_LONG     # boundary inclusive
+    assert s(long_e, 0.021, 0.05).action == Action.WAIT          # -76 trade blocked
+    assert s(long_e, -0.072, 0.05).action == Action.WAIT         # -134 (negative-delta long)
+    # Short: clears -0.05 -> fires; above -> WAIT.
+    assert s(short_e, -0.09, 0.05).action == Action.ENTER_SHORT
+    assert s(short_e, -0.013, 0.05).action == Action.WAIT        # -148 trade blocked
+    # floor 0 disables the gate; exits are never gated.
+    assert s(long_e, -0.5, 0.0).action == Action.ENTER_LONG
+    assert s(Decision(action=Action.EXIT, confidence=0.9, rationale="e"),
+             0.0, 0.05).action == Action.EXIT
+    assert "delta" in s(long_e, 0.0, 0.05).rationale
