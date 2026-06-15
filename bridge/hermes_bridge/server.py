@@ -583,6 +583,13 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
     def control_curate(request: Request) -> dict:
         return {"ok": True, "applied": _state(request).reflector.curate()}
 
+    @app.post("/control/distill")
+    def control_distill(request: Request) -> dict:
+        """Run the slow-tier distillation: compress the full lesson/note corpus into one
+        bounded hermes/learned/distilled.md that the realtime prompt reads instead of raw
+        lessons. Text-only — it never writes risk/config numbers or places orders."""
+        return {"ok": True, "applied": _state(request).reflector.distill()}
+
     @app.post("/control/reauthor")
     def control_reauthor(request: Request) -> dict:
         """Force a FRESH pre-session study: re-author the agent playbook from the current

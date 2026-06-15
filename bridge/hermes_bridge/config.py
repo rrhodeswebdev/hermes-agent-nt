@@ -309,11 +309,27 @@ class LearningConfig(BaseModel):
     profile_char_limit: int = 1400
     notes_char_limit: int = 2200
     lessons_char_limit: int = 2500
+    # Notes triage: the prompt shows the NEWEST notes within notes_char_limit; once the
+    # live agent-notes.md outgrows notes_archive_over_chars, the oldest bullets move to
+    # hermes/learned/archive/ (long-term memory — never deleted), keeping the newest
+    # notes_keep_chars as the working set. 0 = archival off (neutral).
+    notes_archive_over_chars: int = Field(8000, ge=0)
+    notes_keep_chars: int = Field(4000, ge=0)
     reflect_enabled: bool = True
     reflect_on_trade_close: bool = True
     reflect_model: str = "sonnet"     # model for reflection/curation calls
     reflect_recent: int = 20          # recent trades shown to reflection for context
     max_lessons: int = 40             # cap applied lessons per reflection
+    # Staggered distillation: a slower, deeper model periodically compresses the full
+    # lesson/note corpus into ONE bounded distilled.md that the realtime decision prompt
+    # reads INSTEAD of raw lessons — knowledge can grow without bloating the per-bar
+    # prompt. Trigger via POST /control/distill.
+    distill_model: str = "opus"       # the slow, deep tier for the distillation pass
+    distilled_char_limit: int = Field(1600, ge=1)  # hard cap on the distilled artifact
+    # Distillation is an opus pass over the FULL corpus — it needs far more than the
+    # per-bar claude.timeout_s (30s). It runs off the hot path (manual /control/distill),
+    # so a generous budget is safe.
+    distill_timeout_s: float = Field(300.0, gt=0)
 
 
 class NewsConfig(BaseModel):
