@@ -98,7 +98,8 @@ class AppState:
         self.config_path = config_path or "config/trading.yaml"
         self.entry_freshness_s = effective_entry_freshness_s(config)
         self.stale_drops = 0  # entries dropped by the freshness guard (shown on the panel)
-        self.store = BarStore(config.instrument.symbol, config.instrument.timeframe)
+        self.store = BarStore(config.instrument.symbol, config.instrument.timeframe,
+                              db_path=config.storage.bars_db or None)
         self.session = SessionState(
             instrument=config.instrument.symbol,
             timeframe=config.instrument.timeframe,

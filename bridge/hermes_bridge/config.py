@@ -280,6 +280,16 @@ class ServerConfig(BaseModel):
     port: int = 8787
 
 
+class StorageConfig(BaseModel):
+    """Optional SQLite persistence for the bar store. Empty ``bars_db`` = disabled (the
+    neutral default; the store stays a pure in-memory deque). A path turns on write-through:
+    every bar is mirrored to SQLite and the tail is reloaded on startup, so multi-day history
+    — and the levels/calibration tooling that reads it — survives a bridge restart. DB
+    failures degrade to memory-only; persistence never breaks the bar loop."""
+
+    bars_db: str = ""  # path to the SQLite file; "" = in-memory only
+
+
 class ExecutionConfig(BaseModel):
     # Hard gate on real-money trading. Must be explicitly true AND acknowledged.
     allow_live: bool = False
@@ -374,6 +384,7 @@ class BridgeConfig(BaseModel):
     strategies: StrategyAuthoringConfig = Field(default_factory=StrategyAuthoringConfig)
     levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)

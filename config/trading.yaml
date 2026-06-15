@@ -149,6 +149,12 @@ server:
   host: 0.0.0.0                # listen on all interfaces (LAN access from Windows/NT)
   port: 8787
 
+# Optional SQLite persistence for the bar store. A path turns on write-through so multi-day
+# history — and the levels/backfill tooling that reads it — survives a bridge restart; an
+# empty value keeps the store in-memory only. The file lives under bridge/state/ (gitignored).
+storage:
+  bars_db: bridge/state/bars.db
+
 # Execution safety. allow_live must be explicitly true to trade real money; the
 # NinjaScript strategy ALSO refuses non-Sim accounts unless its AllowLive is true.
 execution:
