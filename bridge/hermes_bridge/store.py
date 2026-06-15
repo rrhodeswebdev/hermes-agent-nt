@@ -48,7 +48,7 @@ class BarStore:
             except (sqlite3.Error, OSError) as e:  # mkdir can raise OSError too
                 print(f"[store] bars db unavailable ({e}); running memory-only",
                       flush=True)
-                self._db = None
+                self._close_db()
 
     def _persist(self, bars: list[Bar]) -> None:
         if self._db is None:
@@ -70,7 +70,18 @@ class BarStore:
         except sqlite3.Error as e:
             print(f"[store] bars db write failed ({e}); disabling persistence",
                   flush=True)
-            self._db = None
+            self._close_db()
+
+    def _close_db(self) -> None:
+        """Disable persistence, closing any open connection FIRST so a failed init or write
+        never leaks the file handle / db lock (which would block the next restart)."""
+        db = getattr(self, "_db", None)
+        if db is not None:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+        self._db = None
 
     def replace_history(self, bars: list[Bar]) -> int:
         """Bulk-load historical bars (called when NinjaTrader goes realtime)."""

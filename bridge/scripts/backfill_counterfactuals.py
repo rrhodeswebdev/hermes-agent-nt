@@ -105,7 +105,7 @@ def main() -> int:
 
     records: list[dict] = []
     last_candidate: tuple[str, int] | None = None  # (side, index) for dedup
-    for i in range(_WINDOW, len(bars) - args.horizon):
+    for i in range(_WINDOW - 1, len(bars) - args.horizon):
         window = bars[i - _WINDOW + 1: i + 1]
         ctx = build_context(
             window,

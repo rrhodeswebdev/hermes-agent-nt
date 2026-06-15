@@ -180,19 +180,31 @@ class LearnedStore:
         header, bullets = _split_bullets(text)
         if not bullets:
             return text[:budget], 0
+        # Reserve room for the omission banner up front (we reach here only when the text
+        # already exceeds budget, so something WILL be dropped), then size newest-first by the
+        # ACTUAL rendered length — banner + the "\n" join inserts — so the result never exceeds
+        # the budget (a truncated bullet counts only the chars kept, not its full length).
+        banner = "(… {n} older notes omitted — full history in the archive)"
+        reserve = len(banner.format(n=len(bullets))) + 1  # + the newline after the banner
+        inner = max(0, budget - reserve)
         picked: list[str] = []
         used = 0
         for b in reversed(bullets):
-            if used + len(b) > budget and picked:
+            sep = 1 if picked else 0  # the "\n" join() inserts between bullets
+            if used + sep + len(b) <= inner:
+                picked.append(b)
+                used += sep + len(b)
+            else:
+                remain = inner - used - sep
+                if remain > 0:
+                    picked.append(b[:remain])
                 break
-            picked.append(b[:budget] if used + len(b) > budget else b)
-            used += len(b)
         dropped = len(bullets) - len(picked)
         out: list[str] = []
         if dropped > 0:
-            out.append(f"(… {dropped} older notes omitted — full history in the archive)")
+            out.append(banner.format(n=dropped))
         out.extend(reversed(picked))  # chronological order among the selected
-        return "\n".join(out), dropped
+        return "\n".join(out)[:budget], dropped
 
     def _backup(self, path: Path) -> None:
         """Timestamped copy under .history/ before any overwrite. The live files are

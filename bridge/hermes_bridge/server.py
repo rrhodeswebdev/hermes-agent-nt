@@ -257,11 +257,18 @@ class AppState:
         lc = self.cfg.learning
         if not (lc.reflect_enabled and lc.enabled):
             return
-        if self.session.position != 0:
+        if lc.reflect_missed_wins <= 0:
+            return  # misconfig guard: a 0 threshold would fire on every flat bar
+        # Snapshot the trigger under the lock so a concurrent fill can't race the
+        # check-then-take and drain declines on a stale read (or fire on an empty set).
+        with self.lock:
+            if self.session.position != 0:
+                return
+            if len(self.declines.unreported_wins()) < lc.reflect_missed_wins:
+                return
+            declines = self.declines.take_unreported()
+        if not declines:
             return
-        if len(self.declines.unreported_wins()) < lc.reflect_missed_wins:
-            return
-        declines = self.declines.take_unreported()
         recent = self.journal.recent(lc.reflect_recent)
 
         def _run() -> None:

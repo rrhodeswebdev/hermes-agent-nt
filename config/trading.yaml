@@ -159,8 +159,8 @@ server:
 # history — and the levels/backfill tooling that reads it — survives a bridge restart; an
 # empty value keeps the store in-memory only. The file lives under bridge/state/ (gitignored).
 storage:
-  bars_db: bridge/state/bars.db
-  session_state: bridge/state/session.json   # restore day P&L + trade count across a restart
+  bars_db: ""              # neutral/off in the template — set a path in trading.local.yaml to opt in
+  session_state: ""        # restore day P&L + trade count across a restart (opt in via local)
 
 # Execution safety. allow_live must be explicitly true to trade real money; the
 # NinjaScript strategy ALSO refuses non-Sim accounts unless its AllowLive is true.
