@@ -201,6 +201,11 @@ class TradingEngine:
             if decision.confidence < self.cfg.strategy.min_confidence:
                 decision = Decision(action=Action.WAIT,
                                     rationale=f"low_confidence:{decision.confidence}")
+        # Stand down in an unclear/transitional regime (config-gated): the strategy's master
+        # switch (market-regime.md) says WAIT when structure is mixed — enforced here so a
+        # brain that authored a setup can't fire it in chop. Exits/management pass through.
+        decision = self._suppress_transitional(
+            decision, ctx.regime, self.cfg.strategy.wait_in_transitional)
 
         if decision.action == Action.WAIT:
             self._remember_decline(candidate, bar)
@@ -246,6 +251,19 @@ class TradingEngine:
             self._record_missed_triggers(armed, bar, ctx, result)
             self._schedule_followup(bar, ctx, bars, account, result)
         return result
+
+    @staticmethod
+    def _suppress_transitional(decision: Decision, regime: str, enabled: bool) -> Decision:
+        """Convert an ENTRY to WAIT when the regime read is 'transitional' (config-gated).
+        The strategy stands down in unclear/mixed structure (strategy.md / market-regime.md);
+        this enforces it deterministically over the brain's judgment. Exits and position
+        management are never gated."""
+        if (enabled and regime == "transitional"
+                and decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT)):
+            return Decision(
+                action=Action.WAIT,
+                rationale=f"transitional_regime_wait (suppressed {decision.action.value})")
+        return decision
 
     # ---- pre-armed plan cycle -------------------------------------------------
     def _evaluate_armed_plan(self, plan: TradePlan | None, bar: Bar, mode: Mode) -> Decision:

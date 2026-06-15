@@ -51,15 +51,18 @@ you WAIT. Most bars are WAIT.
 - The bridge re-checks every order against the hard risk limits (risk-management.md,
   daily-goal.md) and may clamp or reject it.
 
-## Bias toward taking clean setups (RELAXED test profile)
+## Selectivity (production)
 
-> ⚠️ This is a **relaxed, testing-only** posture to exercise the agent end-to-end and
-> generate more entries on Sim. It is intentionally less selective than production
-> rules. Revert this section before trading anything that matters.
+Take a setup only when **ALL** of its conditions hold — regime, structure, trigger,
+**and** order-flow confirmation **and** location/room. Treat flow and location/room as
+**hard gates, not preferences**:
 
-While testing, treat each playbook's *flow* and *location/room* conditions as
-preferences rather than hard gates: when the regime is right and the playbook's core
-structure + trigger are present, you may enter even if order flow is only neutral or
-the location is less than ideal. You still WAIT when the regime is unclear, the
-structure is absent, or the trigger bar has not closed. Flow that is *clearly against*
-the trade remains a veto. The hard rules above are never relaxed.
+- Order flow neutral or against the trade at the trigger bar → **WAIT** (not a discount).
+- Less than ~**1×ATR** of room to the nearest structural level (`swing_high`/`swing_low`)
+  in the trade's direction → **WAIT** (the setup can't pay for its stop).
+- Regime unclear/**transitional**, structure absent, or the trigger bar not yet closed →
+  **WAIT**.
+
+One missing condition is a WAIT, not a discount. **Most bars are WAIT; a no-trade plan is
+the correct, common output.** Quality over frequency — a handful of clean setups a day
+beats churning marginal ones. The hard rules above are never relaxed.

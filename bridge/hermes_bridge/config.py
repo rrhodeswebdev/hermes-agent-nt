@@ -65,6 +65,12 @@ class StrategyParams(BaseModel):
     min_confidence: float = Field(  # engine ignores Decisions below this confidence
         default=0.55, ge=0.0, le=1.0
     )
+    # Deterministic regime discipline: when True, the engine converts an ENTRY to WAIT
+    # whenever the structural regime read is "transitional" — the strategy's own master
+    # switch (strategy.md / market-regime.md) says stand down in unclear/mixed structure.
+    # A belt over the brain's judgment after it was observed firing authored setups in chop.
+    # Exits and position management are never gated. False = neutral (trust the brain's read).
+    wait_in_transitional: bool = False
     # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
     # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
     # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is

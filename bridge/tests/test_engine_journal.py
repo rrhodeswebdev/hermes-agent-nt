@@ -2,7 +2,7 @@ from hermes_bridge.agent_client import build_agent_client
 from hermes_bridge.engine import TradingEngine
 from hermes_bridge.indicators import build_context
 from hermes_bridge.journal import JournalStore
-from hermes_bridge.models import Bar, Fill, Side
+from hermes_bridge.models import Action, Bar, Decision, Fill, Side
 from hermes_bridge.replay_sim import ReplaySimulator
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.session import SessionState
@@ -92,3 +92,17 @@ def test_engine_journals_partial_fill_round_trip(cfg, tmp_path):
     point_value = 12.5 / 0.25  # ES test instrument
     assert r["realized_pnl"] == round(2 * 3 * point_value, 2), \
         "multi-fill exit must journal the whole-trade P&L, not the last leg"
+
+
+def test_suppress_transitional_gate():
+    """The deterministic transitional->WAIT belt: ENTRIES are suppressed in a transitional
+    regime when enabled; trending/disabled pass through, and exits are never gated."""
+    enter = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    g = TradingEngine._suppress_transitional(enter, "transitional", True)
+    assert g.action == Action.WAIT and "transitional" in g.rationale
+    assert TradingEngine._suppress_transitional(
+        enter, "trending", True).action == Action.ENTER_LONG
+    assert TradingEngine._suppress_transitional(
+        enter, "transitional", False).action == Action.ENTER_LONG  # neutral default
+    ex = Decision(action=Action.EXIT, confidence=0.9, rationale="e")
+    assert TradingEngine._suppress_transitional(ex, "transitional", True).action == Action.EXIT
