@@ -95,6 +95,10 @@ class TradingEngine:
         self.journal = journal
         self.tracker = TradeTracker()
         self._pending_entry: dict | None = None
+        # session.realized_pnl baseline stamped when the position leaves flat, so a trade
+        # that EXITS across several partial fills journals the WHOLE-trade P&L at close (the
+        # per-fill delta would otherwise drop every exit leg but the last). 0.0 while flat.
+        self._trade_open_pnl: float = 0.0
         # Initial protective-stop distance (ticks) of the OPEN position, promoted from the
         # matching pending entry when the position actually FILLS (not at approval — a
         # dropped/stale order must not leave a stale 1R behind). The trade manager uses it
@@ -521,6 +525,7 @@ class TradingEngine:
             # trade whose real stop we don't know — the resting bracket still protects it.
             self._active_stop_ticks = p.get("stop_ticks") if p is not None else None
             self._managed_level = None
+            self._trade_open_pnl = before_pnl  # baseline for the whole-trade P&L at close
             ctx = p["context"] if p is not None else self.last_context
             if ctx is not None:  # no context at all (fill before any bar): nothing to journal
                 self.tracker.on_entry(
@@ -531,19 +536,33 @@ class TradingEngine:
                     confidence=p.get("confidence", 0.0) if p is not None else 0.0,
                 )
             self._pending_entry = None  # consumed or invalidated either way
+        elif (before_pos != 0 and abs(after_pos) > abs(before_pos)
+                and (after_pos > 0) == (before_pos > 0)):
+            # Scaled into the SAME-side open position on a later fill (a partial entry
+            # completing, or pyramiding). Without this the trade journals at only its first
+            # leg's size — the live 2-lots-booked-as-1-lot under-count. Track peak size +
+            # the running weighted-average entry so it closes as one full-size trade.
+            self.tracker.note_scale(qty=abs(after_pos), avg_price=self.session.avg_price)
         elif before_pos != 0 and after_pos == 0:
             # Flat: the trade manager's 1R and trailed high-water no longer apply.
             self._active_stop_ticks = None
             self._managed_level = None
+            # WHOLE-trade P&L since it left flat — not just this last exit leg's delta. A
+            # multi-fill exit realizes across several on_fill calls, so the per-call
+            # `realized_pnl - before_pnl` would drop every leg but the last; the open
+            # baseline (_trade_open_pnl) captures the full round trip.
             trade = self.tracker.on_exit(
                 ts=fill.ts, price=fill.price,
-                realized_pnl=self.session.realized_pnl - before_pnl,
+                realized_pnl=self.session.realized_pnl - self._trade_open_pnl,
             )
             if trade is not None:
                 if self.journal is not None:
                     self.journal.append(trade)
                 if self.on_close is not None:
                     self.on_close(trade)
+        # else: a partial REDUCE toward flat (position still open) — keep tracking; the
+        # close branch journals the whole trade when it finally returns to flat. (The
+        # strategy flattens before reversing, so a direct long<->short flip never occurs.)
 
         reason = self.session.check_daily_goal()
         if reason and self.session.position != 0:

@@ -58,6 +58,16 @@ class TradeTracker:
                    "context": context, "rationale": rationale, "confidence": confidence,
                    "bars_held": 0, "mfe": 0.0, "mae": 0.0}
 
+    def note_scale(self, *, qty: int, avg_price: float) -> None:
+        """A later fill grew the OPEN position (a partial entry completing, or pyramiding
+        in the same direction). Track the peak size and the volume-weighted average entry,
+        so a position built across several fills journals as ONE trade at its FULL size —
+        not just the first leg. No-op when flat."""
+        if self._e is None:
+            return
+        self._e["qty"] = qty
+        self._e["price"] = avg_price
+
     def on_bar(self, bar: Bar) -> None:
         e = self._e
         if e is None:

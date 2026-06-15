@@ -58,3 +58,37 @@ def test_replay_records_closed_trades(cfg, tmp_path):
     assert r["side"] in ("LONG", "SHORT")
     assert "realized_pnl" in r and "mae" in r and "mfe" in r
     assert "trend" in r["entry_context"]
+
+
+def test_engine_journals_partial_fill_round_trip(cfg, tmp_path):
+    """A 2-lot position that fills AND exits in 1-lot legs must journal as ONE trade at
+    FULL qty with the WHOLE-trade P&L — not the first entry leg's size / last exit leg's
+    P&L. Reproduces the live NT8 partial-fill under-count (a 2-lot booked as 1 lot)."""
+    js = JournalStore(str(tmp_path / "pj.jsonl"))
+    eng = _engine(cfg, js)
+    bars = synthetic_bars(60)
+    for b in bars:
+        eng.store.append(b)
+    ctx = build_context(bars, atr_period=14)
+    entry_px = bars[-1].close
+    eng._pending_entry = {"cmd_id": "p-1", "ts": bars[-1].ts, "side": Side.LONG,
+                          "context": ctx, "rationale": "partial entry"}
+    # Enter LONG 2 across two 1-lot fills (0 -> 1 -> 2).
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=entry_px, ts=bars[-1].ts))
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=entry_px, ts=bars[-1].ts))
+    assert eng.session.position == 2
+    eng.on_bar(Bar(ts=bars[-1].ts + 300, open=entry_px, high=entry_px + 5,
+                   low=entry_px - 2, close=entry_px + 3))
+    # Exit LONG 2 across two 1-lot fills at +3 pts (2 -> 1 -> 0).
+    exit_px = entry_px + 3
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=exit_px, ts=bars[-1].ts + 600))
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=exit_px, ts=bars[-1].ts + 600))
+    assert eng.session.position == 0
+    recs = js.all()
+    assert len(recs) == 1
+    r = recs[0]
+    assert r["side"] == "LONG"
+    assert r["qty"] == 2, "multi-fill entry must journal full size, not the first leg"
+    point_value = 12.5 / 0.25  # ES test instrument
+    assert r["realized_pnl"] == round(2 * 3 * point_value, 2), \
+        "multi-fill exit must journal the whole-trade P&L, not the last leg"
