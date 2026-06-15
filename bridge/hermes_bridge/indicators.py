@@ -167,6 +167,18 @@ def session_for_ts(ts: float) -> str:
     return "RTH" if 570 <= minutes < 960 else "ETH"  # 09:30 = 570, 16:00 = 960
 
 
+def cme_trading_day(ts: float) -> int:
+    """Ordinal key for the CME equity-index TRADING day. Its boundary is the 17:00 ET daily
+    settlement / maintenance break, NOT midnight: a bar at/after 17:00 ET belongs to the NEXT
+    trading day, so the overnight (ETH) session that opens 18:00 ET groups with the FOLLOWING
+    calendar date's RTH -- exactly how the exchange (and NT8's daily realized P&L) rolls. Used
+    for the daily-goal / P&L reset so an evening ETH session never inherits that morning's RTH
+    P&L. DST-aware; same epoch+timedelta math as session_for_ts (Windows-safe)."""
+    dt_utc = _EPOCH + timedelta(seconds=ts)
+    et = dt_utc + _eastern_offset(dt_utc)
+    return (et + timedelta(hours=7)).toordinal()  # shift so 17:00 ET maps to the next date
+
+
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 

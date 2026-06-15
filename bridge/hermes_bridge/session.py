@@ -21,19 +21,22 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .indicators import cme_trading_day
 from .models import AccountState, Fill, Side
 
 
 @dataclass(frozen=True)
 class _DayKey:
-    """Identifies the trading day for resets. Epoch-seconds floored to UTC day by
-    default; a real deployment can key on the session timezone instead."""
+    """Identifies the CME trading day for daily-goal / P&L resets. Keyed on the exchange
+    trading day (boundary 17:00 ET, the daily settlement) -- NOT UTC midnight -- so an evening
+    ETH session (opens 18:00 ET) is a NEW day and never inherits that morning's RTH P&L,
+    matching how NT8's daily realized rolls. See indicators.cme_trading_day."""
 
     value: int
 
     @staticmethod
     def from_ts(ts: float) -> _DayKey:
-        return _DayKey(int(ts // 86400))
+        return _DayKey(cme_trading_day(ts))
 
 
 class SessionState:
