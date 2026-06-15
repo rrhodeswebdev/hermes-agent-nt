@@ -24,7 +24,7 @@ firms:
       - name: Trading Combine
         accounts:
           - {size: 50000, max_daily_loss: 1000, max_contracts: 5,
-             profit_target: 3000, trailing_drawdown: 2000}
+             profit_target: 3000, trailing_drawdown: 2000, consistency_pct: 0.5}
           - {size: 100000, max_daily_loss: 2000, max_contracts: 10}
   - name: Apex Trader Funding
     context_file: apex.md
@@ -100,6 +100,29 @@ def test_apply_account_profile_null_daily_loss_left_untouched(tmp_path, cfg):
     assert cfg.daily_goal.max_daily_loss == before   # unchanged (no firm daily limit)
     assert session.max_daily_loss == before
     assert cfg.risk.max_contracts == 10              # but the contract ceiling still applies
+
+
+def test_apply_sets_daily_profit_target_from_consistency(tmp_path, cfg):
+    # Consistency 0.5 × eval target 3000 = 1500/day — the quickest compliant pace (2 days).
+    cat = load_catalog(_catalog_file(tmp_path))
+    _, _, tier = find_account(cat, "Topstep", "Trading Combine", 50000)
+    session = make_session(cfg)
+    applied = apply_account_profile(cfg, session, tier)
+    assert cfg.daily_goal.profit_target == 1500.0
+    assert session.profit_target == 1500.0           # running session uses it immediately
+    assert applied["daily_profit_target"] == 1500.0 and applied["consistency_pct"] == 0.5
+
+
+def test_apply_no_consistency_leaves_profit_target(tmp_path, cfg):
+    # Apex 50K has no consistency_pct → the configured daily profit target is untouched.
+    cat = load_catalog(_catalog_file(tmp_path))
+    _, _, tier = find_account(cat, "Apex Trader Funding", "Evaluation", 50000)
+    session = make_session(cfg)
+    before = cfg.daily_goal.profit_target
+    applied = apply_account_profile(cfg, session, tier)
+    assert cfg.daily_goal.profit_target == before
+    assert session.profit_target == before
+    assert applied["daily_profit_target"] is None
 
 
 # ---- persistence ------------------------------------------------------------

@@ -35,16 +35,23 @@ if TYPE_CHECKING:
 class AccountTier(BaseModel):
     """One selectable account size within a program, with the firm's documented numbers.
 
-    ``max_daily_loss`` / ``max_contracts`` are the two that get ENFORCED (they map onto the
-    RiskGate). ``profit_target`` (the cumulative evaluation target) and ``trailing_drawdown``
-    (the cumulative high-water-mark limit) are informational for the brain + dashboard. A
-    ``None`` field is simply omitted from the catalog and never overrides anything."""
+    ``max_daily_loss`` / ``max_contracts`` are the two limits that get ENFORCED (they map onto
+    the RiskGate). ``profit_target`` (the cumulative evaluation target) and ``trailing_drawdown``
+    (the cumulative high-water-mark limit) are informational for the brain + dashboard.
+
+    ``consistency_pct`` is the firm's consistency rule expressed as a fraction (0.5 = 50% — no
+    single day's profit may exceed this share of the total). When set alongside ``profit_target``
+    it DRIVES the bridge's daily profit target: ``daily_goal.profit_target = consistency_pct ×
+    profit_target`` — the largest equal-day bank that still passes the consistency check, i.e. the
+    quickest compliant pass (50% of a $3,000 target ⇒ bank $1,500/day, 2 days). See
+    ``apply_account_profile``. A ``None`` field is omitted from the catalog, overriding nothing."""
 
     size: float = Field(gt=0)
     max_daily_loss: float | None = Field(default=None, gt=0)
     max_contracts: int | None = Field(default=None, ge=1)
     profit_target: float | None = Field(default=None, gt=0)
     trailing_drawdown: float | None = Field(default=None, gt=0)
+    consistency_pct: float | None = Field(default=None, gt=0, le=1)
 
 
 class AccountProgram(BaseModel):
@@ -118,6 +125,13 @@ def apply_account_profile(
     Sets ``cfg.risk.max_contracts`` and ``cfg.daily_goal.max_daily_loss`` from the tier's
     non-null values, and mirrors the daily loss onto ``session.max_daily_loss`` so the live
     daily-goal check uses it immediately (SessionState holds its own copy, seeded at startup).
+
+    When the tier carries both a ``consistency_pct`` and a ``profit_target``, also sets the daily
+    PROFIT target to ``consistency_pct × profit_target`` — the largest equal-day bank that still
+    passes the firm's consistency rule, i.e. the quickest compliant pass (banking that much then
+    halting for the day, repeated). E.g. 50% × $3,000 ⇒ $1,500/day (2 days); 20% × $3,000 ⇒
+    $600/day (5 days). Mirrored onto ``session.profit_target`` so it takes effect immediately.
+
     Returns the numbers that were applied (and the informational ones) for logging/UI."""
     if tier.max_contracts is not None:
         cfg.risk.max_contracts = int(tier.max_contracts)
@@ -125,12 +139,22 @@ def apply_account_profile(
         cfg.daily_goal.max_daily_loss = float(tier.max_daily_loss)
         if session is not None:
             session.max_daily_loss = float(tier.max_daily_loss)
+    daily_profit_target: float | None = None
+    if tier.consistency_pct is not None and tier.profit_target is not None:
+        daily_profit_target = round(tier.consistency_pct * tier.profit_target, 2)
+        cfg.daily_goal.profit_target = daily_profit_target
+        if session is not None:
+            session.profit_target = daily_profit_target
     return {
         "size": tier.size,
         "max_daily_loss": tier.max_daily_loss,   # enforced (when set)
         "max_contracts": tier.max_contracts,     # enforced (when set)
-        "profit_target": tier.profit_target,     # guidance only (cumulative eval target)
+        "profit_target": tier.profit_target,     # the firm's cumulative eval target (guidance)
         "trailing_drawdown": tier.trailing_drawdown,  # guidance only (no primitive yet)
+        "consistency_pct": tier.consistency_pct,
+        # The daily profit halt the bridge now enforces: consistency_pct × eval target (the
+        # quickest compliant pace). None when the account has no consistency rule.
+        "daily_profit_target": daily_profit_target,
     }
 
 

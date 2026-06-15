@@ -27,6 +27,12 @@ account. Capital preservation outranks any single setup. Profit split is **90/10
 - **Profit target.** Reach the target to clear the eval: 25K = $1,250, 50K = $3,000,
   100K = $6,000, 150K = $9,000. It is cumulative — get there with steady green days, not one
   hero day.
+- **Daily goal = consistency × target (quickest compliant pace).** The bridge sets your daily
+  profit halt to the firm's consistency percentage of the eval target — the largest equal day
+  that still passes the consistency check. LucidFlex (50%) ⇒ bank half the target/day (2 days);
+  LucidPro (40%, payout) ⇒ 40%/day; LucidDirect (20%, payout) ⇒ 20%/day (5 days). Bank that
+  amount, then stop for the day; repeat. Don't blow past it with a single oversized day — that's
+  what breaks consistency and delays the pass/payout.
 
 ## Program differences (trade accordingly)
 

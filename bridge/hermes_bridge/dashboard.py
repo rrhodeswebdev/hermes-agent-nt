@@ -453,10 +453,15 @@ function populateSizes(sel){
 function renderNums(){
   const a=curAcct(); const el=document.getElementById('anums'); el.innerHTML='';
   if(!a)return;
+  // Daily profit goal = consistency% × eval target (the quickest compliant pace) when the
+  // account has a consistency rule; otherwise the configured goal is left unchanged.
+  const dailyGoal=(a.consistency_pct!=null&&a.profit_target!=null)
+    ? Math.round(a.consistency_pct*a.profit_target*100)/100 : null;
   const rows=[
     ['Daily loss limit', a.max_daily_loss!=null?dollars(a.max_daily_loss)+' · enforced':'none (no daily limit) · keeps your config'],
     ['Max contracts', a.max_contracts!=null?a.max_contracts+' · enforced':'—'],
-    ['Profit target', a.profit_target!=null?dollars(a.profit_target)+' · guidance':'—'],
+    ['Eval profit target', a.profit_target!=null?dollars(a.profit_target)+' · guidance':'—'],
+    ['Daily profit goal', dailyGoal!=null?dollars(dailyGoal)+' · enforced ('+Math.round(a.consistency_pct*100)+'% consistency)':'(uses configured goal)'],
     ['Trailing drawdown', a.trailing_drawdown!=null?dollars(a.trailing_drawdown)+' · guidance':'—'],
   ];
   rows.forEach(([k,v])=>{const d=document.createElement('div');
