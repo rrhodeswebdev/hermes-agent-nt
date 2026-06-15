@@ -70,3 +70,28 @@ def test_unrealized_pnl():
     s.apply_fill(Fill(side=Side.LONG, qty=1, price=4000.0, ts=0))
     assert s.unrealized_pnl(4002.0) == 100.0  # 2 pts * $50
     assert s.unrealized_pnl(3999.0) == -50.0
+
+
+def test_session_state_persists_and_restores_same_day(tmp_path):
+    """A mid-day restart restores realized P&L + trade count from disk; a new day starts
+    clean. Position is never persisted (a clean restart is flat)."""
+    sp = str(tmp_path / "session.json")
+    ts = 1_781_500_000.0  # some trading day D
+    s1 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s1.maybe_roll_day(ts)
+    s1.apply_fill(Fill(side=Side.LONG, qty=1, price=4000.0, ts=ts))
+    s1.apply_fill(Fill(side=Side.SHORT, qty=1, price=4004.0, ts=ts))  # +$200, 1 trade
+    assert s1.position == 0 and s1.trades_today == 1
+    assert round(s1.realized_pnl, 2) == 200.0
+
+    # Restart same day: a fresh session over the same file restores on the first bar.
+    s2 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    assert s2.realized_pnl == 0.0 and s2.trades_today == 0  # not applied until a bar arrives
+    s2.maybe_roll_day(ts + 300)  # same UTC day -> restore
+    assert round(s2.realized_pnl, 2) == 200.0
+    assert s2.trades_today == 1
+
+    # A NEW trading day starts clean (never carry yesterday's P&L forward).
+    s3 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s3.maybe_roll_day(ts + 86_400 * 2)
+    assert s3.realized_pnl == 0.0 and s3.trades_today == 0

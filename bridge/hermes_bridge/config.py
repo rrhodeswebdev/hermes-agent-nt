@@ -288,6 +288,10 @@ class StorageConfig(BaseModel):
     failures degrade to memory-only; persistence never breaks the bar loop."""
 
     bars_db: str = ""  # path to the SQLite file; "" = in-memory only
+    # Day-state JSON (realized P&L + trade count + halt state), restored on the first bar of
+    # the SAME trading day so a mid-day restart doesn't zero the dashboard / daily-loss
+    # headroom. "" = disabled (in-memory only).
+    session_state: str = ""
 
 
 class ExecutionConfig(BaseModel):

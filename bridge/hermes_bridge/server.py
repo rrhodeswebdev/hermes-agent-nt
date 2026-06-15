@@ -107,6 +107,7 @@ class AppState:
             tick_value=config.instrument.tick_value,
             profit_target=config.daily_goal.profit_target,
             max_daily_loss=config.daily_goal.max_daily_loss,
+            state_path=config.storage.session_state or None,
         )
         # Major-news blackout guard (shared: this server refreshes it on a background
         # thread; the RiskGate only reads it). Disabled ⇒ inert (no thread, never blocks).
