@@ -1,0 +1,56 @@
+# Prop-firm catalog — committed reference data (loaded by hermes_bridge.prop_firms).
+#
+# Selecting a firm + account type + size in the dashboard:
+#   1. loads the firm's context file (hermes/prop-firms/<context_file>) into the brain, and
+#   2. applies the account's ENFORCED numbers into the live config the RiskGate reads:
+#        max_daily_loss              -> daily_goal.max_daily_loss   (daily loss halt)
+#        max_contracts               -> risk.max_contracts          (position ceiling)
+#        consistency_pct × profit_target -> daily_goal.profit_target (daily profit halt / bank)
+#
+# consistency_pct is the firm's consistency rule (0.5 = 50%: no single day may exceed that share
+# of total profit). The daily profit target is set to consistency_pct × profit_target — the
+# largest equal-day bank that still passes the consistency check, i.e. the QUICKEST compliant
+# pass (50% of $3,000 -> $1,500/day, 2 days; 20% of $3,000 -> $600/day, 5 days). Omit
+# consistency_pct to leave the configured daily profit target unchanged.
+#
+# profit_target (the EVALUATION target to pass) and trailing_drawdown (the Max Loss Limit /
+# end-of-day drawdown) are otherwise NOT enforced server-side (the RiskGate has no cumulative
+# primitive yet) — they are shown on the dashboard and fed to the brain via the context file so
+# it trades within them by judgment. Trailing-drawdown enforcement is a planned follow-up.
+#
+# CONTRACT SIZING: Lucid quotes sizing as "N minis OR 10N micros" (1 mini = 10 micros). The
+# configured instrument is MNQ (a MICRO), so max_contracts below is the MICRO count. If you
+# switch to a MINI instrument (NQ/ES), divide these by 10 (the mini counts are in lucid.md).
+#
+# Numbers are Lucid Trading's documented LucidPro evaluation programs (the eval ladder is
+# shared across LucidPro / LucidFlex / LucidDirect). Verify against your CURRENT account terms.
+# Your personal selection is saved to config/trading.local.yaml (gitignored), not here.
+
+firms:
+  - name: Lucid Trading
+    context_file: lucid.md
+    account_types:
+      # LucidPro — evaluation -> funded. Fixed daily loss limit; end-of-day drawdown MLL.
+      # consistency_pct 0.40 governs the FUNDED payout (the eval itself has none); used to pace
+      # the daily profit goal so the account is payout-compliant from day one.
+      - name: LucidPro
+        accounts:
+          - {size: 25000,  max_contracts: 20,  profit_target: 1250, trailing_drawdown: 1000, consistency_pct: 0.40}
+          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000, consistency_pct: 0.40}
+          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000, consistency_pct: 0.40}
+          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500, consistency_pct: 0.40}
+      # LucidFlex — end-of-day TRAILING drawdown that locks past the initial trail balance.
+      # Funded LucidFlex has NO daily loss limit (see lucid.md); the eval DLL is shown here.
+      # consistency_pct 0.50 governs the EVALUATION pass -> daily goal = 50% of the eval target.
+      - name: LucidFlex
+        accounts:
+          - {size: 25000,  max_contracts: 20,  profit_target: 1250, trailing_drawdown: 1000, consistency_pct: 0.50}
+          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000, consistency_pct: 0.50}
+          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000, consistency_pct: 0.50}
+          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500, consistency_pct: 0.50}
+      # LucidDirect — direct-to-funded; daily loss limit + a 20% consistency rule (payout).
+      - name: LucidDirect
+        accounts:
+          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000, consistency_pct: 0.20}
+          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000, consistency_pct: 0.20}
+          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500, consistency_pct: 0.20}

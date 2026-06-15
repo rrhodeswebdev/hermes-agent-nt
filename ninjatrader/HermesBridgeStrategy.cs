@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Net.Http;
 using System.Reflection;
@@ -120,6 +121,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         // interval to avoid overlapping requests. 2m bar + 115s bridge timeout -> 115000.
         [NinjaScriptProperty]
         public int HttpTimeoutMs { get; set; } = 115000;
+
+        // ---- prop-firm account selection (single dropdown) ----------------------
+        // ONE dropdown of valid firm/type/size combos (see the PropFirmAccount enum +
+        // PropFirmAccounts.Map at the bottom of this file). Reported to the bridge
+        // (/ingest/account); the bridge loads that firm's context file into the brain AND
+        // enforces the account's limits (daily loss, max contracts). Leave on "(none)" to
+        // select no account (nothing applied). The enum mirrors config/prop-firms.yaml —
+        // the bridge owns the numbers and validates the combo.
+        [NinjaScriptProperty]
+        [Display(Name = "Prop firm account", GroupName = "Prop firm account", Order = 1)]
+        public PropFirmAccount PropAccount { get; set; } = PropFirmAccount.None;
 
         private string BaseUrl => string.Format("http://{0}:{1}", BridgeHost, BridgePort);
         #endregion
@@ -432,13 +444,27 @@ namespace NinjaTrader.NinjaScript.Strategies
             try
             {
                 string name = Account != null ? Account.Name : "";
+                // Map the selected account combo -> bridge report fields. "(none)" sends a
+                // blank prop_firm + null size, which the bridge treats as "unspecified" and
+                // leaves the current selection unchanged. account_size is a clean integer
+                // string (a valid JSON number).
+                string pf = "", at = "", sizeTok = "null";
+                string[] sel;
+                if (PropFirmAccounts.Map.TryGetValue(PropAccount, out sel))
+                {
+                    pf = sel[0]; at = sel[1]; sizeTok = sel[2];
+                }
                 string body = string.Format(
-                    "{{\"account\":\"{0}\",\"allow_live\":{1},\"use_agent_strategies\":{2}}}",
+                    "{{\"account\":\"{0}\",\"allow_live\":{1},\"use_agent_strategies\":{2},"
+                    + "\"prop_firm\":\"{3}\",\"account_type\":\"{4}\",\"account_size\":{5}}}",
                     Escape(name), AllowLive ? "true" : "false",
-                    UseAgentStrategies ? "true" : "false");
+                    UseAgentStrategies ? "true" : "false",
+                    Escape(pf), Escape(at), sizeTok);
                 await PostAsync("/ingest/account", body);
                 Print("Hermes: reported account '" + name + "' to bridge (agent_strategies="
-                    + (UseAgentStrategies ? "on" : "off") + ").");
+                    + (UseAgentStrategies ? "on" : "off")
+                    + (pf == "" ? "" : ", prop_firm=" + pf + "/" + at + "/" + sizeTok)
+                    + ").");
                 return true;
             }
             catch (Exception ex)
@@ -1337,5 +1363,51 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return b;
             return null;
         }
+    }
+
+    // =========================================================================
+    //  Prop-firm account selection — ONE flat dropdown of valid firm/type/size combos.
+    //  NinjaTrader's grid renders an enum as a native dropdown with zero TypeConverter /
+    //  context.Instance plumbing (the cascading-dropdown approach was unreliable in the
+    //  grid — dependent lists came back empty). Each member is one VALID account; the
+    //  strategy maps it to the bridge report fields via PropFirmAccounts.Map, which
+    //  MIRRORS config/prop-firms.yaml (the bridge owns the numbers + validates the combo).
+    //  Adding/renaming an account means editing BOTH this enum+map and the YAML.
+    // =========================================================================
+    public enum PropFirmAccount
+    {
+        [Display(Name = "(none)")] None,
+        [Display(Name = "Lucid Trading - LucidPro - 25K")] LucidPro_25K,
+        [Display(Name = "Lucid Trading - LucidPro - 50K")] LucidPro_50K,
+        [Display(Name = "Lucid Trading - LucidPro - 100K")] LucidPro_100K,
+        [Display(Name = "Lucid Trading - LucidPro - 150K")] LucidPro_150K,
+        [Display(Name = "Lucid Trading - LucidFlex - 25K")] LucidFlex_25K,
+        [Display(Name = "Lucid Trading - LucidFlex - 50K")] LucidFlex_50K,
+        [Display(Name = "Lucid Trading - LucidFlex - 100K")] LucidFlex_100K,
+        [Display(Name = "Lucid Trading - LucidFlex - 150K")] LucidFlex_150K,
+        [Display(Name = "Lucid Trading - LucidDirect - 50K")] LucidDirect_50K,
+        [Display(Name = "Lucid Trading - LucidDirect - 100K")] LucidDirect_100K,
+        [Display(Name = "Lucid Trading - LucidDirect - 150K")] LucidDirect_150K,
+    }
+
+    internal static class PropFirmAccounts
+    {
+        // enum -> { prop_firm, account_type, account_size }. The size is a clean integer
+        // string (a valid JSON number for the report). MIRRORS config/prop-firms.yaml.
+        public static readonly Dictionary<PropFirmAccount, string[]> Map =
+            new Dictionary<PropFirmAccount, string[]>
+            {
+                { PropFirmAccount.LucidPro_25K,     new[] { "Lucid Trading", "LucidPro",    "25000"  } },
+                { PropFirmAccount.LucidPro_50K,     new[] { "Lucid Trading", "LucidPro",    "50000"  } },
+                { PropFirmAccount.LucidPro_100K,    new[] { "Lucid Trading", "LucidPro",    "100000" } },
+                { PropFirmAccount.LucidPro_150K,    new[] { "Lucid Trading", "LucidPro",    "150000" } },
+                { PropFirmAccount.LucidFlex_25K,    new[] { "Lucid Trading", "LucidFlex",   "25000"  } },
+                { PropFirmAccount.LucidFlex_50K,    new[] { "Lucid Trading", "LucidFlex",   "50000"  } },
+                { PropFirmAccount.LucidFlex_100K,   new[] { "Lucid Trading", "LucidFlex",   "100000" } },
+                { PropFirmAccount.LucidFlex_150K,   new[] { "Lucid Trading", "LucidFlex",   "150000" } },
+                { PropFirmAccount.LucidDirect_50K,  new[] { "Lucid Trading", "LucidDirect", "50000"  } },
+                { PropFirmAccount.LucidDirect_100K, new[] { "Lucid Trading", "LucidDirect", "100000" } },
+                { PropFirmAccount.LucidDirect_150K, new[] { "Lucid Trading", "LucidDirect", "150000" } },
+            };
     }
 }

@@ -337,6 +337,31 @@ class NewsConfig(BaseModel):
     fetch_timeout_s: float = Field(default=10.0, gt=0)
 
 
+class AccountProfileConfig(BaseModel):
+    """The user-selected prop firm + account program.
+
+    Selecting one (in the dashboard, or here) does two things:
+    1. loads the firm's plain-English context file into the brain's system prompt, and
+    2. applies the account's hard numbers into the ENFORCED config the RiskGate reads
+       (the daily loss limit and the contract ceiling — the numbers that map onto the
+       bridge's existing safety primitives; see ``prop_firms.apply_account_profile``).
+
+    The firm CATALOG (firms -> account types -> sizes + numbers) lives in
+    ``config/prop-firms.yaml`` (committed reference data). The PERSONAL selection lives in
+    ``config/trading.local.yaml`` (gitignored, deep-merged on top), exactly like the account
+    name and personal risk. ``None`` for all three fields ⇒ no firm selected ⇒ nothing is
+    loaded or overridden (neutral default)."""
+
+    prop_firm: str | None = None       # firm name; must match a catalog entry
+    account_type: str | None = None    # account program name within the firm
+    account_size: float | None = None  # account size within the program
+    # The committed catalog of firms/accounts and the directory of firm context *.md files.
+    # context_dir is deliberately OUTSIDE hermes/context/ so the framework loader does not
+    # concatenate every firm file into the prompt — only the selected one is loaded.
+    catalog_path: str = "config/prop-firms.yaml"
+    context_dir: str = "hermes/prop-firms"
+
+
 class BridgeConfig(BaseModel):
     strategy_id: str = "hermes-default"
     instrument: InstrumentConfig = Field(default_factory=InstrumentConfig)
@@ -352,6 +377,7 @@ class BridgeConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    account_profile: AccountProfileConfig = Field(default_factory=AccountProfileConfig)
 
     def apply_env(self) -> BridgeConfig:
         host = os.getenv("HERMES_BRIDGE_HOST")

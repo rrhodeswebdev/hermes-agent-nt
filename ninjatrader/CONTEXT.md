@@ -35,6 +35,14 @@ Uses `Calculate.OnBarClose` — exactly one decision per closed bar.
   history. **false**: trades your `hermes/context/strategies/{trending,ranging}/` files. Reported
   to the bridge before history so the study runs in the right mode. Overrides `strategies.source`.
 - `AllowLive` — leave **false**. The strategy refuses non-Sim/Playback accounts unless true.
+- `PropAccount` — **single dropdown** of valid firm·type·size combos (the `PropFirmAccount` enum,
+  e.g. *Lucid Trading - LucidPro - 50K*; `(none)` = nothing selected). A flat enum is used on
+  purpose: cascading dependent dropdowns are unreliable in NT's grid (dependent lists came back
+  empty), whereas a native enum always populates and only offers valid combos. Reported to the
+  bridge over `/ingest/account`; the bridge loads that firm's context file into the brain and
+  **enforces** the account's daily-loss + max-contracts limits. Runtime only (not persisted, like
+  the account name). The enum + `PropFirmAccounts.Map` (bottom of the .cs) **must mirror**
+  `config/prop-firms.yaml` — the bridge owns the numbers and validates the combo.
 - Dashboard button knobs: `RefreshSeconds`, `FontSize`.
 
 ## On-chart dashboard

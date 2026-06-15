@@ -30,6 +30,16 @@ Loaded *verbatim* into the system prompt in both strategy modes.
 
 > The **enforced** risk numbers always come from `config/trading.yaml`, not this prose.
 
+### `prop-firms/` — prop-firm rulebooks (committed)
+
+One plain-English `*.md` per prop firm (e.g. `lucid.md`). Selecting a firm + account
+in the dashboard loads **only that one file** into the prompt (on top of the framework) so the
+brain trades within the firm's rules. Kept **outside** `context/` on purpose so the framework
+loader's directory glob never concatenates every firm's file. The firm CATALOG (firms -> account
+types -> sizes + numbers) lives in `config/prop-firms.yaml`; the account's daily-loss limit and
+contract ceiling are **enforced** server-side (written into the live config the `RiskGate` reads),
+while the eval target / trailing drawdown are guidance for the brain. See `prop-firms/README.md`.
+
 ### `generated/` — agent-authored playbooks (**gitignored, runtime**)
 
 In agent mode the brain studies the chart's pre-session history and authors its own playbook.

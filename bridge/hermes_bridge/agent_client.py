@@ -47,6 +47,11 @@ class AgentClient(ABC):
         # (the brain authors its own). Seeded from config; the server overrides it at
         # runtime from NinjaTrader's UseAgentStrategies toggle (set_strategy_source).
         self._strategy_source: str = config.strategies.source
+        # The selected prop firm's context filename (e.g. "topstep.md") under
+        # config.account_profile.context_dir, or None. Seeded by the server from the
+        # configured/selected account profile and changed at runtime by set_prop_firm_context;
+        # the Claude client appends that file to the system prompt (see _prop_firm_block).
+        self._prop_firm_context: str | None = None
 
     @abstractmethod
     def decide(self, req: AgentRequest) -> Decision: ...
@@ -64,6 +69,16 @@ class AgentClient(ABC):
 
     def strategy_source(self) -> str:
         return self._strategy_source
+
+    # ---- prop-firm context (selected account profile) -----------------------
+    def set_prop_firm_context(self, filename: str | None) -> None:
+        """Set (or clear) the selected prop firm's context filename at runtime. ``None`` or
+        empty clears it — no firm file is loaded. The Claude client reads it on the next
+        prompt build; base clients (mock/rules) ignore it (they build no prompt)."""
+        self._prop_firm_context = filename or None
+
+    def prop_firm_context(self) -> str | None:
+        return self._prop_firm_context
 
     def generated_strategy(self) -> str | None:
         """The playbook the agent authored this session, or None (custom mode / not yet

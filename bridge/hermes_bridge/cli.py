@@ -60,7 +60,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     print(f"hermes-bridge serving on {cfg.server.host}:{cfg.server.port} "
           f"(agent={cfg.agent.client}, instrument={cfg.instrument.symbol} "
           f"{cfg.instrument.timeframe})")
-    uvicorn.run(create_app(cfg), host=cfg.server.host, port=cfg.server.port)
+    uvicorn.run(create_app(cfg, config_path=args.config),
+                host=cfg.server.host, port=cfg.server.port)
     return 0
 
 
