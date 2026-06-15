@@ -167,6 +167,80 @@ def session_for_ts(ts: float) -> str:
     return "RTH" if 570 <= minutes < 960 else "ETH"  # 09:30 = 570, 16:00 = 960
 
 
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def et_weekday_clock(ts: float) -> tuple[str, str]:
+    """('Fri', '12:54') — US-Eastern day-of-week and clock time for the agent's context.
+    Makes time-of-day / day-of-week patterns LEARNABLE: without these in the journal, a
+    lesson like "midday chop fades the pullback edge" has no evidence trail to form from."""
+    dt_utc = _EPOCH + timedelta(seconds=ts)
+    et = dt_utc + _eastern_offset(dt_utc)
+    return _WEEKDAYS[et.weekday()], f"{et.hour:02d}:{et.minute:02d}"
+
+
+def et_date_session(ts: float) -> tuple[str, str]:
+    """('2026-06-12', 'RTH') — the US-Eastern calendar date and session of a bar."""
+    dt_utc = _EPOCH + timedelta(seconds=ts)
+    et = dt_utc + _eastern_offset(dt_utc)
+    return et.strftime("%Y-%m-%d"), session_for_ts(ts)
+
+
+def _et_minutes(ts: float) -> int:
+    dt_utc = _EPOCH + timedelta(seconds=ts)
+    et = dt_utc + _eastern_offset(dt_utc)
+    return et.hour * 60 + et.minute
+
+
+def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
+    """The multi-hour structure a 200-bar context window cannot see: prior RTH day's
+    high/low/close, the overnight (ETH) range since that close, today's RTH range, and the
+    opening range (09:30-10:00 ET). Computed over the FULL bar store (several days), all
+    sessions ET-bucketed. Levels are None until enough history exists — the agent treats a
+    missing level as 'unknown', never as zero."""
+    out: dict[str, float | None] = {
+        "prior_day_high": None, "prior_day_low": None, "prior_day_close": None,
+        "overnight_high": None, "overnight_low": None,
+        "today_high": None, "today_low": None,
+        "open_range_high": None, "open_range_low": None,
+    }
+    if not bars:
+        return out
+    today, _ = et_date_session(bars[-1].ts)
+    rth_dates: list[str] = []
+    for b in bars:  # ordered; collect distinct RTH dates to find the prior one
+        d, s = et_date_session(b.ts)
+        if s == "RTH" and (not rth_dates or rth_dates[-1] != d):
+            rth_dates.append(d)
+    prior = next((d for d in reversed(rth_dates) if d != today), None)
+
+    # Anchor the overnight bucket at the prior day's LAST RTH bar, so a multi-day store
+    # can't let an earlier overnight masquerade as "the" overnight range after a reload.
+    prior_last_ts = 0.0
+    if prior is not None:
+        for b in bars:
+            d, s = et_date_session(b.ts)
+            if s == "RTH" and d == prior:
+                prior_last_ts = b.ts
+
+    for b in bars:
+        d, s = et_date_session(b.ts)
+        if s == "RTH" and d == prior:
+            out["prior_day_high"] = max(out["prior_day_high"] or b.high, b.high)
+            out["prior_day_low"] = min(out["prior_day_low"] or b.low, b.low)
+            out["prior_day_close"] = b.close
+        elif s == "RTH" and d == today:
+            out["today_high"] = max(out["today_high"] or b.high, b.high)
+            out["today_low"] = min(out["today_low"] or b.low, b.low)
+            if 570 <= _et_minutes(b.ts) < 600:  # 09:30-10:00 ET opening range
+                out["open_range_high"] = max(out["open_range_high"] or b.high, b.high)
+                out["open_range_low"] = min(out["open_range_low"] or b.low, b.low)
+        elif s == "ETH" and prior is not None and b.ts > prior_last_ts:
+            out["overnight_high"] = max(out["overnight_high"] or b.high, b.high)
+            out["overnight_low"] = min(out["overnight_low"] or b.low, b.low)
+    return out
+
+
 @dataclass(frozen=True)
 class MarketContext:
     """Deterministic features handed to the agent each bar (LLM or rules).
@@ -189,9 +263,13 @@ class MarketContext:
     # The recent confirmed swing pivots (price, "high"/"low"), oldest first — the
     # structure the regime read is based on, surfaced so the brain can judge it directly.
     recent_pivots: list[tuple[float, str]] = field(default_factory=list)
+    weekday: str = ""            # "Mon".."Sun" in US Eastern (the trading day)
+    clock_et: str = ""           # "HH:MM" US Eastern — time-of-day for the agent/journal
+    # Multi-day reference prices (None until enough stored history) — see daily_levels().
+    levels: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "last_close": round(self.last_close, 4),
             "atr": _r(self.atr),
             "swing_high": _r(self.swing_high),
@@ -202,8 +280,13 @@ class MarketContext:
             "trend": self.trend,
             "recent_pivots": self.recent_pivots,
             "session": self.session,
+            "weekday": self.weekday,
+            "clock_et": self.clock_et,
             "bars_count": self.bars_count,
         }
+        if self.levels:
+            d["levels"] = {k: _r(v) for k, v in self.levels.items()}
+        return d
 
 
 def _r(x: float | None) -> float | None:
@@ -216,6 +299,7 @@ def build_context(
     atr_period: int,
     swing_lookback: int = 3,
     delta_window: int = 20,
+    level_bars: list[Bar] | None = None,
 ) -> MarketContext:
     closes = [b.close for b in bars]
     last_close = closes[-1] if closes else 0.0
@@ -225,6 +309,7 @@ def build_context(
     window = bars[-delta_window:]
     rd = cumulative_delta(window)
     vol = sum((b.volume or 0.0) for b in window)
+    wd, clock = et_weekday_clock(bars[-1].ts) if bars else ("", "")
     return MarketContext(
         last_close=last_close,
         atr=a,
@@ -237,4 +322,7 @@ def build_context(
         session=session_for_ts(bars[-1].ts) if bars else "ETH",
         delta_ratio=(rd / vol) if vol > 0 else 0.0,
         recent_pivots=[(round(p, 4), k) for p, _, k in pivots[-6:]],
+        weekday=wd,
+        clock_et=clock,
+        levels=daily_levels(level_bars) if level_bars else None,
     )

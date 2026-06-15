@@ -121,6 +121,7 @@ class TradingEngine:
             bars,
             atr_period=self.cfg.strategy.atr_period,
             swing_lookback=self.cfg.strategy.swing_lookback,
+            level_bars=self.store.all(),  # multi-day reference levels need the full store
         )
         self.last_context = ctx  # expose current regime / S/R to the dashboard
         self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
@@ -276,6 +277,7 @@ class TradingEngine:
             recent,
             atr_period=self.cfg.strategy.atr_period,
             swing_lookback=self.cfg.strategy.swing_lookback,
+            level_bars=bars,  # the full study history, for multi-day reference levels
         )
         account = self.session.account_state(mark_price=bars[-1].close)
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
