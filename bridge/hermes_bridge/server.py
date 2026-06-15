@@ -28,7 +28,7 @@ from .config import (
 )
 from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
-from .journal import JournalStore
+from .journal import DeclineLog, JournalStore
 from .levels import detect_levels
 from .memory import LearnedStore
 from .models import (
@@ -121,6 +121,10 @@ class AppState:
         # Background worker: analyses run between bars, never on the ingest path.
         self.planner = Planner(config, self.agent) if config.planner.enabled else None
         self.journal = JournalStore(config.learning.journal_path)
+        # Resolved counterfactuals for declined/unfilled setups. The engine PR wires the
+        # replay hook that appends here and the on_bar call to maybe_reflect_missed(); the
+        # attribute + method are defined now so both are unit-testable ahead of that wiring.
+        self.declines = DeclineLog(config.learning.declines_path)
         self.reflector = Reflector(config, LearnedStore(config.learning.learned_dir), self.journal)
         self.engine = TradingEngine(
             config, self.store, self.session, self.agent, self.risk,
@@ -238,6 +242,30 @@ class AppState:
             applied = self.reflector.reflect_on_close(trade, recent)
             if any(applied.values()):
                 print(f"[reflect] updated learned memory: {applied}", flush=True)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def maybe_reflect_missed(self) -> None:
+        """Flat-only reflection trigger: when no trade has closed but enough DECLINED
+        setups have resolved would-win, reflect on whether a lesson is over-blocking.
+        Fires only while FLAT (a missed-opportunity signal is meaningless mid-trade) and
+        only once the unreported would-wins reach reflect_missed_wins. take_unreported()
+        marks them reported so this won't double-fire; a win resolved concurrently lands
+        in the next snapshot. Off the hot path, in a daemon thread like _on_trade_closed."""
+        lc = self.cfg.learning
+        if not (lc.reflect_enabled and lc.enabled):
+            return
+        if self.session.position != 0:
+            return
+        if len(self.declines.unreported_wins()) < lc.reflect_missed_wins:
+            return
+        declines = self.declines.take_unreported()
+        recent = self.journal.recent(lc.reflect_recent)
+
+        def _run() -> None:
+            applied = self.reflector.reflect_on_missed(declines, recent)
+            if any(v for k, v in applied.items() if k != "error"):
+                print(f"[reflect:missed] updated learned memory: {applied}", flush=True)
 
         threading.Thread(target=_run, daemon=True).start()
 

@@ -305,6 +305,9 @@ class LearningConfig(BaseModel):
     enabled: bool = True
     learned_dir: str = "hermes/learned"          # trader-profile.md, agent-notes.md, lessons/*.md
     journal_path: str = "bridge/state/journal.jsonl"  # episodic record of closed trades
+    # Resolved counterfactuals for declined/unfilled setups (the over-blocking evidence
+    # stream a closed-trades journal can never carry). Written by the engine's replay hook.
+    declines_path: str = "bridge/state/declines.jsonl"
     retrieve_k: int = 3                           # similar past trades fed into each decision
     profile_char_limit: int = 1400
     notes_char_limit: int = 2200
@@ -319,6 +322,10 @@ class LearningConfig(BaseModel):
     reflect_on_trade_close: bool = True
     reflect_model: str = "sonnet"     # model for reflection/curation calls
     reflect_recent: int = 20          # recent trades shown to reflection for context
+    # Flat-only reflection: when no trade has closed but this many DECLINED setups have
+    # resolved would-win (the over-blocking signal), a reflection fires to consider
+    # narrowing the lesson that vetoed them. Counts unreported would-wins; see DeclineLog.
+    reflect_missed_wins: int = Field(3, ge=1)
     max_lessons: int = 40             # cap applied lessons per reflection
     # Staggered distillation: a slower, deeper model periodically compresses the full
     # lesson/note corpus into ONE bounded distilled.md that the realtime decision prompt

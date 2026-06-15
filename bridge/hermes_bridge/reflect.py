@@ -53,7 +53,25 @@ Rules:
 - notes_append: short factual observations about this instrument/regime worth keeping.
 - profile_replace: set only if the trader's stated preferences/risk posture changed;
   otherwise null. (It is saved as a PROPOSAL for the trader to review, never auto-applied.)
+- DECLINED-SETUP counterfactuals may be provided: entries the agent vetoed (or plans
+  that never filled), replayed against later real bars with the strategy's ATR brackets.
+  If declines citing a specific lesson consistently show "would_win", that lesson may be
+  OVER-BLOCKING: prefer op "update" that NARROWS its scope to the regime/condition where
+  it actually holds (e.g. "applies in range-bound tape; in a strong breakout trend with
+  positive delta, require only 0.5×ATR clearance") over retiring it — narrow or relax,
+  don't just pile on another restriction. If they show "would_lose", the lesson is earning
+  its keep — change nothing. Counterfactuals are approximations (no slippage, no queue
+  position): require a clear repeated pattern (3+ similar outcomes) before weakening any
+  lesson, and count near-duplicate declines of the SAME move (similar price/time) as ONE.
 - Keep each lesson body to 1-3 sentences."""
+
+MISSED_HEADER = """\
+NO TRADE CLOSED — this reflection was triggered because several DECLINED setups would
+have hit their target (counterfactual outcomes below). Review whether a learned lesson
+is over-blocking and, if the pattern is clear, narrow it per the rules. Near-duplicate
+declines of the SAME move (similar price/time) count as ONE pattern, not several. If
+the declines look unrelated to any lesson (or the pattern is thin), return an empty
+"lessons" array."""
 
 CURATE_SCHEMA = json.dumps({
     "type": "object",
@@ -104,6 +122,26 @@ class Reflector:
             + json.dumps(recent[-self.cfg.learning.reflect_recent:], separators=(",", ":"))
         )
         return self._run(self._system(REFLECT_SYSTEM), user, REFLECT_SCHEMA)
+
+    def reflect_on_missed(self, declines: list[dict], recent: list[dict]) -> dict:
+        """Reflection with no closed trade: would-win declines accumulated (the
+        over-blocking signal closed trades can never carry). Returns an applied dict
+        whose "error" makes a silent failure visible (None = the call ran and its
+        proposals were applied; a string = nothing was learned and why)."""
+        user = (
+            MISSED_HEADER
+            + self._declines_block(declines)
+            + "\n\nRECENT TRADES (most recent last):\n"
+            + json.dumps(recent[-self.cfg.learning.reflect_recent:], separators=(",", ":"))
+        )
+        return self._run_with_error(self._system(REFLECT_SYSTEM), user, REFLECT_SCHEMA)
+
+    @staticmethod
+    def _declines_block(declines: list[dict] | None) -> str:
+        if not declines:
+            return ""
+        return ("\n\nDECLINED/UNFILLED SETUPS — counterfactual outcomes (approximate):\n"
+                + json.dumps(declines, separators=(",", ":")))
 
     def distill(self) -> dict:
         """Slow-tier compression: the FULL corpus (profile, all lessons, live +
@@ -184,6 +222,42 @@ class Reflector:
         if pr:
             # Never auto-applied: the live profile is user-authored and self-amplifying
             # (it feeds every future prompt). Written as a proposal for human review.
+            self.learned.propose_profile(str(pr))
+            applied["profile"] = 1
+        return applied
+
+    def _run_with_error(self, system: str, user: str, schema: str) -> dict:
+        # Like _run, but carries an "error" key so a silent failure is visible to
+        # callers/logs (the flat-only missed-reflection has no closed-trade side effect
+        # to notice it failed): None = the call ran and its (possibly empty) proposals
+        # were applied; a string = nothing was learned and why (CLI timeout vs
+        # unparseable reply look identical otherwise). Mirrors distill()'s style.
+        applied = {"lessons": 0, "notes": 0, "profile": 0, "error": None}
+        try:
+            reply = run_claude_oneshot(self.cfg.agent.claude, system, user,
+                                       json_schema=schema, model=self.cfg.learning.reflect_model)
+            proposals = extract_structured(reply)
+        except Exception as e:  # noqa: BLE001 — best-effort; never disrupt trading
+            applied["error"] = type(e).__name__
+            return applied
+        if proposals is None:
+            applied["error"] = "no_structured_output"
+            return applied
+        for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:
+            op, name = ls.get("op"), ls.get("name")
+            if op in ("create", "update", "retire") and name:
+                self.learned.apply_lesson(op, name, body=ls.get("body", "") or "",
+                                          regime_tags=ls.get("regime_tags"))
+                applied["lessons"] += 1
+        lc = self.cfg.learning
+        for note in (proposals.get("notes_append") or []):
+            if note:
+                self.learned.append_note(
+                    str(note), archive_over_chars=lc.notes_archive_over_chars,
+                    keep_chars=lc.notes_keep_chars)
+                applied["notes"] += 1
+        pr = proposals.get("profile_replace")
+        if pr:
             self.learned.propose_profile(str(pr))
             applied["profile"] = 1
         return applied

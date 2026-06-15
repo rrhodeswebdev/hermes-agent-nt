@@ -10,6 +10,7 @@ decision. Nothing here executes orders or touches risk.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,6 +123,64 @@ class JournalStore:
         if n <= 0:
             return []
         return self.all()[-n:]
+
+
+class DeclineLog:
+    """Append-only JSONL of RESOLVED counterfactuals for declined/unfilled setups,
+    plus in-memory tracking of would-win outcomes not yet shown to a reflection.
+
+    This is the evidence stream that lets reflection NARROW or RETIRE a lesson that
+    over-blocks: vetoed setups never become trades, so without it the learning loop
+    could only ever add restrictions, never relax one."""
+
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self._unreported_wins: list[dict] = []
+        # Appends come from the bar-loop thread (engine), snapshots/clears from the
+        # reflection trigger paths — guard the in-memory list with its own lock.
+        self._lock = threading.Lock()
+
+    def append(self, rec: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        if rec.get("outcome") == "would_win":
+            with self._lock:
+                self._unreported_wins.append(rec)
+
+    def all(self) -> list[dict]:
+        if not self.path.is_file():
+            return []
+        out: list[dict] = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return out
+
+    def recent(self, n: int) -> list[dict]:
+        if n <= 0:
+            return []
+        return self.all()[-n:]
+
+    def unreported_wins(self) -> list[dict]:
+        with self._lock:
+            return list(self._unreported_wins)
+
+    def clear_unreported(self) -> None:
+        with self._lock:
+            self._unreported_wins.clear()
+
+    def take_unreported(self) -> list[dict]:
+        """Atomic snapshot-and-clear: a win resolved concurrently lands in the NEXT
+        snapshot instead of being cleared unseen."""
+        with self._lock:
+            out = list(self._unreported_wins)
+            self._unreported_wins.clear()
+            return out
 
 
 def select_similar(trades: list[dict], ctx: MarketContext, k: int) -> list[dict]:
