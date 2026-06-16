@@ -108,6 +108,34 @@ def test_suppress_transitional_gate():
     assert TradingEngine._suppress_transitional(ex, "transitional", True).action == Action.EXIT
 
 
+def test_suppress_transitional_delta_conditional():
+    """Delta-conditional transitional gate (wait_in_transitional OFF, floor > 0): a transitional
+    ENTRY fires only if order flow confirms at the STRICTER floor; below it -> WAIT. It stacks
+    above the global delta_floor (a delta clearing the 0.05 global bar can still be blocked by a
+    0.10 transitional bar). trending/ranging never gated here; exits never gated; floor 0 = off;
+    the blanket veto still wins when wait_in_transitional is on."""
+    s = TradingEngine._suppress_transitional
+    long_e = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    short_e = Decision(action=Action.ENTER_SHORT, confidence=0.8, rationale="x")
+    # Blanket veto wins regardless of delta when enabled (legacy behavior preserved).
+    assert s(long_e, "transitional", True, 0.5, 0.10).action == Action.WAIT
+    # enabled OFF, floor 0.10: clears the stricter floor -> fires.
+    assert s(long_e, "transitional", False, 0.12, 0.10).action == Action.ENTER_LONG
+    assert s(long_e, "transitional", False, 0.10, 0.10).action == Action.ENTER_LONG  # inclusive
+    # The discriminating case: clears the global 0.05 but NOT the 0.10 transitional floor -> WAIT.
+    g = s(long_e, "transitional", False, 0.07, 0.10)
+    assert g.action == Action.WAIT and "transitional_delta_below_floor" in g.rationale
+    # Short side mirrors with the sign flipped.
+    assert s(short_e, "transitional", False, -0.12, 0.10).action == Action.ENTER_SHORT
+    assert s(short_e, "transitional", False, -0.07, 0.10).action == Action.WAIT
+    # floor 0 disables the soft gate; non-transitional regimes pass; exits never gated.
+    assert s(long_e, "transitional", False, 0.0, 0.0).action == Action.ENTER_LONG
+    assert s(long_e, "trending", False, -0.5, 0.10).action == Action.ENTER_LONG
+    assert s(long_e, "ranging", False, -0.5, 0.10).action == Action.ENTER_LONG
+    ex = Decision(action=Action.EXIT, confidence=0.9, rationale="e")
+    assert s(ex, "transitional", False, -0.5, 0.10).action == Action.EXIT
+
+
 def test_suppress_low_delta_gate():
     """The deterministic order-flow belt: an ENTRY is suppressed unless delta_ratio clears
     the floor (long needs >= +floor, short needs <= -floor). floor 0 disables it; exits are

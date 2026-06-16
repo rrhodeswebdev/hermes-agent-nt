@@ -258,16 +258,43 @@ class TradingEngine:
         return result
 
     @staticmethod
-    def _suppress_transitional(decision: Decision, regime: str, enabled: bool) -> Decision:
-        """Convert an ENTRY to WAIT when the regime read is 'transitional' (config-gated).
-        The strategy stands down in unclear/mixed structure (strategy.md / market-regime.md);
-        this enforces it deterministically over the brain's judgment. Exits and position
-        management are never gated."""
-        if (enabled and regime == "transitional"
-                and decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT)):
+    def _suppress_transitional(
+        decision: Decision, regime: str, enabled: bool,
+        delta_ratio: float = 0.0, transitional_delta_floor: float = 0.0,
+    ) -> Decision:
+        """Gate ENTRIES in a 'transitional' regime (config-driven, three modes). Exits and
+        position management are never gated; trending/ranging pass through untouched.
+
+        - enabled (wait_in_transitional) True  -> blanket WAIT (strictest belt; the legacy
+          behavior, unchanged).
+        - enabled False, transitional_delta_floor > 0 -> allow only if order flow confirms at
+          this STRICTER floor (long needs delta_ratio >= +floor, short <= -floor), else WAIT.
+          Transitional structure (mixed/breaking, or too few pivots yet) needs stronger proof a
+          breakout is real. Stacks above the global delta_floor (_suppress_low_delta): in
+          transitional the effective bar is the stricter of the two.
+        - enabled False, transitional_delta_floor 0 -> no transitional-specific gate.
+        """
+        if (regime != "transitional"
+                or decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT)):
+            return decision
+        if enabled:
             return Decision(
                 action=Action.WAIT,
                 rationale=f"transitional_regime_wait (suppressed {decision.action.value})")
+        if transitional_delta_floor > 0.0:
+            confirmed = (
+                delta_ratio >= transitional_delta_floor
+                if decision.action == Action.ENTER_LONG
+                else delta_ratio <= -transitional_delta_floor
+            )
+            if not confirmed:
+                sign = "+" if decision.action == Action.ENTER_LONG else "-"
+                return Decision(
+                    action=Action.WAIT,
+                    rationale=(
+                        f"transitional_delta_below_floor (delta={delta_ratio:+.3f} vs "
+                        f"{sign}{transitional_delta_floor:g}; "
+                        f"suppressed {decision.action.value})"))
         return decision
 
     @staticmethod
