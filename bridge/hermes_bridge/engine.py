@@ -201,11 +201,14 @@ class TradingEngine:
             if decision.confidence < self.cfg.strategy.min_confidence:
                 decision = Decision(action=Action.WAIT,
                                     rationale=f"low_confidence:{decision.confidence}")
-        # Stand down in an unclear/transitional regime (config-gated): the strategy's master
-        # switch (market-regime.md) says WAIT when structure is mixed — enforced here so a
-        # brain that authored a setup can't fire it in chop. Exits/management pass through.
+        # Stand down in an unclear/transitional regime (config-gated). With wait_in_transitional
+        # ON this is a blanket WAIT; with it OFF and a transitional_delta_floor set, a
+        # transitional ENTRY is allowed only when order flow confirms at that stricter floor — so
+        # a brain that authored a setup can't fire it into chop, but a delta-confirmed breakout
+        # still goes. Exits/management pass through.
         decision = self._suppress_transitional(
-            decision, ctx.regime, self.cfg.strategy.wait_in_transitional)
+            decision, ctx.regime, self.cfg.strategy.wait_in_transitional,
+            ctx.delta_ratio, self.cfg.strategy.transitional_delta_floor)
         # Require order-flow confirmation: the armed plan trigger fires on a price band
         # alone (plan.evaluate_plan is price-only), so the delta floor a setup specifies is
         # enforced HERE — under both brains and the plan cycle. Exits/management pass through.

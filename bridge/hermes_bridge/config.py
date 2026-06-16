@@ -79,6 +79,14 @@ class StrategyParams(BaseModel):
     # backtests that carry no order-flow data). Only enable where real bid/ask delta is
     # streamed (live NT8). Exits and position management are never gated.
     delta_floor: float = Field(default=0.0, ge=0.0)
+    # Stricter, delta-CONDITIONAL transitional gate (only consulted when wait_in_transitional
+    # is False). When > 0 and the regime read is "transitional", an ENTRY fires only if
+    # delta_ratio confirms direction at THIS floor (long >= +floor, short <= -floor) — a higher
+    # order-flow bar than the global delta_floor, because transitional structure (mixed/breaking,
+    # or too few pivots yet) needs stronger proof a breakout is real. Stacks above delta_floor:
+    # in transitional the effective bar is the stricter of the two. 0.0 = off (the neutral
+    # default). Exits and position management are never gated.
+    transitional_delta_floor: float = Field(default=0.0, ge=0.0)
     # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
     # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
     # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is

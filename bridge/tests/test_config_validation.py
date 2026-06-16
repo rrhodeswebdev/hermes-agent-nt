@@ -50,6 +50,7 @@ def test_defaults_and_committed_template_still_valid():
         ("pullback_atr", -0.1),
         ("min_confidence", 1.5),
         ("min_confidence", -0.1),
+        ("transitional_delta_floor", -0.1),
     ],
 )
 def test_strategy_field_bounds(field, value):
