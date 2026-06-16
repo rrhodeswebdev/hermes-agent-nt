@@ -24,7 +24,9 @@ allowed. Order flow then confirms *whether* to take it.
   the prior higher-low up / below the prior lower-high down) and resumes, or a **break-and-
   go** through the level that just gave way — entering where price *is*, not at a far level
   you wish it would retrace to (a deep counter-trend bounce often never comes in a trend
-  that keeps extending). Fades wait for a reversal that structure must confirm first.
+  that keeps extending). Fading the *trend* (a counter-trend turn) waits for a reversal
+  structure must confirm first — this is NOT a ban on range fades: inside a genuine
+  two-sided range you still fade the edges (see **Location** below and market-regime.md).
 
 ## Location is everything
 
