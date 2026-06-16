@@ -87,6 +87,11 @@ class StrategyParams(BaseModel):
     # in transitional the effective bar is the stricter of the two. 0.0 = off (the neutral
     # default). Exits and position management are never gated.
     transitional_delta_floor: float = Field(default=0.0, ge=0.0)
+    # Temporal hysteresis on the mechanical regime/trend label. classify_regime is stateless
+    # and can flip bar-to-bar on a single mixed pivot; that thrash drives needless re-authoring
+    # and directional indecision. A NEW (regime, trend) read must persist this many CONSECUTIVE
+    # bars before it replaces the committed label. 1 = off (adopt every read = raw classifier).
+    regime_hysteresis_bars: int = Field(default=1, ge=1)
     # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
     # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
     # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is

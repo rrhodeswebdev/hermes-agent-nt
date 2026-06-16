@@ -143,3 +143,32 @@ def test_gated_off_records_nothing(tmp_path):
     eng.on_bar(make_bar(t + 600, 3997, 3998, 3994, 3996))
     assert eng._cf_pending == []
     assert eng.declines.all() == []
+
+
+def test_record_carries_timestamps(tmp_path):
+    # The persisted decline must carry its full timeline so the outcome can be
+    # re-verified later: born_ts (the bar it was declined on = the replay anchor),
+    # fill_ts (limit touched), resolved_ts (outcome decided).
+    eng, t = _cf_engine(tmp_path)
+    eng.on_bar(make_bar(t + 300, 4005, 4006, 4004, 4005))   # record (anchor)
+    eng.on_bar(make_bar(t + 600, 3997, 3998, 3994, 3996))   # fill (low 3994 <= limit 3995)
+    eng.on_bar(make_bar(t + 900, 3997, 4002, 3997, 3998))   # resolve (high 4002 >= target 4001)
+    rec = eng.declines.all()[-1]
+    assert rec["outcome"] == "would_win"
+    assert rec["born_ts"] == t + 300
+    assert rec["fill_ts"] == t + 600
+    assert rec["resolved_ts"] == t + 900
+
+
+def test_never_filled_record_has_null_fill_ts(tmp_path):
+    # A setup the limit never reached resolves never_filled with no fill_ts, but still
+    # carries its anchor and the bar that closed the horizon.
+    eng, t = _cf_engine(tmp_path, horizon=2)
+    eng.on_bar(make_bar(t + 300, 4005, 4006, 4004, 4005))   # record (bars_left=2)
+    eng.on_bar(make_bar(t + 600, 4005, 4006, 3998, 4005))   # no touch; 2 -> 1
+    eng.on_bar(make_bar(t + 900, 4005, 4006, 3998, 4005))   # 1 -> 0 -> never_filled
+    rec = eng.declines.all()[-1]
+    assert rec["outcome"] == "never_filled"
+    assert rec["fill_ts"] is None
+    assert rec["born_ts"] == t + 300
+    assert rec["resolved_ts"] == t + 900

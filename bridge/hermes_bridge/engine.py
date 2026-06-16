@@ -15,7 +15,7 @@ Without one, the legacy per-bar `agent.decide()` call is used.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 
 from .agent_client import AgentClient, AgentRequest, MockAgentClient
@@ -71,6 +71,39 @@ class PendingCounterfactual:
     regime: str
     filled: bool = False
     entry_price: float = 0.0
+    fill_ts: float = 0.0
+
+
+@dataclass
+class RegimeSmoother:
+    """Temporal hysteresis on the mechanical (regime, trend) label. ``classify_regime`` is
+    stateless and can flip bar-to-bar on a single mixed pivot; that thrash drives needless
+    re-authoring and directional indecision. A NEW (regime, trend) read must persist for
+    ``min_bars`` CONSECUTIVE bars before it replaces the committed label. ``min_bars`` <= 1
+    is a no-op (adopt every read = the raw classifier)."""
+
+    min_bars: int = 1
+    regime: str = ""
+    trend: str = ""
+    _cand: tuple[str, str] | None = field(default=None, init=False)
+    _streak: int = field(default=0, init=False)
+
+    def update(self, regime: str, trend: str) -> tuple[str, str]:
+        """Feed the raw per-bar read; return the (possibly held-over) committed label."""
+        if not self.regime or (regime, trend) == (self.regime, self.trend):
+            # first read, or the live read confirms the committed label
+            self.regime, self.trend = regime, trend
+            self._cand, self._streak = None, 0
+        else:
+            # a read that differs from the committed label — must persist min_bars bars
+            if self._cand == (regime, trend):
+                self._streak += 1
+            else:
+                self._cand, self._streak = (regime, trend), 1
+            if self._streak >= max(1, self.min_bars):
+                self.regime, self.trend = regime, trend
+                self._cand, self._streak = None, 0
+        return self.regime, self.trend
 
 
 class TradingEngine:
@@ -116,6 +149,10 @@ class TradingEngine:
         # threaded through reauthor.step each bar. The reducer decides WHEN to refresh the
         # authored playbook; the engine owns the guards + the act (see _maybe_reauthor).
         self.reauthor_state = ReauthorState()
+        # Temporal hysteresis on the mechanical regime label — smooths build_context's read
+        # before any consumer (decision, counterfactual tag, reauthor governor) sees it, so a
+        # one-bar structural wiggle can't thrash re-authoring/bias. 1 = off. See RegimeSmoother.
+        self.regime_smoother = RegimeSmoother(min_bars=config.strategy.regime_hysteresis_bars)
         # Last Claude-DECLINED prefilter candidate: {action, price, ts}. Near-identical
         # candidates are answered from this memo instead of burning another Claude call
         # (extended trends produce the same candidate bar after bar). See _duplicate_decline.
@@ -157,6 +194,11 @@ class TradingEngine:
             swing_lookback=self.cfg.strategy.swing_lookback,
             level_bars=self.store.all(),  # multi-day reference levels need the full store
         )
+        # Hysteresis: hold the committed regime/trend until a new read persists, so a one-bar
+        # structural wiggle can't thrash re-authoring or flip directional bias (RegimeSmoother).
+        sregime, strend = self.regime_smoother.update(ctx.regime, ctx.trend)
+        if (sregime, strend) != (ctx.regime, ctx.trend):
+            ctx = replace(ctx, regime=sregime, trend=strend)
         self.last_context = ctx  # expose current regime / S/R to the dashboard
         self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
         account = self.session.account_state(mark_price=bar.close)
@@ -504,6 +546,13 @@ class TradingEngine:
                 "stop_price": round(p.stop_price, 4),
                 "target_price": round(p.target_price, 4),
                 "regime": p.regime, "rationale": p.rationale,
+                # Full timeline so the outcome can be re-verified later without guessing
+                # the anchor: born_ts = the bar it was declined on (replay starts here),
+                # fill_ts = when the limit was touched (None if never filled), resolved_ts
+                # = the bar that decided the outcome.
+                "born_ts": p.born_ts,
+                "fill_ts": p.fill_ts or None,
+                "resolved_ts": bar.ts,
             })
         self._cf_pending = still
 
@@ -518,6 +567,7 @@ class TradingEngine:
             if touched:
                 p.filled = True
                 p.entry_price = p.limit_price
+                p.fill_ts = bar.ts
                 return None  # resolution starts on the bar AFTER the fill
             p.bars_left -= 1
             return "never_filled" if p.bars_left <= 0 else None

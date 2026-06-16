@@ -38,6 +38,11 @@ strategy:
   #   chop. 0.0 = off (neutral default). Set ~0.08-0.10 in trading.local.yaml where live delta
   #   streams; pair it with wait_in_transitional: false.
   transitional_delta_floor: 0.0
+  # Regime hysteresis: the mechanical regime/trend label (classify_regime) is stateless and can
+  #   flip bar-to-bar on a single mixed pivot, thrashing re-authoring + directional bias. A new
+  #   (regime, trend) read must persist this many CONSECUTIVE bars before it replaces the
+  #   committed label. 1 = off (neutral default). Set ~3 in trading.local.yaml to steady it.
+  regime_hysteresis_bars: 1
   # --- Stop band (vol-scaled stop, then CLAMPED) — the fix for too-tight stops. The protective
   #     stop is round(atr_stop_mult * ATR) in ticks, clamped into [min,max]. MNQ tick = 0.25pt.
   min_stop_ticks: 24    # ABSOLUTE floor in ticks (>= 6 pts) — the backstop when ATR is unknown.
