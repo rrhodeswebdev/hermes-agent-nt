@@ -171,7 +171,9 @@ class Reflector:
         except Exception as e:  # noqa: BLE001 — best-effort; never disrupt trading
             applied["error"] = type(e).__name__
             return applied
-        text = (proposals or {}).get("distilled")
+        if not isinstance(proposals, dict):
+            proposals = {}  # extract_structured is dict|None; never crash this fail-safe path
+        text = proposals.get("distilled")
         if not text or not str(text).strip():
             applied["error"] = "no_distilled"
             return applied
@@ -202,7 +204,9 @@ class Reflector:
         try:
             reply = run_claude_oneshot(self.cfg.agent.claude, system, user,
                                        json_schema=schema, model=self.cfg.learning.reflect_model)
-            proposals = extract_structured(reply) or {}
+            proposals = extract_structured(reply)
+            if not isinstance(proposals, dict):
+                proposals = {}
         except Exception:  # noqa: BLE001 — reflection is best-effort; never disrupt trading
             return applied
         for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:
@@ -240,7 +244,7 @@ class Reflector:
         except Exception as e:  # noqa: BLE001 — best-effort; never disrupt trading
             applied["error"] = type(e).__name__
             return applied
-        if proposals is None:
+        if not isinstance(proposals, dict):
             applied["error"] = "no_structured_output"
             return applied
         for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:

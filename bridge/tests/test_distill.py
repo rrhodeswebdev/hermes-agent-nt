@@ -46,6 +46,17 @@ def test_distill_failure_is_reported(tmp_path, monkeypatch):
     assert learned.distilled() == ""
 
 
+def test_distill_non_dict_payload_is_safe(tmp_path, monkeypatch):
+    """Defensive: extract_structured is documented dict|None, but distill must still fail
+    safe (never raise) if it ever yields a non-dict — these paths must never disrupt trading."""
+    cfg, learned, r = _setup(tmp_path)
+    monkeypatch.setattr("hermes_bridge.reflect.run_claude_oneshot", lambda *a, **k: "x")
+    monkeypatch.setattr("hermes_bridge.reflect.extract_structured", lambda *a, **k: ["nope"])
+    applied = r.distill()
+    assert applied["distilled"] == 0 and applied["error"]
+    assert learned.distilled() == ""
+
+
 def test_distill_respects_char_limit(tmp_path, monkeypatch):
     cfg, learned, r = _setup(tmp_path)
     cfg.learning.distilled_char_limit = 20
