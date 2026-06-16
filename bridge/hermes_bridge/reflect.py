@@ -67,11 +67,15 @@ Rules:
 
 MISSED_HEADER = """\
 NO TRADE CLOSED — this reflection was triggered because several DECLINED setups would
-have hit their target (counterfactual outcomes below). Review whether a learned lesson
-is over-blocking and, if the pattern is clear, narrow it per the rules. Near-duplicate
-declines of the SAME move (similar price/time) count as ONE pattern, not several. If
-the declines look unrelated to any lesson (or the pattern is thin), return an empty
-"lessons" array."""
+have hit their target (counterfactual outcomes below). Check two things:
+(1) Is a learned LESSON over-blocking? If the pattern is clear, narrow it per the rules.
+(2) Is this a COVERAGE gap — would-win declines clustering as ONE setup type the playbook
+never armed (e.g. trend-CONTINUATION entries the pre-session study left out while a trend
+ran)? If so, add a concise notes_append naming that setup type + regime so the NEXT
+pre-session study authors it (the authoring step reads these notes). That is how a missed
+trend day becomes a learned setup instead of a repeated miss.
+Near-duplicate declines of the SAME move (similar price/time) count as ONE pattern, not
+several. If the declines look unrelated and thin, return an empty "lessons" array."""
 
 CURATE_SCHEMA = json.dumps({
     "type": "object",

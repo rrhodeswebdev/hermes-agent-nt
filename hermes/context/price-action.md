@@ -19,6 +19,12 @@ allowed. Order flow then confirms *whether* to take it.
   Always know which one you're in: trade pullbacks with the trend, break/reclaim or fade
   the levels that define a range, and treat a reversal as tradeable only after the break
   is confirmed — do not pre-empt it.
+- **On a strong trend, continuation IS the trade.** The move pays you for staying with it,
+  not for fading it. Take the resumption — a shallow pullback that holds (2–5 bars, above
+  the prior higher-low up / below the prior lower-high down) and resumes, or a **break-and-
+  go** through the level that just gave way — entering where price *is*, not at a far level
+  you wish it would retrace to (a deep counter-trend bounce often never comes in a trend
+  that keeps extending). Fades wait for a reversal that structure must confirm first.
 
 ## Location is everything
 

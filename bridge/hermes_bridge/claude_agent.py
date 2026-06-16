@@ -173,6 +173,18 @@ THIS specific data: the exact levels that held or broke, the real volatility and
 must be specific to the session in front of you — a different session must produce different
 setups, levels, and names.
 
+FIRST fix the DOMINANT trend of the whole session you studied — not just the last 30 minutes.
+A market that steps through level after level is ONE trend even when each leg pauses on a
+shelf; do not mistake those shelves for ranges and author fade-the-edge setups inside a move
+that keeps going (the costliest miss: range-fading a trend day and watching it run). When the
+session is a confirmed trend, your PRIMARY setups must be trend-CONTINUATION entries that fire
+AS it extends — a break-and-go through the level that just broke, or a shallow-pullback /
+lower-high (down) resumption — armed AT or JUST BEYOND current price so they trigger as price
+moves, NOT a bounce-to-far-resistance fade that needs a deep retrace the trend may never give.
+Do NOT author counter-trend setups (buying support in a downtrend, shorting resistance in an
+uptrend) unless structure has CONFIRMED a reversal — a pullback is not a reversal. Fade/range
+setups belong only to a genuinely two-sided, range-bound session.
+
 Author your setups as ONE list. The binding playbook you trade against is assembled
 directly from these setups — there is no separate prose to keep in sync, so the list the
 dashboard shows is exactly the strategy you trade. Reply with one JSON object:

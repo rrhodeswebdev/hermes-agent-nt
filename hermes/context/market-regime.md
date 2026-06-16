@@ -66,12 +66,16 @@ use them as the historical anchor:
   resolution). Bars suddenly running far **above** ATR = a volatility shock; after a
   long trend leg, expansion usually marks exhaustion, not acceleration.
 - **Location in the bigger picture**: where is `last_close` relative to `swing_high`
-  and `swing_low` from the longer window? A "trend" in the visible bars that is merely
-  travelling from one side of larger structure to the other should be traded with the
-  RANGE map in mind — expect a stall at the larger level, take profits earlier.
+  and `swing_low` from the longer window? A move still **contained inside** larger
+  structure, rotating from one side toward the other, is range behavior — expect a stall
+  at the larger level, take profits earlier. But once price has **broken** that larger
+  level and keeps making new extremes (lower lows down / higher highs up), it IS a genuine
+  trend — trade it as continuation; do NOT keep fading it back toward a level it left behind.
 - **Regime age**: trends that have already run many legs, or ranges tested many times,
   are closer to their end. Demand higher-grade setups (risk-management.md) late in a
-  regime's life; be generous to fresh, young regimes.
+  regime's life; be generous to fresh, young regimes. But a trend STILL making new extremes
+  with flow behind it is not "old," it is *working* — keep taking its continuation setups
+  until structure actually breaks. Caution late ≠ standing aside while a live trend runs.
 
 ## Re-classify continuously
 
