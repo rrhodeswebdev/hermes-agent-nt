@@ -108,6 +108,14 @@ def strategy_block(st: AppState) -> dict:
     }
 
 
+def live_timeframe(st: AppState) -> str:
+    """The decision timeframe in force right now — the resampler's live value when engaged (it
+    varies by session), else the static config timeframe."""
+    if st.resampler is not None:
+        return st.resampler.current_tf
+    return st.cfg.instrument.timeframe
+
+
 def authoring_view(st: AppState) -> dict | None:
     """The agent's authoring telemetry with the age expressed in bars of the live timeframe
     (more meaningful than wall-clock and unit-consistent with the cadence config). None when
@@ -119,7 +127,7 @@ def authoring_view(st: AppState) -> dict | None:
     at = status.get("authored_at_bar_ts")
     last = st.store.last()
     if at and last is not None:
-        tf_s = timeframe_seconds(st.cfg.instrument.timeframe)
+        tf_s = timeframe_seconds(live_timeframe(st))
         if tf_s > 0:
             bars_ago = int(max(0.0, last.ts - at) // tf_s)
     return {
@@ -168,7 +176,7 @@ def build_dashboard_payload(st: AppState) -> dict:
         "strategy": {"source": st.effective_strategy_source(), **strategy_block(st)},
         "account": st.effective_account(),
         "instrument": cfg.instrument.symbol,
-        "timeframe": cfg.instrument.timeframe,
+        "timeframe": live_timeframe(st),
         "now": now,
         "last_bar": {"ts": last.ts, "close": last.close} if last else None,
         # Age from the bar's server arrival time (true UTC), not bar.ts — the strategy may

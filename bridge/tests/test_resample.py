@@ -225,6 +225,9 @@ def test_ingest_routes_through_resampler_when_engaged(cfg):
     first = st.store.recent(2)[0]
     assert first.ts == 1781600040 and first.open == 100 and first.close == 101
 
+    # dashboard shows the LIVE decision timeframe (the override), not the static config value
+    assert client.get("/dashboard").json()["timeframe"] == "2m"
+
 
 def test_ingest_unchanged_when_not_engaged(cfg):
     app = create_app(cfg)                  # default cfg: decision_timeframe == "static"
@@ -234,3 +237,4 @@ def test_ingest_unchanged_when_not_engaged(cfg):
     client = TestClient(app)
     _ingest(client, _bar(1781600040, 100, 100, 100, 100))
     assert len(st.store) == 1              # engine advanced directly, as today
+    assert client.get("/dashboard").json()["timeframe"] == cfg.instrument.timeframe
