@@ -53,7 +53,7 @@ class InstrumentConfig(BaseModel):
     # Bar resampler (opt-in; neutral defaults keep today's behavior). feed_timeframe is what
     # NinjaTrader streams (empty => == timeframe); decision_timeframe is what the engine reasons
     # on: "static" => == timeframe, "auto" => 2m in RTH / 1m in ETH (session_for_ts), or a fixed
-    # "1m"/"2m" override. See resample.py + docs/superpowers/specs/2026-06-17-bridge-bar-resampler-design.md
+    # "1m"/"2m" override. See resample.py and the bridge-bar-resampler design spec.
     feed_timeframe: str = ""
     decision_timeframe: str = "static"
 
