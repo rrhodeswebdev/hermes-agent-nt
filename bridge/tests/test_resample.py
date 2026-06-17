@@ -1,8 +1,10 @@
+from fastapi.testclient import TestClient
+
 import hermes_bridge.resample as resample_mod
 from hermes_bridge.agent_client import build_agent_client
 from hermes_bridge.config import BridgeConfig, InstrumentConfig
 from hermes_bridge.engine import TradingEngine
-from hermes_bridge.models import Bar
+from hermes_bridge.models import Bar, BarIngest
 from hermes_bridge.resample import (
     Resampler,
     aggregate_bars,
@@ -11,6 +13,7 @@ from hermes_bridge.resample import (
     resampler_engaged,
 )
 from hermes_bridge.risk import RiskGate
+from hermes_bridge.server import create_app
 from hermes_bridge.session import SessionState
 from hermes_bridge.store import BarStore
 
@@ -189,3 +192,45 @@ def test_engine_decision_tf_defaults_to_config(cfg):
 
 def test_engine_decision_tf_uses_injected_getter(cfg):
     assert _eng(cfg, decision_tf=lambda: "2m")._decision_tf() == "2m"
+
+
+# ---- server ingest routing (engaged vs not) -----------------------------
+def _ingest(client, bar):
+    payload = BarIngest(instrument="MNQ", timeframe="1m", bar=bar)
+    return client.post("/ingest/bar", json=payload.model_dump())
+
+
+def test_ingest_routes_through_resampler_when_engaged(cfg):
+    cfg.instrument.symbol = "MNQ"
+    cfg.instrument.feed_timeframe = "1m"
+    cfg.instrument.decision_timeframe = "2m"   # fixed override => deterministic, no session dep
+    app = create_app(cfg)
+    st = app.state.appstate
+    client = TestClient(app)
+
+    r0 = _ingest(client, _bar(1781599980, 100, 100, 100, 100))   # forming
+    assert "resample:forming" in r0.json()["rationale"]
+    assert len(st.store) == 0                                    # engine not advanced
+
+    _ingest(client, _bar(1781600040, 101, 101, 101, 101))        # 2m close -> engine runs
+    assert len(st.store) == 1
+    assert len(st.feed_store) == 2
+
+    _ingest(client, _bar(1781600100, 102, 102, 102, 102))        # forming
+    assert len(st.store) == 1
+    _ingest(client, _bar(1781600160, 103, 103, 103, 103))        # 2m close
+    assert len(st.store) == 2
+    assert len(st.feed_store) == 4
+
+    first = st.store.recent(2)[0]
+    assert first.ts == 1781600040 and first.open == 100 and first.close == 101
+
+
+def test_ingest_unchanged_when_not_engaged(cfg):
+    app = create_app(cfg)                  # default cfg: decision_timeframe == "static"
+    st = app.state.appstate
+    assert st.resampler is None
+    assert st.feed_store is None
+    client = TestClient(app)
+    _ingest(client, _bar(1781600040, 100, 100, 100, 100))
+    assert len(st.store) == 1              # engine advanced directly, as today
