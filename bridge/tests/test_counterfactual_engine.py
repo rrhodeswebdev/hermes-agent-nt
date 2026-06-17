@@ -8,9 +8,9 @@ the recorder dedups by band). The old prefilter-candidate / ARM_PLAN sources wer
 from __future__ import annotations
 
 from hermes_bridge.config import BridgeConfig
-from hermes_bridge.engine import TradingEngine
-from hermes_bridge.journal import DeclineLog, JournalStore
-from hermes_bridge.models import Action, Decision
+from hermes_bridge.engine import PendingCounterfactual, TradingEngine
+from hermes_bridge.journal import ClosedTrade, DeclineLog, JournalStore
+from hermes_bridge.models import Action, Decision, Side
 from hermes_bridge.plan import EntryTrigger, TradePlan
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.session import SessionState
@@ -172,3 +172,59 @@ def test_never_filled_record_has_null_fill_ts(tmp_path):
     assert rec["fill_ts"] is None
     assert rec["born_ts"] == t + 300
     assert rec["resolved_ts"] == t + 900
+
+
+# ---- exit replays: score a non-target exit forward on its original bracket ----
+
+def _exit_replay_engine(tmp_path):
+    eng, t = _cf_engine(tmp_path)
+    eng.cfg.learning.exit_replays_enabled = True
+    eng.planner._plan = None            # no armed plan → isolate the exit-replay path
+    return eng, t
+
+
+def _early_exit_long(t):
+    # A LONG exited at 4000 whose ORIGINAL target was 4010, stop 3990.
+    return PendingCounterfactual(
+        kind="early_exit", side=Side.LONG, limit_price=4000.0, stop_price=3990.0,
+        target_price=4010.0, born_ts=t, bars_left=20, rationale="exited on delta flip",
+        regime="trending", filled=True, entry_price=4000.0, fill_ts=t)
+
+
+def test_early_exit_would_win_is_exit_left_money(tmp_path):
+    eng, t = _exit_replay_engine(tmp_path)
+    eng._cf_pending.append(_early_exit_long(t))
+    eng.on_bar(make_bar(t + 300, 4002, 4011, 4001, 4009))    # high 4011 >= target 4010
+    ee = [r for r in eng.declines.all() if r["kind"] == "early_exit"]
+    assert len(ee) == 1 and ee[0]["outcome"] == "would_win"  # the exit LEFT MONEY (shakeout)
+    assert ee[0]["born_ts"] == t
+
+
+def test_early_exit_would_lose_is_exit_correct(tmp_path):
+    eng, t = _exit_replay_engine(tmp_path)
+    eng._cf_pending.append(_early_exit_long(t))
+    eng.on_bar(make_bar(t + 300, 3999, 4001, 3989, 3995))    # low 3989 <= stop 3990
+    ee = [r for r in eng.declines.all() if r["kind"] == "early_exit"]
+    assert len(ee) == 1 and ee[0]["outcome"] == "would_lose"  # the exit dodged the stop
+
+
+def _closed(t, exit_price):
+    return ClosedTrade(
+        entry_ts=t, exit_ts=t + 60, side="LONG", qty=1, entry_price=4000.0,
+        exit_price=exit_price, realized_pnl=0.0, bars_held=2, mae=-1.0, mfe=1.0,
+        trend="up", entry_context={"regime": "trending"}, rationale="x",
+        stop_price=3990.0, target_price=4010.0)
+
+
+def test_record_exit_replay_gating(tmp_path):
+    eng, t = _exit_replay_engine(tmp_path)
+    eng._record_exit_replay(_closed(t, 4010.0))            # exited AT target → not early
+    assert not eng._cf_pending
+    eng.cfg.learning.exit_replays_enabled = False
+    eng._record_exit_replay(_closed(t, 4001.0))            # gated off
+    assert not eng._cf_pending
+    eng.cfg.learning.exit_replays_enabled = True
+    eng._record_exit_replay(_closed(t, 4001.0))            # below target + enabled → records
+    assert len(eng._cf_pending) == 1
+    p = eng._cf_pending[0]
+    assert p.kind == "early_exit" and p.target_price == 4010.0 and p.filled

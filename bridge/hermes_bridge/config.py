@@ -363,6 +363,11 @@ class LearningConfig(BaseModel):
     counterfactuals_enabled: bool = False
     counterfactual_horizon_bars: int = Field(20, ge=1)   # bars before a replay gives up
     counterfactual_dedup_atr: float = Field(0.5, ge=0)   # bands within this x ATR = same setup
+    # Exit replay: when a trade closes BELOW its target (an invalidation/discretionary exit),
+    # replay it forward on its ORIGINAL target/stop. would_win = the exit LEFT MONEY (price
+    # reached the target — a shakeout); would_lose = the exit dodged the stop. Resolved
+    # early_exit records feed reflect_on_missed like declines. OFF by default (neutral).
+    exit_replays_enabled: bool = False
     max_lessons: int = 40             # cap applied lessons per reflection
     # Staggered distillation: a slower, deeper model periodically compresses the full
     # lesson/note corpus into ONE bounded distilled.md that the realtime decision prompt

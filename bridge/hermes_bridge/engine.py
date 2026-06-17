@@ -287,6 +287,9 @@ class TradingEngine:
                     # 1R for the trade manager — promoted to _active_stop_ticks only if/when
                     # THIS order fills (see on_fill); a dropped order leaves nothing stale.
                     "stop_ticks": self._command_stop_ticks(rd.command, bar.close),
+                    # Absolute (stop, target) for the exit-replay (learning.exit_replays_enabled):
+                    # the trade's original bracket, scored against later bars when it closes.
+                    "brackets": self._command_brackets(rd.command, bar.close),
                 }
             result = EngineResult(decision, rd.command if rd.approved else None, mode,
                                   rd.reasons)
@@ -623,8 +626,8 @@ class TradingEngine:
             # every bar, so without this one missed pullback would log on every bar. tol uses
             # the live ATR but the compare is on raw price, so it stays stable as ATR drifts.
             tol = self.cfg.learning.counterfactual_dedup_atr * atr_value
-            if any(p.side == side and abs(p.limit_price - limit) <= tol
-                   for p in self._cf_pending):
+            if any(p.kind == "missed_trigger" and p.side == side
+                   and abs(p.limit_price - limit) <= tol for p in self._cf_pending):
                 continue
             self._cf_pending.append(PendingCounterfactual(
                 kind="missed_trigger", side=side, limit_price=limit,
@@ -632,6 +635,28 @@ class TradingEngine:
                 bars_left=self.cfg.learning.counterfactual_horizon_bars,
                 rationale=t.rationale or plan.rationale, regime=ctx.regime,
             ))
+
+    def _record_exit_replay(self, trade: ClosedTrade) -> None:
+        """Score a NON-target exit by replaying it forward on the trade's ORIGINAL bracket:
+        would_win = the exit left money (price reached the target — a shakeout), would_lose =
+        the exit dodged the stop. Pre-marked filled so _cf_step tracks target/stop straight
+        from the next bar. Gated by learning.exit_replays_enabled; needs a real bracket."""
+        if (self.declines is None or not self.cfg.learning.exit_replays_enabled
+                or not trade.target_price or not trade.stop_price):
+            return
+        side = Side.LONG if trade.side == "LONG" else Side.SHORT
+        # Already at/through target on exit = it won, not an early exit — nothing to replay.
+        reached = (trade.exit_price >= trade.target_price if side == Side.LONG
+                   else trade.exit_price <= trade.target_price)
+        if reached:
+            return
+        self._cf_pending.append(PendingCounterfactual(
+            kind="early_exit", side=side, limit_price=trade.exit_price,
+            stop_price=trade.stop_price, target_price=trade.target_price, born_ts=trade.exit_ts,
+            bars_left=self.cfg.learning.counterfactual_horizon_bars,
+            rationale=trade.rationale, regime=str(trade.entry_context.get("regime", "")),
+            filled=True, entry_price=trade.exit_price, fill_ts=trade.exit_ts,
+        ))
 
     # ---- fill handling ------------------------------------------------------
     def on_fill(self, fill: Fill) -> OrderCommand | None:
@@ -653,12 +678,14 @@ class TradingEngine:
             self._trade_open_pnl = before_pnl  # baseline for the whole-trade P&L at close
             ctx = p["context"] if p is not None else self.last_context
             if ctx is not None:  # no context at all (fill before any bar): nothing to journal
+                sp, tp = p.get("brackets", (0.0, 0.0)) if p is not None else (0.0, 0.0)
                 self.tracker.on_entry(
                     ts=fill.ts, side=side, qty=abs(after_pos), price=fill.price,
                     context=ctx,
                     rationale=p["rationale"] if p is not None
                     else "unattributed_fill (no matching pending entry)",
                     confidence=p.get("confidence", 0.0) if p is not None else 0.0,
+                    stop_price=sp, target_price=tp,
                 )
             self._pending_entry = None  # consumed or invalidated either way
         elif (before_pos != 0 and abs(after_pos) > abs(before_pos)
@@ -683,6 +710,7 @@ class TradingEngine:
             if trade is not None:
                 if self.journal is not None:
                     self.journal.append(trade)
+                self._record_exit_replay(trade)
                 if self.on_close is not None:
                     self.on_close(trade)
         # else: a partial REDUCE toward flat (position still open) — keep tracking; the
@@ -702,6 +730,19 @@ class TradingEngine:
             id=self._new_id(), strategy_id=self.cfg.strategy_id,
             action=Action.FLATTEN, qty=abs(self.session.position), reason=reason,
         )
+
+    def _command_brackets(self, cmd: OrderCommand, entry_ref: float) -> tuple[float, float]:
+        """The order's ABSOLUTE (stop_price, target_price). Prefer explicit prices; else
+        derive from ticks around ``entry_ref``. (0.0, 0.0) when neither is known."""
+        tick = self.cfg.instrument.tick_size or 0.25
+        sign = 1.0 if cmd.action == Action.ENTER_LONG else -1.0  # long: stop below / target above
+        sp = cmd.stop_price
+        if sp is None and cmd.stop_ticks:
+            sp = entry_ref - sign * cmd.stop_ticks * tick
+        tp = cmd.target_price
+        if tp is None and cmd.target_ticks:
+            tp = entry_ref + sign * cmd.target_ticks * tick
+        return float(sp or 0.0), float(tp or 0.0)
 
     def _command_stop_ticks(self, cmd: OrderCommand, entry_price: float) -> int | None:
         """The protective-stop distance in ticks of an approved entry (1R for the trade

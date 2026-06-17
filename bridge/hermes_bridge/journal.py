@@ -34,6 +34,8 @@ class ClosedTrade:
     entry_context: dict     # MarketContext.to_dict() at entry
     rationale: str          # the decision rationale that opened the trade
     confidence: float = 0.0  # the entry decision's confidence (to study conf vs outcome)
+    stop_price: float = 0.0   # the trade's original protective stop (0.0 if unattributed)
+    target_price: float = 0.0  # the trade's original target (0.0 if unattributed)
 
     def to_record(self) -> dict:
         return {
@@ -42,6 +44,7 @@ class ClosedTrade:
             "realized_pnl": self.realized_pnl, "bars_held": self.bars_held,
             "mae": self.mae, "mfe": self.mfe, "trend": self.trend,
             "confidence": self.confidence,
+            "stop_price": self.stop_price, "target_price": self.target_price,
             "entry_context": self.entry_context, "rationale": self.rationale,
         }
 
@@ -53,9 +56,11 @@ class TradeTracker:
         self._e: dict | None = None  # open-trade accumulator
 
     def on_entry(self, *, ts: float, side: Side, qty: int, price: float,
-                 context: MarketContext, rationale: str, confidence: float = 0.0) -> None:
+                 context: MarketContext, rationale: str, confidence: float = 0.0,
+                 stop_price: float = 0.0, target_price: float = 0.0) -> None:
         self._e = {"ts": ts, "side": side, "qty": qty, "price": price,
                    "context": context, "rationale": rationale, "confidence": confidence,
+                   "stop_price": stop_price, "target_price": target_price,
                    "bars_held": 0, "mfe": 0.0, "mae": 0.0}
 
     def note_scale(self, *, qty: int, avg_price: float) -> None:
@@ -100,6 +105,8 @@ class TradeTracker:
             mae=round(e["mae"], 4), mfe=round(e["mfe"], 4),
             trend=ctx.trend, entry_context=ctx.to_dict(), rationale=e["rationale"],
             confidence=round(float(e.get("confidence", 0.0)), 3),
+            stop_price=round(float(e.get("stop_price", 0.0)), 4),
+            target_price=round(float(e.get("target_price", 0.0)), 4),
         )
         self._e = None
         return trade

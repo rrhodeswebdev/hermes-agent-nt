@@ -74,6 +74,10 @@ never armed (e.g. trend-CONTINUATION entries the pre-session study left out whil
 ran)? If so, add a concise notes_append naming that setup type + regime so the NEXT
 pre-session study authors it (the authoring step reads these notes). That is how a missed
 trend day becomes a learned setup instead of a repeated miss.
+(3) Records with kind "early_exit" and outcome "would_win" mean a TAKEN trade was exited
+but price then reached its original target — an exit too tight / a shakeout. If several
+cluster, add a notes_append to give invalidations room beyond the noise and to discount
+delta on abnormally light-volume bars.
 Near-duplicate declines of the SAME move (similar price/time) count as ONE pattern, not
 several. If the declines look unrelated and thin, return an empty "lessons" array."""
 
