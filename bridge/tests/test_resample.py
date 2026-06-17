@@ -1,5 +1,7 @@
 import hermes_bridge.resample as resample_mod
+from hermes_bridge.agent_client import build_agent_client
 from hermes_bridge.config import BridgeConfig, InstrumentConfig
+from hermes_bridge.engine import TradingEngine
 from hermes_bridge.models import Bar
 from hermes_bridge.resample import (
     Resampler,
@@ -8,6 +10,8 @@ from hermes_bridge.resample import (
     resample_series,
     resampler_engaged,
 )
+from hermes_bridge.risk import RiskGate
+from hermes_bridge.session import SessionState
 from hermes_bridge.store import BarStore
 
 
@@ -169,3 +173,19 @@ def test_replace_feed_history_rebuilds_decision_store():
     r.replace_feed_history(_feed_seq())
     assert len(r.feed_store) == 4
     assert [b.ts for b in r.decision_store.all()] == [1781600040, 1781600160]
+
+
+# ---- engine current decision-timeframe getter ---------------------------
+def _eng(cfg, decision_tf=None):
+    return TradingEngine(
+        cfg, BarStore("ES", "5m"), SessionState("ES", "5m", 0.25, 12.5, 500, 400),
+        build_agent_client(cfg), RiskGate(cfg), decision_tf=decision_tf,
+    )
+
+
+def test_engine_decision_tf_defaults_to_config(cfg):
+    assert _eng(cfg)._decision_tf() == cfg.instrument.timeframe
+
+
+def test_engine_decision_tf_uses_injected_getter(cfg):
+    assert _eng(cfg, decision_tf=lambda: "2m")._decision_tf() == "2m"
