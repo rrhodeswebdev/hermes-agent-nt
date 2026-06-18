@@ -206,8 +206,9 @@ def _et_minutes(ts: float) -> int:
 
 def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
     """The multi-hour structure a 200-bar context window cannot see: prior RTH day's
-    high/low/close, the overnight (ETH) range since that close, today's RTH range, and the
-    opening range (09:30-10:00 ET). Computed over the FULL bar store (several days), all
+    high/low/close, the overnight (ETH) range since that close, today's RTH range, the
+    opening range (09:30-10:00 ET), and the initial balance (09:30-10:30 ET). Computed over
+    the FULL bar store (several days), all
     sessions ET-bucketed. Levels are None until enough history exists — the agent treats a
     missing level as 'unknown', never as zero."""
     out: dict[str, float | None] = {
@@ -215,6 +216,7 @@ def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
         "overnight_high": None, "overnight_low": None,
         "today_high": None, "today_low": None,
         "open_range_high": None, "open_range_low": None,
+        "initial_balance_high": None, "initial_balance_low": None,
     }
     if not bars:
         return out
@@ -244,9 +246,13 @@ def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
         elif s == "RTH" and d == today:
             out["today_high"] = max(out["today_high"] or b.high, b.high)
             out["today_low"] = min(out["today_low"] or b.low, b.low)
-            if 570 <= _et_minutes(b.ts) < 600:  # 09:30-10:00 ET opening range
+            mins = _et_minutes(b.ts)
+            if 570 <= mins < 600:  # 09:30-10:00 ET opening range
                 out["open_range_high"] = max(out["open_range_high"] or b.high, b.high)
                 out["open_range_low"] = min(out["open_range_low"] or b.low, b.low)
+            if 570 <= mins < 630:  # 09:30-10:30 ET initial balance (contains the OR)
+                out["initial_balance_high"] = max(out["initial_balance_high"] or b.high, b.high)
+                out["initial_balance_low"] = min(out["initial_balance_low"] or b.low, b.low)
         elif s == "ETH" and prior is not None and b.ts > prior_last_ts:
             out["overnight_high"] = max(out["overnight_high"] or b.high, b.high)
             out["overnight_low"] = min(out["overnight_low"] or b.low, b.low)
