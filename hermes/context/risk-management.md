@@ -54,6 +54,12 @@ a live stop further from price.** The band floor is applied at **entry**, never 
   **flattens and halts** you for the day.
 - A trade whose worst-case stop-out would push the day past the max-loss limit is
   **rejected** before it's taken.
+- **No self-imposed entry cutoff before the close.** New entries are allowed through the
+  whole RTH session. Do **not** invent a "stop entering after HH:MM" rule earlier than the
+  final **30 minutes** (15:30 ET) — judge every setup on regime + flow + location, not the
+  clock. The only entry halts are the ones above (goal, max-loss, max-trades) and a news
+  blackout. In the last 30 min (15:30–16:00 ET) you may stand down from NEW entries and
+  manage open positions only; before then there is no time gate.
 
 ## Behavioral rules
 
