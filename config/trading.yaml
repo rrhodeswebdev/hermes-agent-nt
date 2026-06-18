@@ -24,7 +24,25 @@ strategy:
   atr_target_mult: 3.0  # target = 3.0 * ATR (~1.5R vs the 2.0*ATR stop; was 2.0 = 1.33R). With
                         #   the trail on, runners are captured by the trail, not just this target.
   pullback_atr: 0.9     # RELAXED (test): wider tag tolerance → more pullbacks qualify (was 0.5)
-  min_confidence: 0.40  # RELAXED (test): admit lower-conviction entries (was 0.55)
+  min_confidence: 0.55  # the engine ignores Decisions below this confidence (neutral default)
+  # Order-flow gate (deterministic): when > 0, an ENTRY is forced to WAIT unless delta_ratio
+  #   confirms direction (long needs >= +delta_floor, short <= -delta_floor). The armed plan
+  #   trigger fires on the price band ALONE, so this is the only place the delta floor a setup
+  #   names gets enforced. 0.0 = off (neutral template default; replay carries no delta). Set
+  #   ~0.05 in trading.local.yaml where live bid/ask delta is streamed.
+  delta_floor: 0.0
+  # Stricter, delta-CONDITIONAL transitional gate, consulted only when wait_in_transitional is
+  #   false: when > 0 and the regime is "transitional", an ENTRY fires only if delta_ratio
+  #   confirms at THIS floor (long >= +floor, short <= -floor) — a higher bar than delta_floor,
+  #   which it stacks above. Lets a delta-confirmed breakout through while still standing down in
+  #   chop. 0.0 = off (neutral default). Set ~0.08-0.10 in trading.local.yaml where live delta
+  #   streams; pair it with wait_in_transitional: false.
+  transitional_delta_floor: 0.0
+  # Regime hysteresis: the mechanical regime/trend label (classify_regime) is stateless and can
+  #   flip bar-to-bar on a single mixed pivot, thrashing re-authoring + directional bias. A new
+  #   (regime, trend) read must persist this many CONSECUTIVE bars before it replaces the
+  #   committed label. 1 = off (neutral default). Set ~3 in trading.local.yaml to steady it.
+  regime_hysteresis_bars: 1
   # --- Stop band (vol-scaled stop, then CLAMPED) — the fix for too-tight stops. The protective
   #     stop is round(atr_stop_mult * ATR) in ticks, clamped into [min,max]. MNQ tick = 0.25pt.
   min_stop_ticks: 24    # ABSOLUTE floor in ticks (>= 6 pts) — the backstop when ATR is unknown.
@@ -148,6 +166,13 @@ levels:
 server:
   host: 0.0.0.0                # listen on all interfaces (LAN access from Windows/NT)
   port: 8787
+
+# Optional SQLite persistence for the bar store. A path turns on write-through so multi-day
+# history — and the levels/backfill tooling that reads it — survives a bridge restart; an
+# empty value keeps the store in-memory only. The file lives under bridge/state/ (gitignored).
+storage:
+  bars_db: ""              # neutral/off in the template — set a path in trading.local.yaml to opt in
+  session_state: ""        # restore day P&L + trade count across a restart (opt in via local)
 
 # Execution safety. allow_live must be explicitly true to trade real money; the
 # NinjaScript strategy ALSO refuses non-Sim accounts unless its AllowLive is true.

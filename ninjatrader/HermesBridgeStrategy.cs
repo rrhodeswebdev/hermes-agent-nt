@@ -313,9 +313,43 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (BarsInProgress != 0) return;
             if (CurrentBar < BarsRequiredToTrade) return;
             if (State != State.Realtime) return;
+
+            // Hand the just-closed bar its accumulated real bid/ask delta. The first
+            // realtime bar is partial (it opened before the historical->realtime
+            // transition), so send nulls for it and let the bridge fall back to its
+            // close-location proxy for that one bar. Reset for the next bar.
+            double? askVol = _deltaPrimed ? _askVol : (double?)null;
+            double? bidVol = _deltaPrimed ? _bidVol : (double?)null;
+            _askVol = 0; _bidVol = 0; _deltaPrimed = true;
+
             string barJson = BarJson(
-                EpochSeconds(Time[0]), Open[0], High[0], Low[0], Close[0], Volume[0]);
+                EpochSeconds(Time[0]), Open[0], High[0], Low[0], Close[0], Volume[0],
+                askVol, bidVol);
             _ = HandleBarAsync(barJson);
+        }
+
+        // ---- real bid/ask delta (realtime bars only; history stays a proxy) ----
+        // OnMarketData and OnBarUpdate are serialized per strategy instance in NT8, so
+        // these plain fields need no locking. Per-tick work is two comparisons and an
+        // add — no UI, no dispatcher, no allocation (AGENTS.md #17 hot-handler rule).
+        private double _askVol, _bidVol;
+        private double _bestBid = double.NaN, _bestAsk = double.NaN;
+        private bool _deltaPrimed;
+
+        protected override void OnMarketData(MarketDataEventArgs e)
+        {
+            if (BarsInProgress != 0 || State != State.Realtime) return;
+            switch (e.MarketDataType)
+            {
+                case MarketDataType.Bid: _bestBid = e.Price; break;
+                case MarketDataType.Ask: _bestAsk = e.Price; break;
+                case MarketDataType.Last:
+                    // Trades at/above the ask are buyer-initiated; at/below the bid,
+                    // seller-initiated. Between the quotes: unclassifiable — count neither.
+                    if (!double.IsNaN(_bestAsk) && e.Price >= _bestAsk) _askVol += e.Volume;
+                    else if (!double.IsNaN(_bestBid) && e.Price <= _bestBid) _bidVol += e.Volume;
+                    break;
+            }
         }
 
         // ---- trading: networking / execution -------------------------------
@@ -603,6 +637,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                 "{{\"ts\":{0},\"open\":{1},\"high\":{2},\"low\":{3},\"close\":{4},\"volume\":{5},\"is_closed\":true}}",
                 ts.ToString(ci), o.ToString(ci), h.ToString(ci), l.ToString(ci),
                 c.ToString(ci), v.ToString(ci));
+        }
+
+        // Realtime overload: append the bar's real bid/ask split when both are present
+        // (the bridge prefers it over its close-location proxy). When either is null
+        // (the first partial bar, or the history path) the core 6-field bar is sent
+        // unchanged and the bridge proxies the delta.
+        private static string BarJson(double ts, double o, double h, double l, double c,
+            double v, double? askVol, double? bidVol)
+        {
+            string core = BarJson(ts, o, h, l, c, v);
+            if (!askVol.HasValue || !bidVol.HasValue) return core;
+            var ci = CultureInfo.InvariantCulture;
+            return core.Substring(0, core.Length - 1) + string.Format(ci,
+                ",\"ask_volume\":{0},\"bid_volume\":{1}}}",
+                askVol.Value.ToString(ci), bidVol.Value.ToString(ci));
         }
 
         private static string Escape(string s)

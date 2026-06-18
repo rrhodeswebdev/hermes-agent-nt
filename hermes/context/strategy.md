@@ -25,6 +25,25 @@ you WAIT. Most bars are WAIT.
    a WAIT, not a discount.
 4. **Size and bracket per the hard rules below**, then act (or arm the plan).
 
+## Trend-first — trade WITH the dominant move
+
+Before choosing a setup, fix the **dominant trend of the whole session**, not just the
+last few bars. A market that steps down (or up) through level after level is **one
+trend**, even when each leg pauses on a shelf — those shelves are *continuation pauses,
+not ranges*. Do not fade the edges of a shelf inside a move that keeps going; range-fading
+a trend day and watching it run is the costliest miss there is.
+
+- In a **confirmed trend**, lead with **continuation** entries — a break-and-go through
+  the level that just broke, or a shallow pullback / lower-high (down) resumption — placed
+  AT or JUST BEYOND current price so they fire as the trend extends. A bounce-to-far-
+  resistance fade that needs a deep retrace is the wrong tool: in a real trend it never
+  triggers and the move goes by untraded.
+- **Do not take counter-trend trades** (buying support in a downtrend, shorting resistance
+  in an uptrend) until **structure confirms a reversal** — a pullback is not a reversal.
+- **Fade/range setups belong only to a genuinely two-sided, range-bound session** (a box
+  whose edges have each held ≥ twice, per market-regime.md). When unsure whether it's a
+  "trend pausing" or a "range," assume continuation and WAIT for the fade to prove itself.
+
 ## Definitions (provided to you each bar in `context`)
 
 - `regime` — `trending` / `ranging` / `transitional`, read from swing **structure**
@@ -51,15 +70,18 @@ you WAIT. Most bars are WAIT.
 - The bridge re-checks every order against the hard risk limits (risk-management.md,
   daily-goal.md) and may clamp or reject it.
 
-## Bias toward taking clean setups (RELAXED test profile)
+## Selectivity (production)
 
-> ⚠️ This is a **relaxed, testing-only** posture to exercise the agent end-to-end and
-> generate more entries on Sim. It is intentionally less selective than production
-> rules. Revert this section before trading anything that matters.
+Take a setup only when **ALL** of its conditions hold — regime, structure, trigger,
+**and** order-flow confirmation **and** location/room. Treat flow and location/room as
+**hard gates, not preferences**:
 
-While testing, treat each playbook's *flow* and *location/room* conditions as
-preferences rather than hard gates: when the regime is right and the playbook's core
-structure + trigger are present, you may enter even if order flow is only neutral or
-the location is less than ideal. You still WAIT when the regime is unclear, the
-structure is absent, or the trigger bar has not closed. Flow that is *clearly against*
-the trade remains a veto. The hard rules above are never relaxed.
+- Order flow neutral or against the trade at the trigger bar → **WAIT** (not a discount).
+- Less than ~**1×ATR** of room to the nearest structural level (`swing_high`/`swing_low`)
+  in the trade's direction → **WAIT** (the setup can't pay for its stop).
+- Regime unclear/**transitional**, structure absent, or the trigger bar not yet closed →
+  **WAIT**.
+
+One missing condition is a WAIT, not a discount. **Most bars are WAIT; a no-trade plan is
+the correct, common output.** Quality over frequency — a handful of clean setups a day
+beats churning marginal ones. The hard rules above are never relaxed.

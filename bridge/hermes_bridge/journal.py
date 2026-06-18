@@ -10,6 +10,7 @@ decision. Nothing here executes orders or touches risk.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,8 @@ class ClosedTrade:
     entry_context: dict     # MarketContext.to_dict() at entry
     rationale: str          # the decision rationale that opened the trade
     confidence: float = 0.0  # the entry decision's confidence (to study conf vs outcome)
+    stop_price: float = 0.0   # the trade's original protective stop (0.0 if unattributed)
+    target_price: float = 0.0  # the trade's original target (0.0 if unattributed)
 
     def to_record(self) -> dict:
         return {
@@ -41,6 +44,7 @@ class ClosedTrade:
             "realized_pnl": self.realized_pnl, "bars_held": self.bars_held,
             "mae": self.mae, "mfe": self.mfe, "trend": self.trend,
             "confidence": self.confidence,
+            "stop_price": self.stop_price, "target_price": self.target_price,
             "entry_context": self.entry_context, "rationale": self.rationale,
         }
 
@@ -52,10 +56,22 @@ class TradeTracker:
         self._e: dict | None = None  # open-trade accumulator
 
     def on_entry(self, *, ts: float, side: Side, qty: int, price: float,
-                 context: MarketContext, rationale: str, confidence: float = 0.0) -> None:
+                 context: MarketContext, rationale: str, confidence: float = 0.0,
+                 stop_price: float = 0.0, target_price: float = 0.0) -> None:
         self._e = {"ts": ts, "side": side, "qty": qty, "price": price,
                    "context": context, "rationale": rationale, "confidence": confidence,
+                   "stop_price": stop_price, "target_price": target_price,
                    "bars_held": 0, "mfe": 0.0, "mae": 0.0}
+
+    def note_scale(self, *, qty: int, avg_price: float) -> None:
+        """A later fill grew the OPEN position (a partial entry completing, or pyramiding
+        in the same direction). Track the peak size and the volume-weighted average entry,
+        so a position built across several fills journals as ONE trade at its FULL size —
+        not just the first leg. No-op when flat."""
+        if self._e is None:
+            return
+        self._e["qty"] = qty
+        self._e["price"] = avg_price
 
     def on_bar(self, bar: Bar) -> None:
         e = self._e
@@ -89,6 +105,8 @@ class TradeTracker:
             mae=round(e["mae"], 4), mfe=round(e["mfe"], 4),
             trend=ctx.trend, entry_context=ctx.to_dict(), rationale=e["rationale"],
             confidence=round(float(e.get("confidence", 0.0)), 3),
+            stop_price=round(float(e.get("stop_price", 0.0)), 4),
+            target_price=round(float(e.get("target_price", 0.0)), 4),
         )
         self._e = None
         return trade
@@ -122,6 +140,64 @@ class JournalStore:
         if n <= 0:
             return []
         return self.all()[-n:]
+
+
+class DeclineLog:
+    """Append-only JSONL of RESOLVED counterfactuals for declined/unfilled setups,
+    plus in-memory tracking of would-win outcomes not yet shown to a reflection.
+
+    This is the evidence stream that lets reflection NARROW or RETIRE a lesson that
+    over-blocks: vetoed setups never become trades, so without it the learning loop
+    could only ever add restrictions, never relax one."""
+
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self._unreported_wins: list[dict] = []
+        # Appends come from the bar-loop thread (engine), snapshots/clears from the
+        # reflection trigger paths — guard the in-memory list with its own lock.
+        self._lock = threading.Lock()
+
+    def append(self, rec: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        if rec.get("outcome") == "would_win":
+            with self._lock:
+                self._unreported_wins.append(rec)
+
+    def all(self) -> list[dict]:
+        if not self.path.is_file():
+            return []
+        out: list[dict] = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return out
+
+    def recent(self, n: int) -> list[dict]:
+        if n <= 0:
+            return []
+        return self.all()[-n:]
+
+    def unreported_wins(self) -> list[dict]:
+        with self._lock:
+            return list(self._unreported_wins)
+
+    def clear_unreported(self) -> None:
+        with self._lock:
+            self._unreported_wins.clear()
+
+    def take_unreported(self) -> list[dict]:
+        """Atomic snapshot-and-clear: a win resolved concurrently lands in the NEXT
+        snapshot instead of being cleared unseen."""
+        with self._lock:
+            out = list(self._unreported_wins)
+            self._unreported_wins.clear()
+            return out
 
 
 def select_similar(trades: list[dict], ctx: MarketContext, k: int) -> list[dict]:

@@ -15,13 +15,13 @@ Without one, the legacy per-bar `agent.decide()` call is used.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 
 from .agent_client import AgentClient, AgentRequest, MockAgentClient
 from .config import BridgeConfig, effective_entry_freshness_s, timeframe_seconds
 from .indicators import MarketContext, atr, build_context
-from .journal import ClosedTrade, JournalStore, TradeTracker
+from .journal import ClosedTrade, DeclineLog, JournalStore, TradeTracker
 from .levels import detect_levels
 from .models import (
     AccountState,
@@ -52,6 +52,60 @@ class EngineResult:
     risk_reasons: list[str] = field(default_factory=list)
 
 
+@dataclass
+class PendingCounterfactual:
+    """An entry setup the brain ARMED but did not take — replayed forward to see whether
+    declining it was right. ``limit_price`` is the entry we wanted; once a later bar touches
+    it the replay is ``filled`` and tracked to its ATR bracket. Resolved outcomes
+    (would_win / would_lose / ambiguous / never_filled / no_resolution) land in the
+    DeclineLog — the over-blocking evidence a closed-trades journal can never carry."""
+
+    kind: str
+    side: Side
+    limit_price: float
+    stop_price: float
+    target_price: float
+    born_ts: float
+    bars_left: int
+    rationale: str
+    regime: str
+    filled: bool = False
+    entry_price: float = 0.0
+    fill_ts: float = 0.0
+
+
+@dataclass
+class RegimeSmoother:
+    """Temporal hysteresis on the mechanical (regime, trend) label. ``classify_regime`` is
+    stateless and can flip bar-to-bar on a single mixed pivot; that thrash drives needless
+    re-authoring and directional indecision. A NEW (regime, trend) read must persist for
+    ``min_bars`` CONSECUTIVE bars before it replaces the committed label. ``min_bars`` <= 1
+    is a no-op (adopt every read = the raw classifier)."""
+
+    min_bars: int = 1
+    regime: str = ""
+    trend: str = ""
+    _cand: tuple[str, str] | None = field(default=None, init=False)
+    _streak: int = field(default=0, init=False)
+
+    def update(self, regime: str, trend: str) -> tuple[str, str]:
+        """Feed the raw per-bar read; return the (possibly held-over) committed label."""
+        if not self.regime or (regime, trend) == (self.regime, self.trend):
+            # first read, or the live read confirms the committed label
+            self.regime, self.trend = regime, trend
+            self._cand, self._streak = None, 0
+        else:
+            # a read that differs from the committed label — must persist min_bars bars
+            if self._cand == (regime, trend):
+                self._streak += 1
+            else:
+                self._cand, self._streak = (regime, trend), 1
+            if self._streak >= max(1, self.min_bars):
+                self.regime, self.trend = regime, trend
+                self._cand, self._streak = None, 0
+        return self.regime, self.trend
+
+
 class TradingEngine:
     def __init__(
         self,
@@ -63,6 +117,7 @@ class TradingEngine:
         planner: Planner | None = None,
         journal: JournalStore | None = None,
         on_close: Callable[[ClosedTrade], None] | None = None,
+        declines: DeclineLog | None = None,
     ) -> None:
         self.cfg = config
         self.store = store
@@ -73,6 +128,10 @@ class TradingEngine:
         self.journal = journal
         self.tracker = TradeTracker()
         self._pending_entry: dict | None = None
+        # session.realized_pnl baseline stamped when the position leaves flat, so a trade
+        # that EXITS across several partial fills journals the WHOLE-trade P&L at close (the
+        # per-fill delta would otherwise drop every exit leg but the last). 0.0 while flat.
+        self._trade_open_pnl: float = 0.0
         # Initial protective-stop distance (ticks) of the OPEN position, promoted from the
         # matching pending entry when the position actually FILLS (not at approval — a
         # dropped/stale order must not leave a stale 1R behind). The trade manager uses it
@@ -90,10 +149,19 @@ class TradingEngine:
         # threaded through reauthor.step each bar. The reducer decides WHEN to refresh the
         # authored playbook; the engine owns the guards + the act (see _maybe_reauthor).
         self.reauthor_state = ReauthorState()
+        # Temporal hysteresis on the mechanical regime label — smooths build_context's read
+        # before any consumer (decision, counterfactual tag, reauthor governor) sees it, so a
+        # one-bar structural wiggle can't thrash re-authoring/bias. 1 = off. See RegimeSmoother.
+        self.regime_smoother = RegimeSmoother(min_bars=config.strategy.regime_hysteresis_bars)
         # Last Claude-DECLINED prefilter candidate: {action, price, ts}. Near-identical
         # candidates are answered from this memo instead of burning another Claude call
         # (extended trends produce the same candidate bar after bar). See _duplicate_decline.
         self._declined: dict | None = None
+        # Counterfactual replay of NOT-taken setups (gated by learning.counterfactuals_enabled).
+        # _cf_seen dedups by (direction, band-bucket) so the plan cycle's per-bar re-arm of the
+        # same entry zone is recorded once, not every bar. See _record_missed_triggers.
+        self.declines = declines
+        self._cf_pending: list[PendingCounterfactual] = []
 
     def _new_id(self) -> str:
         return f"{self.cfg.strategy_id}-{next(self._ids)}"
@@ -105,6 +173,9 @@ class TradingEngine:
         self.session.mark_bar(bar.ts)
         if self.session.position != 0:
             self.tracker.on_bar(bar)
+        # Advance any not-taken setups against this bar before the new decision (a setup
+        # recorded last bar first gets a touch/resolve chance here — never on its own bar).
+        self._resolve_counterfactuals(bar)
 
         # If the daily goal/limit was hit on a prior fill and we are still in a
         # position, flatten immediately regardless of what the agent thinks.
@@ -121,7 +192,13 @@ class TradingEngine:
             bars,
             atr_period=self.cfg.strategy.atr_period,
             swing_lookback=self.cfg.strategy.swing_lookback,
+            level_bars=self.store.all(),  # multi-day reference levels need the full store
         )
+        # Hysteresis: hold the committed regime/trend until a new read persists, so a one-bar
+        # structural wiggle can't thrash re-authoring or flip directional bias (RegimeSmoother).
+        sregime, strend = self.regime_smoother.update(ctx.regime, ctx.trend)
+        if (sregime, strend) != (ctx.regime, ctx.trend):
+            ctx = replace(ctx, regime=sregime, trend=strend)
         self.last_context = ctx  # expose current regime / S/R to the dashboard
         self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
         account = self.session.account_state(mark_price=bar.close)
@@ -166,6 +243,19 @@ class TradingEngine:
             if decision.confidence < self.cfg.strategy.min_confidence:
                 decision = Decision(action=Action.WAIT,
                                     rationale=f"low_confidence:{decision.confidence}")
+        # Stand down in an unclear/transitional regime (config-gated). With wait_in_transitional
+        # ON this is a blanket WAIT; with it OFF and a transitional_delta_floor set, a
+        # transitional ENTRY is allowed only when order flow confirms at that stricter floor — so
+        # a brain that authored a setup can't fire it into chop, but a delta-confirmed breakout
+        # still goes. Exits/management pass through.
+        decision = self._suppress_transitional(
+            decision, ctx.regime, self.cfg.strategy.wait_in_transitional,
+            ctx.delta_ratio, self.cfg.strategy.transitional_delta_floor)
+        # Require order-flow confirmation: the armed plan trigger fires on a price band
+        # alone (plan.evaluate_plan is price-only), so the delta floor a setup specifies is
+        # enforced HERE — under both brains and the plan cycle. Exits/management pass through.
+        decision = self._suppress_low_delta(
+            decision, ctx.delta_ratio, self.cfg.strategy.delta_floor)
 
         if decision.action == Action.WAIT:
             self._remember_decline(candidate, bar)
@@ -197,6 +287,9 @@ class TradingEngine:
                     # 1R for the trade manager — promoted to _active_stop_ticks only if/when
                     # THIS order fills (see on_fill); a dropped order leaves nothing stale.
                     "stop_ticks": self._command_stop_ticks(rd.command, bar.close),
+                    # Absolute (stop, target) for the exit-replay (learning.exit_replays_enabled):
+                    # the trade's original bracket, scored against later bars when it closes.
+                    "brackets": self._command_brackets(rd.command, bar.close),
                 }
             result = EngineResult(decision, rd.command if rd.approved else None, mode,
                                   rd.reasons)
@@ -208,8 +301,71 @@ class TradingEngine:
         # the next plan can assume the optimistic post-fill position of anything
         # queued this close. With a synchronous planner this arms before we return.
         if self.planner is not None:
+            self._record_missed_triggers(armed, bar, ctx, result)
             self._schedule_followup(bar, ctx, bars, account, result)
         return result
+
+    @staticmethod
+    def _suppress_transitional(
+        decision: Decision, regime: str, enabled: bool,
+        delta_ratio: float = 0.0, transitional_delta_floor: float = 0.0,
+    ) -> Decision:
+        """Gate ENTRIES in a 'transitional' regime (config-driven, three modes). Exits and
+        position management are never gated; trending/ranging pass through untouched.
+
+        - enabled (wait_in_transitional) True  -> blanket WAIT (strictest belt; the legacy
+          behavior, unchanged).
+        - enabled False, transitional_delta_floor > 0 -> allow only if order flow confirms at
+          this STRICTER floor (long needs delta_ratio >= +floor, short <= -floor), else WAIT.
+          Transitional structure (mixed/breaking, or too few pivots yet) needs stronger proof a
+          breakout is real. Stacks above the global delta_floor (_suppress_low_delta): in
+          transitional the effective bar is the stricter of the two.
+        - enabled False, transitional_delta_floor 0 -> no transitional-specific gate.
+        """
+        if (regime != "transitional"
+                or decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT)):
+            return decision
+        if enabled:
+            return Decision(
+                action=Action.WAIT,
+                rationale=f"transitional_regime_wait (suppressed {decision.action.value})")
+        if transitional_delta_floor > 0.0:
+            confirmed = (
+                delta_ratio >= transitional_delta_floor
+                if decision.action == Action.ENTER_LONG
+                else delta_ratio <= -transitional_delta_floor
+            )
+            if not confirmed:
+                sign = "+" if decision.action == Action.ENTER_LONG else "-"
+                return Decision(
+                    action=Action.WAIT,
+                    rationale=(
+                        f"transitional_delta_below_floor (delta={delta_ratio:+.3f} vs "
+                        f"{sign}{transitional_delta_floor:g}; "
+                        f"suppressed {decision.action.value})"))
+        return decision
+
+    @staticmethod
+    def _suppress_low_delta(decision: Decision, delta_ratio: float, floor: float) -> Decision:
+        """Convert an ENTRY to WAIT when order-flow delta does not confirm the direction
+        (config-gated). The armed plan trigger fires on a price band alone, so the delta
+        floor a setup names is otherwise never enforced mechanically. Require
+        delta_ratio >= +floor for longs, <= -floor for shorts. floor <= 0 disables the gate
+        (the neutral default; also avoids suppressing replay/backtests with no order-flow
+        data). Exits and position management are never gated."""
+        if floor <= 0.0 or decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT):
+            return decision
+        confirmed = (
+            delta_ratio >= floor if decision.action == Action.ENTER_LONG
+            else delta_ratio <= -floor
+        )
+        if confirmed:
+            return decision
+        sign = "+" if decision.action == Action.ENTER_LONG else "-"
+        return Decision(
+            action=Action.WAIT,
+            rationale=f"delta_below_floor (delta={delta_ratio:+.3f} vs {sign}{floor:g}; "
+                      f"suppressed {decision.action.value})")
 
     # ---- pre-armed plan cycle -------------------------------------------------
     def _evaluate_armed_plan(self, plan: TradePlan | None, bar: Bar, mode: Mode) -> Decision:
@@ -276,6 +432,7 @@ class TradingEngine:
             recent,
             atr_period=self.cfg.strategy.atr_period,
             swing_lookback=self.cfg.strategy.swing_lookback,
+            level_bars=bars,  # the full study history, for multi-day reference levels
         )
         account = self.session.account_state(mark_price=bars[-1].close)
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
@@ -374,6 +531,133 @@ class TradingEngine:
         return (f"prefilter:duplicate_decline({d['action']} @{d['price']:g}, "
                 f"bar {bars_elapsed + 1}/{knobs.prefilter_dedup_bars})")
 
+    # ---- counterfactual replay of not-taken setups --------------------------
+    def _resolve_counterfactuals(self, bar: Bar) -> None:
+        """Advance each pending not-taken setup against the just-closed bar; resolved
+        outcomes append to the DeclineLog. No-op when the feature is off or nothing pends."""
+        if self.declines is None or not self._cf_pending:
+            return
+        still: list[PendingCounterfactual] = []
+        for p in self._cf_pending:
+            outcome = self._cf_step(p, bar)
+            if outcome is None:
+                still.append(p)
+                continue
+            self.declines.append({
+                "kind": p.kind, "outcome": outcome, "side": p.side.value,
+                "limit_price": round(p.limit_price, 4),
+                "stop_price": round(p.stop_price, 4),
+                "target_price": round(p.target_price, 4),
+                "regime": p.regime, "rationale": p.rationale,
+                # Full timeline so the outcome can be re-verified later without guessing
+                # the anchor: born_ts = the bar it was declined on (replay starts here),
+                # fill_ts = when the limit was touched (None if never filled), resolved_ts
+                # = the bar that decided the outcome.
+                "born_ts": p.born_ts,
+                "fill_ts": p.fill_ts or None,
+                "resolved_ts": bar.ts,
+            })
+        self._cf_pending = still
+
+    @staticmethod
+    def _cf_step(p: PendingCounterfactual, bar: Bar) -> str | None:
+        """One replay step; returns an outcome when resolved, else None (still pending).
+        Never credits a win/loss on the fill bar — intra-bar order is unknown, so a bar that
+        spans BOTH brackets is 'ambiguous', never a fabricated loss."""
+        if not p.filled:
+            touched = (bar.low <= p.limit_price if p.side == Side.LONG
+                       else bar.high >= p.limit_price)
+            if touched:
+                p.filled = True
+                p.entry_price = p.limit_price
+                p.fill_ts = bar.ts
+                return None  # resolution starts on the bar AFTER the fill
+            p.bars_left -= 1
+            return "never_filled" if p.bars_left <= 0 else None
+        if p.side == Side.LONG:
+            target_hit, stop_hit = bar.high >= p.target_price, bar.low <= p.stop_price
+        else:
+            target_hit, stop_hit = bar.low <= p.target_price, bar.high >= p.stop_price
+        if target_hit and stop_hit:
+            return "ambiguous"
+        if target_hit:
+            return "would_win"
+        if stop_hit:
+            return "would_lose"
+        p.bars_left -= 1
+        return "no_resolution" if p.bars_left <= 0 else None
+
+    def _record_missed_triggers(self, plan: TradePlan | None, bar: Bar,
+                                ctx: MarketContext, result: EngineResult) -> None:
+        """Record (deduped) the entry triggers the brain armed but did NOT fire this close,
+        so the replay can later score whether declining them was right. Gated off by default
+        (learning.counterfactuals_enabled). The trunk re-arms a plan every bar, so the dedup
+        is load-bearing: without it the same pullback band would log on every bar."""
+        if (self.declines is None or not self.cfg.learning.counterfactuals_enabled
+                or plan is None or plan.mode != "seek_entry"
+                or plan.based_on_bar_ts >= bar.ts or not plan.triggers):
+            return
+        if result.command is not None and result.command.action in (
+            Action.ENTER_LONG, Action.ENTER_SHORT
+        ):
+            return  # the plan fired — that's a real (journaled) trade, not a miss
+        atr_value = ctx.atr or 0.0
+        tick = self.cfg.instrument.tick_size or 0.25
+        for t in plan.triggers:
+            side = Side.LONG if t.direction == "long" else Side.SHORT
+            # Entry = the band edge price first reaches on its way into the zone.
+            limit = ((t.max_close if t.max_close is not None else t.min_close)
+                     if side == Side.LONG
+                     else (t.min_close if t.min_close is not None else t.max_close))
+            if limit is None:
+                continue
+            stop_ticks, target_ticks = t.stop_ticks, t.target_ticks
+            if stop_ticks is None and atr_value > 0:
+                stop_ticks = max(1, round(self.cfg.strategy.atr_stop_mult * atr_value / tick))
+            if target_ticks is None and atr_value > 0:
+                target_ticks = max(1, round(self.cfg.strategy.atr_target_mult * atr_value / tick))
+            if not stop_ticks or not target_ticks:
+                continue
+            if side == Side.LONG:
+                stop_price, target_price = limit - stop_ticks * tick, limit + target_ticks * tick
+            else:
+                stop_price, target_price = limit + stop_ticks * tick, limit - target_ticks * tick
+            # Dedup by proximity to a same-side pending: the plan cycle re-arms the same band
+            # every bar, so without this one missed pullback would log on every bar. tol uses
+            # the live ATR but the compare is on raw price, so it stays stable as ATR drifts.
+            tol = self.cfg.learning.counterfactual_dedup_atr * atr_value
+            if any(p.kind == "missed_trigger" and p.side == side
+                   and abs(p.limit_price - limit) <= tol for p in self._cf_pending):
+                continue
+            self._cf_pending.append(PendingCounterfactual(
+                kind="missed_trigger", side=side, limit_price=limit,
+                stop_price=stop_price, target_price=target_price, born_ts=bar.ts,
+                bars_left=self.cfg.learning.counterfactual_horizon_bars,
+                rationale=t.rationale or plan.rationale, regime=ctx.regime,
+            ))
+
+    def _record_exit_replay(self, trade: ClosedTrade) -> None:
+        """Score a NON-target exit by replaying it forward on the trade's ORIGINAL bracket:
+        would_win = the exit left money (price reached the target — a shakeout), would_lose =
+        the exit dodged the stop. Pre-marked filled so _cf_step tracks target/stop straight
+        from the next bar. Gated by learning.exit_replays_enabled; needs a real bracket."""
+        if (self.declines is None or not self.cfg.learning.exit_replays_enabled
+                or not trade.target_price or not trade.stop_price):
+            return
+        side = Side.LONG if trade.side == "LONG" else Side.SHORT
+        # Already at/through target on exit = it won, not an early exit — nothing to replay.
+        reached = (trade.exit_price >= trade.target_price if side == Side.LONG
+                   else trade.exit_price <= trade.target_price)
+        if reached:
+            return
+        self._cf_pending.append(PendingCounterfactual(
+            kind="early_exit", side=side, limit_price=trade.exit_price,
+            stop_price=trade.stop_price, target_price=trade.target_price, born_ts=trade.exit_ts,
+            bars_left=self.cfg.learning.counterfactual_horizon_bars,
+            rationale=trade.rationale, regime=str(trade.entry_context.get("regime", "")),
+            filled=True, entry_price=trade.exit_price, fill_ts=trade.exit_ts,
+        ))
+
     # ---- fill handling ------------------------------------------------------
     def on_fill(self, fill: Fill) -> OrderCommand | None:
         """Apply a fill, journal a completed trade on close, and flatten if the daily
@@ -391,29 +675,47 @@ class TradingEngine:
             # trade whose real stop we don't know — the resting bracket still protects it.
             self._active_stop_ticks = p.get("stop_ticks") if p is not None else None
             self._managed_level = None
+            self._trade_open_pnl = before_pnl  # baseline for the whole-trade P&L at close
             ctx = p["context"] if p is not None else self.last_context
             if ctx is not None:  # no context at all (fill before any bar): nothing to journal
+                sp, tp = p.get("brackets", (0.0, 0.0)) if p is not None else (0.0, 0.0)
                 self.tracker.on_entry(
                     ts=fill.ts, side=side, qty=abs(after_pos), price=fill.price,
                     context=ctx,
                     rationale=p["rationale"] if p is not None
                     else "unattributed_fill (no matching pending entry)",
                     confidence=p.get("confidence", 0.0) if p is not None else 0.0,
+                    stop_price=sp, target_price=tp,
                 )
             self._pending_entry = None  # consumed or invalidated either way
+        elif (before_pos != 0 and abs(after_pos) > abs(before_pos)
+                and (after_pos > 0) == (before_pos > 0)):
+            # Scaled into the SAME-side open position on a later fill (a partial entry
+            # completing, or pyramiding). Without this the trade journals at only its first
+            # leg's size — the live 2-lots-booked-as-1-lot under-count. Track peak size +
+            # the running weighted-average entry so it closes as one full-size trade.
+            self.tracker.note_scale(qty=abs(after_pos), avg_price=self.session.avg_price)
         elif before_pos != 0 and after_pos == 0:
             # Flat: the trade manager's 1R and trailed high-water no longer apply.
             self._active_stop_ticks = None
             self._managed_level = None
+            # WHOLE-trade P&L since it left flat — not just this last exit leg's delta. A
+            # multi-fill exit realizes across several on_fill calls, so the per-call
+            # `realized_pnl - before_pnl` would drop every leg but the last; the open
+            # baseline (_trade_open_pnl) captures the full round trip.
             trade = self.tracker.on_exit(
                 ts=fill.ts, price=fill.price,
-                realized_pnl=self.session.realized_pnl - before_pnl,
+                realized_pnl=self.session.realized_pnl - self._trade_open_pnl,
             )
             if trade is not None:
                 if self.journal is not None:
                     self.journal.append(trade)
+                self._record_exit_replay(trade)
                 if self.on_close is not None:
                     self.on_close(trade)
+        # else: a partial REDUCE toward flat (position still open) — keep tracking; the
+        # close branch journals the whole trade when it finally returns to flat. (The
+        # strategy flattens before reversing, so a direct long<->short flip never occurs.)
 
         reason = self.session.check_daily_goal()
         if reason and self.session.position != 0:
@@ -428,6 +730,19 @@ class TradingEngine:
             id=self._new_id(), strategy_id=self.cfg.strategy_id,
             action=Action.FLATTEN, qty=abs(self.session.position), reason=reason,
         )
+
+    def _command_brackets(self, cmd: OrderCommand, entry_ref: float) -> tuple[float, float]:
+        """The order's ABSOLUTE (stop_price, target_price). Prefer explicit prices; else
+        derive from ticks around ``entry_ref``. (0.0, 0.0) when neither is known."""
+        tick = self.cfg.instrument.tick_size or 0.25
+        sign = 1.0 if cmd.action == Action.ENTER_LONG else -1.0  # long: stop below / target above
+        sp = cmd.stop_price
+        if sp is None and cmd.stop_ticks:
+            sp = entry_ref - sign * cmd.stop_ticks * tick
+        tp = cmd.target_price
+        if tp is None and cmd.target_ticks:
+            tp = entry_ref + sign * cmd.target_ticks * tick
+        return float(sp or 0.0), float(tp or 0.0)
 
     def _command_stop_ticks(self, cmd: OrderCommand, entry_price: float) -> int | None:
         """The protective-stop distance in ticks of an approved entry (1R for the trade

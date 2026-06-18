@@ -42,6 +42,27 @@ def _slug(name: str) -> str:
     return s or "lesson"
 
 
+def _split_bullets(text: str) -> tuple[str, list[str]]:
+    """Split markdown into (header, bullets): a bullet starts at a line beginning with
+    '- '; continuation lines stay with their bullet. Header = everything before the
+    first bullet."""
+    header: list[str] = []
+    bullets: list[str] = []
+    cur: list[str] | None = None
+    for line in text.splitlines():
+        if line.startswith("- "):
+            if cur is not None:
+                bullets.append("\n".join(cur))
+            cur = [line]
+        elif cur is not None:
+            cur.append(line)
+        else:
+            header.append(line)
+    if cur is not None:
+        bullets.append("\n".join(cur))
+    return "\n".join(header).strip(), bullets
+
+
 def _render_lesson(meta: dict, body: str) -> str:
     fm = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{fm}\n---\n{body.strip()}\n"
@@ -73,12 +94,32 @@ class LearnedStore:
     def notes(self) -> str:
         return self._read("agent-notes.md")
 
+    def distilled(self) -> str:
+        """The distilled lessons (written by Reflector.distill, a slower/deeper model
+        pass). When present it REPLACES raw lessons in decision prompts, so the lesson
+        corpus can grow without bloating the per-bar prompt."""
+        return self._read("distilled.md")
+
+    def set_distilled(self, text: str) -> None:
+        self._atomic_write(self.dir / "distilled.md", text.strip() + "\n")
+
+    def archived_notes(self, tail_chars: int = 3000) -> str:
+        """The newest slice of long-term archived notes (distillation input)."""
+        f = self.dir / "archive" / "agent-notes-archive.md"
+        if not f.is_file():
+            return ""
+        return f.read_text(encoding="utf-8")[-tail_chars:]
+
     def lessons(self) -> list[Lesson]:
         d = self.dir / "lessons"
         if not d.is_dir():
             return []
         out: list[Lesson] = []
-        for f in sorted(d.glob("*.md")):
+        # Most recently created/updated first: when the prompt budget can't hold every
+        # lesson, the freshest learning survives (alphabetical-slug order made the cut
+        # arbitrary). Curation is the real fix for an over-budget lesson set.
+        files = sorted(d.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        for f in files:
             meta, body = parse_frontmatter(f.read_text(encoding="utf-8"))
             status = str(meta.get("status", "active"))
             if status != "active":
@@ -90,24 +131,80 @@ class LearnedStore:
     def format_for_prompt(self, profile_chars: int = 1400, notes_chars: int = 2200,
                           lessons_chars: int = 2500) -> str:
         sections: list[str] = []
+        notes_dropped = lessons_dropped = 0
         p = self.profile()
         if p:
             sections.append("=== TRADER PROFILE ===\n" + p[:profile_chars])
         n = self.notes()
         if n:
-            sections.append("=== AGENT NOTES ===\n" + n[:notes_chars])
-        lessons = self.lessons()
+            shown, notes_dropped = self._notes_for_prompt(n, notes_chars)
+            sections.append("=== AGENT NOTES ===\n" + shown)
+        distilled = self.distilled()
+        if distilled:
+            # Distilled tier active: it stands in for the raw lessons (fresh notes
+            # above still flow until the next distillation pass).
+            sections.append("=== DISTILLED LESSONS ===\n" + distilled[:lessons_chars])
+            lessons = []
+        else:
+            lessons = self.lessons()
         if lessons:
             lines, used = [], 0
             for ls in lessons:
                 entry = f"- [{ls.name}] {ls.body}"
                 if used + len(entry) > lessons_chars:
-                    break
+                    lessons_dropped += 1
+                    continue
                 lines.append(entry)
                 used += len(entry)
+            if lessons_dropped:
+                lines.append(f"(… {lessons_dropped} more lessons over the prompt budget — "
+                             f"run curation to consolidate)")
             if lines:
                 sections.append("=== LEARNED LESSONS ===\n" + "\n".join(lines))
+        # Truncation was silent before; tell the operator once per change, not per call.
+        report = (notes_dropped, lessons_dropped)
+        if any(report) and report != getattr(self, "_last_trunc_report", None):
+            print(f"[learned] prompt budget truncation: notes_dropped={notes_dropped} "
+                  f"lessons_dropped={lessons_dropped} (archive/curation holds the rest)",
+                  flush=True)
+        self._last_trunc_report = report
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _notes_for_prompt(text: str, budget: int) -> tuple[str, int]:
+        """NEWEST notes first under the budget. (The old head-truncate kept the OLDEST
+        chars, silently cutting every new insight once the file grew past the limit.)
+        Returns (rendered, dropped_bullet_count)."""
+        if len(text) <= budget:
+            return text, 0
+        header, bullets = _split_bullets(text)
+        if not bullets:
+            return text[:budget], 0
+        # Reserve room for the omission banner up front (we reach here only when the text
+        # already exceeds budget, so something WILL be dropped), then size newest-first by the
+        # ACTUAL rendered length — banner + the "\n" join inserts — so the result never exceeds
+        # the budget (a truncated bullet counts only the chars kept, not its full length).
+        banner = "(… {n} older notes omitted — full history in the archive)"
+        reserve = len(banner.format(n=len(bullets))) + 1  # + the newline after the banner
+        inner = max(0, budget - reserve)
+        picked: list[str] = []
+        used = 0
+        for b in reversed(bullets):
+            sep = 1 if picked else 0  # the "\n" join() inserts between bullets
+            if used + sep + len(b) <= inner:
+                picked.append(b)
+                used += sep + len(b)
+            else:
+                remain = inner - used - sep
+                if remain > 0:
+                    picked.append(b[:remain])
+                break
+        dropped = len(bullets) - len(picked)
+        out: list[str] = []
+        if dropped > 0:
+            out.append(banner.format(n=dropped))
+        out.extend(reversed(picked))  # chronological order among the selected
+        return "\n".join(out)[:budget], dropped
 
     def _backup(self, path: Path) -> None:
         """Timestamped copy under .history/ before any overwrite. The live files are
@@ -139,13 +236,44 @@ class LearnedStore:
         bad reflection self-amplify. A human merges (or deletes) the proposal."""
         self._atomic_write(self.dir / "trader-profile.proposed.md", text.strip() + "\n")
 
-    def append_note(self, note: str) -> None:
+    def append_note(self, note: str, *, archive_over_chars: int = 8000,
+                    keep_chars: int = 4000) -> None:
         note = note.strip()
         if not note:
             return
         existing = self.notes()
         body = (existing.rstrip() + "\n- " + note) if existing else "# Agent Notes\n\n- " + note
+        body = self._archive_overflow(body, archive_over_chars, keep_chars)
         self._atomic_write(self.dir / "agent-notes.md", body + "\n")
+
+    def _archive_overflow(self, body: str, archive_over: int, keep: int) -> str:
+        """Once the live notes file outgrows archive_over, move the OLDEST bullets to
+        archive/agent-notes-archive.md, keeping the newest ~keep chars as the working
+        set. Long-term memory is never deleted — the archive holds everything that
+        leaves the working set (and .history/ has the pre-write backups)."""
+        if archive_over <= 0 or len(body) <= archive_over:
+            return body
+        keep = max(1, min(keep, archive_over))
+        header, bullets = _split_bullets(body)
+        if len(bullets) < 2:
+            return body
+        kept: list[str] = []
+        used = 0
+        for b in reversed(bullets):
+            if used + len(b) > keep and kept:
+                break
+            kept.append(b)
+            used += len(b)
+        kept.reverse()
+        to_archive = bullets[: len(bullets) - len(kept)]
+        if not to_archive:
+            return body
+        arch = self.dir / "archive" / "agent-notes-archive.md"
+        arch.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+        with arch.open("a", encoding="utf-8") as f:
+            f.write(f"\n## archived {stamp}\n" + "\n".join(to_archive) + "\n")
+        return (header or "# Agent Notes") + "\n\n" + "\n".join(kept)
 
     def apply_lesson(self, op: str, name: str, body: str = "",
                      regime_tags: list[str] | None = None) -> None:

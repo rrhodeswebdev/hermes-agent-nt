@@ -22,7 +22,7 @@ def test_defaults_and_committed_template_still_valid():
                 "max_stop_ticks": 280,
                 "min_stop_atr_mult": 1.5,
                 "breakeven_r": 1.0,
-                "min_confidence": 0.40,
+                "min_confidence": 0.55,
             },
             "risk": {
                 "max_contracts": 5,
@@ -50,6 +50,7 @@ def test_defaults_and_committed_template_still_valid():
         ("pullback_atr", -0.1),
         ("min_confidence", 1.5),
         ("min_confidence", -0.1),
+        ("transitional_delta_floor", -0.1),
     ],
 )
 def test_strategy_field_bounds(field, value):

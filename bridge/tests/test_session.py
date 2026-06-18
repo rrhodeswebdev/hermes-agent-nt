@@ -1,3 +1,7 @@
+import json
+from datetime import UTC, datetime
+
+from hermes_bridge.indicators import cme_trading_day
 from hermes_bridge.models import Fill, Side
 from hermes_bridge.session import SessionState
 
@@ -70,3 +74,64 @@ def test_unrealized_pnl():
     s.apply_fill(Fill(side=Side.LONG, qty=1, price=4000.0, ts=0))
     assert s.unrealized_pnl(4002.0) == 100.0  # 2 pts * $50
     assert s.unrealized_pnl(3999.0) == -50.0
+
+
+def test_session_state_persists_and_restores_same_day(tmp_path):
+    """A mid-day restart restores realized P&L + trade count from disk; a new day starts
+    clean. Position is never persisted (a clean restart is flat)."""
+    sp = str(tmp_path / "session.json")
+    ts = 1_781_500_000.0  # some trading day D
+    s1 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s1.maybe_roll_day(ts)
+    s1.apply_fill(Fill(side=Side.LONG, qty=1, price=4000.0, ts=ts))
+    s1.apply_fill(Fill(side=Side.SHORT, qty=1, price=4004.0, ts=ts))  # +$200, 1 trade
+    assert s1.position == 0 and s1.trades_today == 1
+    assert round(s1.realized_pnl, 2) == 200.0
+
+    # Restart same day: a fresh session over the same file restores on the first bar.
+    s2 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    assert s2.realized_pnl == 0.0 and s2.trades_today == 0  # not applied until a bar arrives
+    s2.maybe_roll_day(ts + 300)  # same UTC day -> restore
+    assert round(s2.realized_pnl, 2) == 200.0
+    assert s2.trades_today == 1
+
+    # A NEW trading day starts clean (never carry yesterday's P&L forward).
+    s3 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s3.maybe_roll_day(ts + 86_400 * 2)
+    assert s3.realized_pnl == 0.0 and s3.trades_today == 0
+
+
+def test_cme_trading_day_boundary_is_1700_et_not_utc_midnight():
+    """The trading-day key rolls at 17:00 ET (CME settlement), not UTC midnight -- so the
+    evening ETH session shares a UTC/ET calendar date with that morning's RTH yet is a
+    DIFFERENT trading day. Reproduces the phantom-restore where RTH P&L bled into the
+    overnight session (old key was int(ts // 86400) = UTC day)."""
+    def ts(h, m=0):  # 2026-06-15 is Monday, EDT (UTC-4)
+        return datetime(2026, 6, 15, h, m, tzinfo=UTC).timestamp()
+
+    assert cme_trading_day(ts(13, 30)) == cme_trading_day(ts(20, 0))  # 09:30 & 16:00 ET: 1 day
+    assert cme_trading_day(ts(23, 0)) == cme_trading_day(ts(13, 30)) + 1  # 19:00 ET -> next day
+    assert cme_trading_day(ts(20, 59)) == cme_trading_day(ts(13, 30))  # 16:59 ET -> same
+    assert cme_trading_day(ts(21, 0)) == cme_trading_day(ts(13, 30)) + 1  # 17:00 ET -> boundary
+
+
+def test_evening_eth_does_not_restore_morning_rth_pnl(tmp_path):
+    """The exact live bug: state persisted during RTH must NOT restore into the evening ETH
+    session sharing the same calendar date (it is a new CME trading day). A same-session ETH
+    restart still restores (control)."""
+    def ts(h):
+        return datetime(2026, 6, 15, h, 0, tzinfo=UTC).timestamp()
+
+    sp = tmp_path / "s.json"
+    sp.write_text(json.dumps({"day": cme_trading_day(ts(14)), "realized_pnl": -356.5,
+                              "trades_today": 11, "halted": False, "halt_reason": "",
+                              "daily_goal_hit": False}))  # saved 10:00 ET (RTH)
+    s = SessionState("MNQ", "1m", 0.25, 0.5, 500, 500, state_path=str(sp))
+    s.maybe_roll_day(ts(23))  # first bar 19:00 ET (ETH) -> new trading day -> NO restore
+    assert s.realized_pnl == 0.0 and s.trades_today == 0
+    s.realized_pnl = -120.0
+    s.trades_today = 4
+    s._persist()
+    s2 = SessionState("MNQ", "1m", 0.25, 0.5, 500, 500, state_path=str(sp))
+    s2.maybe_roll_day(ts(23) + 300)  # +5 min, same ETH trading day -> restore
+    assert round(s2.realized_pnl, 2) == -120.0 and s2.trades_today == 4

@@ -65,6 +65,33 @@ class StrategyParams(BaseModel):
     min_confidence: float = Field(  # engine ignores Decisions below this confidence
         default=0.55, ge=0.0, le=1.0
     )
+    # Deterministic regime discipline: when True, the engine converts an ENTRY to WAIT
+    # whenever the structural regime read is "transitional" — the strategy's own master
+    # switch (strategy.md / market-regime.md) says stand down in unclear/mixed structure.
+    # A belt over the brain's judgment after it was observed firing authored setups in chop.
+    # Exits and position management are never gated. False = neutral (trust the brain's read).
+    wait_in_transitional: bool = False
+    # Deterministic order-flow gate: when > 0, the engine converts an ENTRY to WAIT unless
+    # delta_ratio confirms direction — a long needs delta_ratio >= +delta_floor, a short
+    # needs <= -delta_floor. The armed plan trigger (plan.evaluate_plan) fires on a price
+    # band ALONE, so without this the delta floor a setup names in its prose is never
+    # enforced mechanically. 0.0 = off (the neutral default; also avoids gating replay /
+    # backtests that carry no order-flow data). Only enable where real bid/ask delta is
+    # streamed (live NT8). Exits and position management are never gated.
+    delta_floor: float = Field(default=0.0, ge=0.0)
+    # Stricter, delta-CONDITIONAL transitional gate (only consulted when wait_in_transitional
+    # is False). When > 0 and the regime read is "transitional", an ENTRY fires only if
+    # delta_ratio confirms direction at THIS floor (long >= +floor, short <= -floor) — a higher
+    # order-flow bar than the global delta_floor, because transitional structure (mixed/breaking,
+    # or too few pivots yet) needs stronger proof a breakout is real. Stacks above delta_floor:
+    # in transitional the effective bar is the stricter of the two. 0.0 = off (the neutral
+    # default). Exits and position management are never gated.
+    transitional_delta_floor: float = Field(default=0.0, ge=0.0)
+    # Temporal hysteresis on the mechanical regime/trend label. classify_regime is stateless
+    # and can flip bar-to-bar on a single mixed pivot; that thrash drives needless re-authoring
+    # and directional indecision. A NEW (regime, trend) read must persist this many CONSECUTIVE
+    # bars before it replaces the committed label. 1 = off (adopt every read = raw classifier).
+    regime_hysteresis_bars: int = Field(default=1, ge=1)
     # Stop band (vol-scaled stop, then CLAMPED). The protective stop is
     # round(atr_stop_mult × ATR) in ticks, clamped into [min_stop_ticks, max_stop_ticks];
     # a bound of 0 = unbounded (the neutral default, so the legacy raw ATR stop is
@@ -280,6 +307,20 @@ class ServerConfig(BaseModel):
     port: int = 8787
 
 
+class StorageConfig(BaseModel):
+    """Optional SQLite persistence for the bar store. Empty ``bars_db`` = disabled (the
+    neutral default; the store stays a pure in-memory deque). A path turns on write-through:
+    every bar is mirrored to SQLite and the tail is reloaded on startup, so multi-day history
+    — and the levels/calibration tooling that reads it — survives a bridge restart. DB
+    failures degrade to memory-only; persistence never breaks the bar loop."""
+
+    bars_db: str = ""  # path to the SQLite file; "" = in-memory only
+    # Day-state JSON (realized P&L + trade count + halt state), restored on the first bar of
+    # the SAME trading day so a mid-day restart doesn't zero the dashboard / daily-loss
+    # headroom. "" = disabled (in-memory only).
+    session_state: str = ""
+
+
 class ExecutionConfig(BaseModel):
     # Hard gate on real-money trading. Must be explicitly true AND acknowledged.
     allow_live: bool = False
@@ -295,15 +336,49 @@ class LearningConfig(BaseModel):
     enabled: bool = True
     learned_dir: str = "hermes/learned"          # trader-profile.md, agent-notes.md, lessons/*.md
     journal_path: str = "bridge/state/journal.jsonl"  # episodic record of closed trades
+    # Resolved counterfactuals for declined/unfilled setups (the over-blocking evidence
+    # stream a closed-trades journal can never carry). Written by the engine's replay hook.
+    declines_path: str = "bridge/state/declines.jsonl"
     retrieve_k: int = 3                           # similar past trades fed into each decision
     profile_char_limit: int = 1400
     notes_char_limit: int = 2200
     lessons_char_limit: int = 2500
+    # Notes triage: the prompt shows the NEWEST notes within notes_char_limit; once the
+    # live agent-notes.md outgrows notes_archive_over_chars, the oldest bullets move to
+    # hermes/learned/archive/ (long-term memory — never deleted), keeping the newest
+    # notes_keep_chars as the working set. 0 = archival off (neutral).
+    notes_archive_over_chars: int = Field(8000, ge=0)
+    notes_keep_chars: int = Field(4000, ge=0)
     reflect_enabled: bool = True
     reflect_on_trade_close: bool = True
     reflect_model: str = "sonnet"     # model for reflection/curation calls
     reflect_recent: int = 20          # recent trades shown to reflection for context
+    # Flat-only reflection: when no trade has closed but this many DECLINED setups have
+    # resolved would-win (the over-blocking signal), a reflection fires to consider
+    # narrowing the lesson that vetoed them. Counts unreported would-wins; see DeclineLog.
+    reflect_missed_wins: int = Field(3, ge=1)
+    # Counterfactual self-correction: replay entry setups the brain armed but did NOT take
+    # (the plan cycle re-arms every bar; the engine dedups by band so one missed pullback is
+    # logged once). Resolved outcomes feed reflect_on_missed. OFF by default (neutral).
+    counterfactuals_enabled: bool = False
+    counterfactual_horizon_bars: int = Field(20, ge=1)   # bars before a replay gives up
+    counterfactual_dedup_atr: float = Field(0.5, ge=0)   # bands within this x ATR = same setup
+    # Exit replay: when a trade closes BELOW its target (an invalidation/discretionary exit),
+    # replay it forward on its ORIGINAL target/stop. would_win = the exit LEFT MONEY (price
+    # reached the target — a shakeout); would_lose = the exit dodged the stop. Resolved
+    # early_exit records feed reflect_on_missed like declines. OFF by default (neutral).
+    exit_replays_enabled: bool = False
     max_lessons: int = 40             # cap applied lessons per reflection
+    # Staggered distillation: a slower, deeper model periodically compresses the full
+    # lesson/note corpus into ONE bounded distilled.md that the realtime decision prompt
+    # reads INSTEAD of raw lessons — knowledge can grow without bloating the per-bar
+    # prompt. Trigger via POST /control/distill.
+    distill_model: str = "opus"       # the slow, deep tier for the distillation pass
+    distilled_char_limit: int = Field(1600, ge=1)  # hard cap on the distilled artifact
+    # Distillation is an opus pass over the FULL corpus — it needs far more than the
+    # per-bar claude.timeout_s (30s). It runs off the hot path (manual /control/distill),
+    # so a generous budget is safe.
+    distill_timeout_s: float = Field(300.0, gt=0)
 
 
 class NewsConfig(BaseModel):
@@ -374,6 +449,7 @@ class BridgeConfig(BaseModel):
     strategies: StrategyAuthoringConfig = Field(default_factory=StrategyAuthoringConfig)
     levels: LevelsConfig = Field(default_factory=LevelsConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)

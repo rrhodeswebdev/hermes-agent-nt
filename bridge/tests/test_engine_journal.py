@@ -2,7 +2,7 @@ from hermes_bridge.agent_client import build_agent_client
 from hermes_bridge.engine import TradingEngine
 from hermes_bridge.indicators import build_context
 from hermes_bridge.journal import JournalStore
-from hermes_bridge.models import Bar, Fill, Side
+from hermes_bridge.models import Action, Bar, Decision, Fill, Side
 from hermes_bridge.replay_sim import ReplaySimulator
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.session import SessionState
@@ -58,3 +58,102 @@ def test_replay_records_closed_trades(cfg, tmp_path):
     assert r["side"] in ("LONG", "SHORT")
     assert "realized_pnl" in r and "mae" in r and "mfe" in r
     assert "trend" in r["entry_context"]
+
+
+def test_engine_journals_partial_fill_round_trip(cfg, tmp_path):
+    """A 2-lot position that fills AND exits in 1-lot legs must journal as ONE trade at
+    FULL qty with the WHOLE-trade P&L — not the first entry leg's size / last exit leg's
+    P&L. Reproduces the live NT8 partial-fill under-count (a 2-lot booked as 1 lot)."""
+    js = JournalStore(str(tmp_path / "pj.jsonl"))
+    eng = _engine(cfg, js)
+    bars = synthetic_bars(60)
+    for b in bars:
+        eng.store.append(b)
+    ctx = build_context(bars, atr_period=14)
+    entry_px = bars[-1].close
+    eng._pending_entry = {"cmd_id": "p-1", "ts": bars[-1].ts, "side": Side.LONG,
+                          "context": ctx, "rationale": "partial entry"}
+    # Enter LONG 2 across two 1-lot fills (0 -> 1 -> 2).
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=entry_px, ts=bars[-1].ts))
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=entry_px, ts=bars[-1].ts))
+    assert eng.session.position == 2
+    eng.on_bar(Bar(ts=bars[-1].ts + 300, open=entry_px, high=entry_px + 5,
+                   low=entry_px - 2, close=entry_px + 3))
+    # Exit LONG 2 across two 1-lot fills at +3 pts (2 -> 1 -> 0).
+    exit_px = entry_px + 3
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=exit_px, ts=bars[-1].ts + 600))
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=exit_px, ts=bars[-1].ts + 600))
+    assert eng.session.position == 0
+    recs = js.all()
+    assert len(recs) == 1
+    r = recs[0]
+    assert r["side"] == "LONG"
+    assert r["qty"] == 2, "multi-fill entry must journal full size, not the first leg"
+    point_value = 12.5 / 0.25  # ES test instrument
+    assert r["realized_pnl"] == round(2 * 3 * point_value, 2), \
+        "multi-fill exit must journal the whole-trade P&L, not the last leg"
+
+
+def test_suppress_transitional_gate():
+    """The deterministic transitional->WAIT belt: ENTRIES are suppressed in a transitional
+    regime when enabled; trending/disabled pass through, and exits are never gated."""
+    enter = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    g = TradingEngine._suppress_transitional(enter, "transitional", True)
+    assert g.action == Action.WAIT and "transitional" in g.rationale
+    assert TradingEngine._suppress_transitional(
+        enter, "trending", True).action == Action.ENTER_LONG
+    assert TradingEngine._suppress_transitional(
+        enter, "transitional", False).action == Action.ENTER_LONG  # neutral default
+    ex = Decision(action=Action.EXIT, confidence=0.9, rationale="e")
+    assert TradingEngine._suppress_transitional(ex, "transitional", True).action == Action.EXIT
+
+
+def test_suppress_transitional_delta_conditional():
+    """Delta-conditional transitional gate (wait_in_transitional OFF, floor > 0): a transitional
+    ENTRY fires only if order flow confirms at the STRICTER floor; below it -> WAIT. It stacks
+    above the global delta_floor (a delta clearing the 0.05 global bar can still be blocked by a
+    0.10 transitional bar). trending/ranging never gated here; exits never gated; floor 0 = off;
+    the blanket veto still wins when wait_in_transitional is on."""
+    s = TradingEngine._suppress_transitional
+    long_e = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    short_e = Decision(action=Action.ENTER_SHORT, confidence=0.8, rationale="x")
+    # Blanket veto wins regardless of delta when enabled (legacy behavior preserved).
+    assert s(long_e, "transitional", True, 0.5, 0.10).action == Action.WAIT
+    # enabled OFF, floor 0.10: clears the stricter floor -> fires.
+    assert s(long_e, "transitional", False, 0.12, 0.10).action == Action.ENTER_LONG
+    assert s(long_e, "transitional", False, 0.10, 0.10).action == Action.ENTER_LONG  # inclusive
+    # The discriminating case: clears the global 0.05 but NOT the 0.10 transitional floor -> WAIT.
+    g = s(long_e, "transitional", False, 0.07, 0.10)
+    assert g.action == Action.WAIT and "transitional_delta_below_floor" in g.rationale
+    # Short side mirrors with the sign flipped.
+    assert s(short_e, "transitional", False, -0.12, 0.10).action == Action.ENTER_SHORT
+    assert s(short_e, "transitional", False, -0.07, 0.10).action == Action.WAIT
+    # floor 0 disables the soft gate; non-transitional regimes pass; exits never gated.
+    assert s(long_e, "transitional", False, 0.0, 0.0).action == Action.ENTER_LONG
+    assert s(long_e, "trending", False, -0.5, 0.10).action == Action.ENTER_LONG
+    assert s(long_e, "ranging", False, -0.5, 0.10).action == Action.ENTER_LONG
+    ex = Decision(action=Action.EXIT, confidence=0.9, rationale="e")
+    assert s(ex, "transitional", False, -0.5, 0.10).action == Action.EXIT
+
+
+def test_suppress_low_delta_gate():
+    """The deterministic order-flow belt: an ENTRY is suppressed unless delta_ratio clears
+    the floor (long needs >= +floor, short needs <= -floor). floor 0 disables it; exits are
+    never gated. Closes the gap where the armed price-band trigger fires without enforcing
+    the setup's delta floor (the delta values below are real entries from the 06-15 tape)."""
+    s = TradingEngine._suppress_low_delta
+    long_e = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    short_e = Decision(action=Action.ENTER_SHORT, confidence=0.8, rationale="x")
+    # Long: clears +0.05 -> fires; below or negative -> WAIT.
+    assert s(long_e, 0.09, 0.05).action == Action.ENTER_LONG     # +212 trade kept
+    assert s(long_e, 0.05, 0.05).action == Action.ENTER_LONG     # boundary inclusive
+    assert s(long_e, 0.021, 0.05).action == Action.WAIT          # -76 trade blocked
+    assert s(long_e, -0.072, 0.05).action == Action.WAIT         # -134 (negative-delta long)
+    # Short: clears -0.05 -> fires; above -> WAIT.
+    assert s(short_e, -0.09, 0.05).action == Action.ENTER_SHORT
+    assert s(short_e, -0.013, 0.05).action == Action.WAIT        # -148 trade blocked
+    # floor 0 disables the gate; exits are never gated.
+    assert s(long_e, -0.5, 0.0).action == Action.ENTER_LONG
+    assert s(Decision(action=Action.EXIT, confidence=0.9, rationale="e"),
+             0.0, 0.05).action == Action.EXIT
+    assert "delta" in s(long_e, 0.0, 0.05).rationale
