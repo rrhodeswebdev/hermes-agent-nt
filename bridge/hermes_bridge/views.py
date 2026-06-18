@@ -138,12 +138,17 @@ def authoring_view(st: AppState) -> dict | None:
 
 
 def dashboard_levels(st: AppState) -> dict | None:
-    """The agent's current swing support/resistance (from the last bar's context). Regime now
-    comes from structure, so there are no EMA lines to plot."""
+    """The last bar's swing support/resistance PLUS the multi-session reference levels
+    (prior-day H/L/C, overnight, opening-range, initial-balance, today H/L) so the chart/HUD
+    and `/levels.txt` can show them. Regime comes from structure, so there are no EMA lines."""
     lc = st.engine.last_context
     if lc is None:
         return None
-    return {"swing_high": lc.swing_high, "swing_low": lc.swing_low}
+    out: dict = {"swing_high": lc.swing_high, "swing_low": lc.swing_low}
+    levels = getattr(lc, "levels", None)  # real MarketContext always has it; test fakes may not
+    if levels:
+        out.update(levels)  # None values are dropped by the /levels.txt renderer
+    return out
 
 
 def agent_model(cfg: BridgeConfig) -> str:
