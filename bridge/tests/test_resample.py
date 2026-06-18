@@ -16,6 +16,7 @@ from hermes_bridge.risk import RiskGate
 from hermes_bridge.server import create_app
 from hermes_bridge.session import SessionState
 from hermes_bridge.store import BarStore
+from tests.conftest import synthetic_bars
 
 
 def _bar(ts, o, h, low, c, v=100.0, bid=None, ask=None):
@@ -271,3 +272,25 @@ def test_ingest_unchanged_when_not_engaged(cfg):
     _ingest(client, _bar(1781600040, 100, 100, 100, 100))
     assert len(st.store) == 1              # engine advanced directly, as today
     assert client.get("/dashboard").json()["timeframe"] == cfg.instrument.timeframe
+
+
+# ---- warm-restart pre-session study kick --------------------------------
+def test_warm_store_kicks_session_study_at_startup(cfg, tmp_path, monkeypatch):
+    # Pre-seed the bars.db so a fresh AppState loads a WARM decision store (a restart).
+    db = str(tmp_path / "bars.db")
+    BarStore("ES", "5m", db_path=db).replace_history(synthetic_bars(60))  # >= HISTORY_MIN_BARS
+    cfg.storage.bars_db = db
+    calls: list[int] = []
+    monkeypatch.setattr(
+        TradingEngine, "on_history", lambda self, bars: calls.append(len(bars)))
+    create_app(cfg)
+    assert calls == [60]                   # study kicked once at construction, off the NT8 push
+
+
+def test_cold_store_does_not_kick_session_study(cfg, monkeypatch):
+    # Default cfg: empty bars_db -> a thin/cold store; the NT8 /ingest/history push owns the kick.
+    calls: list[int] = []
+    monkeypatch.setattr(
+        TradingEngine, "on_history", lambda self, bars: calls.append(len(bars)))
+    create_app(cfg)
+    assert calls == []
