@@ -178,6 +178,30 @@ def test_replace_feed_history_rebuilds_decision_store():
     assert [b.ts for b in r.decision_store.all()] == [1781600040, 1781600160]
 
 
+# ---- live TF switch re-author signal ------------------------------------
+def test_take_switch_fires_once_on_live_flat_switch(monkeypatch):
+    monkeypatch.setattr(resample_mod, "session_for_ts", lambda ts: "ETH")
+    r = _resampler(decision_timeframe="auto")        # starts current_tf == "1m" (ETH)
+    assert r.take_switch() is False                  # nothing switched yet
+    for b in _feed_seq():                             # 1m passthrough, no switch
+        r.on_feed_bar(b, is_flat=True)
+    assert r.take_switch() is False
+    # RTH now wants 2m and we are flat -> live switch sets the flag
+    monkeypatch.setattr(resample_mod, "session_for_ts", lambda ts: "RTH")
+    r.on_feed_bar(_bar(1781600220, 104, 104, 104, 104), is_flat=True)
+    assert r.current_tf == "2m"
+    assert r.take_switch() is True                    # consumed on read
+    assert r.take_switch() is False                   # second call: already consumed
+
+
+def test_initial_rebuild_and_replace_feed_history_do_not_set_switch():
+    r = _resampler(decision_timeframe="2m")
+    r.initial_rebuild()
+    assert r.take_switch() is False                    # rebuild is not a live switch
+    r.replace_feed_history(_feed_seq())
+    assert r.take_switch() is False                    # bulk history load is not a live switch
+
+
 # ---- engine current decision-timeframe getter ---------------------------
 def _eng(cfg, decision_tf=None):
     return TradingEngine(
@@ -192,6 +216,15 @@ def test_engine_decision_tf_defaults_to_config(cfg):
 
 def test_engine_decision_tf_uses_injected_getter(cfg):
     assert _eng(cfg, decision_tf=lambda: "2m")._decision_tf() == "2m"
+
+
+def test_engine_reauthor_forces_session_study(cfg):
+    eng = _eng(cfg)
+    calls: list[dict] = []
+    eng._trigger_session_study = lambda bars, *, force, outcome: calls.append(
+        {"force": force, "outcome": outcome})
+    eng.reauthor(outcome="tf_switch")
+    assert calls == [{"force": True, "outcome": "tf_switch"}]
 
 
 # ---- server ingest routing (engaged vs not) -----------------------------

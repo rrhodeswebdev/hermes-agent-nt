@@ -93,6 +93,7 @@ class Resampler:
         # None => schedule by session; else a fixed override ("1m"/"2m"/...).
         self.override: str | None = None if decision_timeframe == "auto" else decision_timeframe
         self._accum: list[Bar] = []
+        self._switched = False
         self.current_tf: str = self.override or self.scheduled_tf(now_fn())
 
     def scheduled_tf(self, ts: float) -> str:
@@ -127,6 +128,7 @@ class Resampler:
             # rebuild already consumed `bar`, so surface the just-closed decision bar FROM the
             # rebuild instead of re-folding `bar` here (which would double-count it).
             self._switch_to(desired)
+            self._switched = True
             if self.current_tf == self.feed_tf:
                 return bar  # switched to passthrough; the feed bar is itself the decision bar
             last = self.decision_store.last()
@@ -139,6 +141,14 @@ class Resampler:
         """The timeframe a switch is waiting to apply (deferred until flat), else None."""
         desired = self.scheduled_tf(ts)
         return desired if desired != self.current_tf else None
+
+    def take_switch(self) -> bool:
+        """True exactly once after a live session TF switch (consumed on read), so the
+        server can re-author a fresh playbook for the new timeframe. initial_rebuild /
+        replace_feed_history must NOT set this — only a live on_feed_bar switch does."""
+        switched = self._switched
+        self._switched = False
+        return switched
 
     def _switch_to(self, tf: str) -> None:
         """Rebuild the decision store from the feed store at `tf`, carrying the trailing
