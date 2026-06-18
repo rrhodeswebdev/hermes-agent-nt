@@ -485,10 +485,12 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
             if st.resampler is not None:
                 # Aggregate the 1m feed into the decision timeframe. A forming (intra-decision)
                 # bar gets an instant WAIT — the engine only runs on a decision-bar close. Switch
-                # the timeframe only when flat (no position and no armed plan).
-                is_flat = st.session.position == 0 and (
-                    st.engine.planner is None or st.engine.planner.current_plan() is None)
+                # when flat (no open position); an armed plan is just resting triggers, and we
+                # re-author for the new TF on a switch (below).
+                is_flat = st.session.position == 0
                 decision_bar = st.resampler.on_feed_bar(payload.bar, is_flat=is_flat)
+                if st.resampler.take_switch():
+                    st.engine.reauthor(outcome="tf_switch")
                 if decision_bar is None:
                     d = Decision(action=Action.WAIT, rationale="resample:forming")
                     if len(st.store) < HISTORY_MIN_BARS:

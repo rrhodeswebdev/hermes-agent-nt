@@ -480,6 +480,12 @@ class TradingEngine:
               f"authored={s.authored_regime}/{s.authored_trend}", flush=True)
         self._trigger_session_study(self.store.all(), force=True, outcome=f"reauthor:{why}")
 
+    def reauthor(self, *, outcome: str) -> None:
+        """Force a fresh pre-session study + playbook from the current store (agent mode).
+        force=True keeps the old playbook trading until the new one lands (no WAIT gap).
+        Used on a resampler session/TF switch."""
+        self._trigger_session_study(self.store.all(), force=True, outcome=outcome)
+
     def _levels(self, bars: list[Bar]) -> list[Level]:
         lc = self.cfg.levels
         if not lc.enabled:
