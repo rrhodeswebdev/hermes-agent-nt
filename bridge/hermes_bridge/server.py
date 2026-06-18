@@ -148,6 +148,12 @@ class AppState:
             planner=self.planner, journal=self.journal, on_close=self._on_trade_closed,
             declines=self.declines,
             decision_tf=(lambda: self.resampler.current_tf) if self.resampler else None)
+        # Warm restart: the decision store was rebuilt from bars.db (resampler) or loaded from
+        # the persisted store, so NT8's need_history handshake won't fire and /ingest/history
+        # won't kick the pre-session study. Kick it here so the brain authors a playbook without
+        # a manual /control/reauthor. A cold start (thin store) still relies on the NT8 push.
+        if self.planner is not None and len(self.store) >= HISTORY_MIN_BARS:
+            self.engine.on_history(self.store.all())
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
