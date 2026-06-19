@@ -93,6 +93,21 @@ class StrategyParams(BaseModel):
     # in transitional the effective bar is the stricter of the two. 0.0 = off (the neutral
     # default). Exits and position management are never gated.
     transitional_delta_floor: float = Field(default=0.0, ge=0.0)
+    # ETH session-scale for BOTH delta floors above. ETH (overnight/extended) carries a fraction
+    # of RTH volume and a balanced-but-drifting tape: a genuine grind shows a persistent MILD
+    # imbalance (delta_ratio ~ -0.02..-0.04), rarely an RTH-sized spike past delta_floor. When a
+    # bar's session is ETH the effective floor becomes floor * eth_delta_scale (long needs
+    # delta_ratio >= +eff, short <= -eff). 1.0 = neutral (no ETH change — the default; replay /
+    # RTH are untouched). Set < 1 (e.g. 0.5) ONLY from a re-scored decline tape, and pair it with
+    # delta_sustain_bars so a lower bar isn't tripped by one mild bar. Exits are never gated.
+    eth_delta_scale: float = Field(default=1.0, gt=0.0)
+    # Sustained-delta confirmation — the "ETH grinds, it doesn't spike" lever. When > 0, a delta
+    # gate ALSO confirms if delta_ratio has held the trade direction's sign for this many
+    # CONSECUTIVE recent decision-bars: a persistent lean qualifies even when the current bar's
+    # magnitude is below the (session-scaled) spike floor. 0 = off (the neutral default — only the
+    # per-bar magnitude check applies). Relaxation only (it can let MORE entries through), so
+    # enable it WITH a calibrated eth_delta_scale and validate on tape. Exits are never gated.
+    delta_sustain_bars: int = Field(default=0, ge=0)
     # Temporal hysteresis on the mechanical regime/trend label. classify_regime is stateless
     # and can flip bar-to-bar on a single mixed pivot; that thrash drives needless re-authoring
     # and directional indecision. A NEW (regime, trend) read must persist this many CONSECUTIVE

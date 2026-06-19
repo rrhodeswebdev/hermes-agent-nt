@@ -67,7 +67,7 @@ Rules:
 
 MISSED_HEADER = """\
 NO TRADE CLOSED — this reflection was triggered because several DECLINED setups would
-have hit their target (counterfactual outcomes below). Check two things:
+have hit their target (counterfactual outcomes below). Check:
 (1) Is a learned LESSON over-blocking? If the pattern is clear, narrow it per the rules.
 (2) Is this a COVERAGE gap — would-win declines clustering as ONE setup type the playbook
 never armed (e.g. trend-CONTINUATION entries the pre-session study left out while a trend
@@ -78,6 +78,17 @@ trend day becomes a learned setup instead of a repeated miss.
 but price then reached its original target — an exit too tight / a shakeout. If several
 cluster, add a notes_append to give invalidations room beyond the noise and to discount
 delta on abnormally light-volume bars.
+(4) Each decline carries "suppressed_by" (the gate that blocked it: min_confidence |
+transitional | delta_floor), plus "delta_ratio" and "confidence" at decline. If would-win
+declines CLUSTER on ONE gate in ONE session (e.g. several delta_floor would-wins in ETH,
+whose tape grinds rather than spikes), name it in a notes_append: session + gate + the
+entry SHAPE that would pass (e.g. "in ETH grinds, favor continuation setups that confirm on
+a SUSTAINED delta lean, not a single-bar spike"). TEXT ONLY — never propose a numeric
+floor/config value; the operator calibrates those from the re-scored tape.
+CRITICAL: would-win declines are NOT free money. Weigh them against the would-LOSE declines
+in the SAME cluster — a gate that blocks a 25%-win chop cluster is doing its job, and
+narrowing it would re-admit the losers. Only flag a gate when its would-wins clearly and
+repeatedly DOMINATE its would-loses.
 Near-duplicate declines of the SAME move (similar price/time) count as ONE pattern, not
 several. If the declines look unrelated and thin, return an empty "lessons" array."""
 

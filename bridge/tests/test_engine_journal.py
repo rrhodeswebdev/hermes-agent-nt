@@ -157,3 +157,47 @@ def test_suppress_low_delta_gate():
     assert s(Decision(action=Action.EXIT, confidence=0.9, rationale="e"),
              0.0, 0.05).action == Action.EXIT
     assert "delta" in s(long_e, 0.0, 0.05).rationale
+
+
+def test_suppress_low_delta_session_scale_and_sustained():
+    """ETH scaffold (neutral by default): eth_scale lowers the floor in ETH only;
+    delta_sustain_bars confirms a sustained same-sign lean below the per-bar spike floor. The
+    3-arg legacy call and RTH are byte-for-byte unchanged (eth_scale 1.0, sustain 0)."""
+    s = TradingEngine._suppress_low_delta
+    long_e = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    short_e = Decision(action=Action.ENTER_SHORT, confidence=0.8, rationale="x")
+    # Neutral default (eth_scale 1.0): +0.03 is below the 0.05 floor -> WAIT, in any session.
+    assert s(long_e, 0.03, 0.05).action == Action.WAIT
+    assert s(long_e, 0.03, 0.05, session="ETH").action == Action.WAIT          # scale 1.0 = no-op
+    assert s(long_e, 0.03, 0.05, session="RTH").action == Action.WAIT
+    # ETH scale 0.5 -> effective floor 0.025: +0.03 clears in ETH, still blocked in RTH.
+    assert s(long_e, 0.03, 0.05, session="ETH", eth_scale=0.5).action == Action.ENTER_LONG
+    assert s(long_e, 0.03, 0.05, session="RTH", eth_scale=0.5).action == Action.WAIT
+    assert "0.025" in s(long_e, 0.0, 0.05, session="ETH", eth_scale=0.5).rationale
+    # Sustained: +0.01 is below 0.05, but 3 consecutive +sign bars confirm when sustain is on.
+    assert s(long_e, 0.01, 0.05, recent_signs=[1, 1, 1], sustain_bars=3).action == \
+        Action.ENTER_LONG
+    # A broken run (a wrong-sign bar inside the window) does NOT confirm.
+    assert s(long_e, 0.01, 0.05, recent_signs=[1, -1, 1], sustain_bars=3).action == Action.WAIT
+    # Too few signs for the window -> no sustained confirm.
+    assert s(long_e, 0.01, 0.05, recent_signs=[1, 1], sustain_bars=3).action == Action.WAIT
+    # Sustained off (0) -> spike-only: +0.01 stays blocked even with a clean sign run.
+    assert s(long_e, 0.01, 0.05, recent_signs=[1, 1, 1], sustain_bars=0).action == Action.WAIT
+    # Short mirrors: 3 consecutive -signs confirm a sub-floor short.
+    assert s(short_e, -0.01, 0.05, recent_signs=[-1, -1, -1], sustain_bars=3).action == \
+        Action.ENTER_SHORT
+
+
+def test_suppress_transitional_session_scale():
+    """The transitional delta floor rides the SAME scaffold: session-scaled + sustained-aware,
+    neutral by default (so the existing delta-conditional test is unaffected)."""
+    s = TradingEngine._suppress_transitional
+    long_e = Decision(action=Action.ENTER_LONG, confidence=0.8, rationale="x")
+    # floor 0.07; +0.05 is below it -> WAIT in RTH (scale 1.0).
+    assert s(long_e, "transitional", False, 0.05, 0.07, session="RTH").action == Action.WAIT
+    # ETH scale 0.5 -> effective 0.035: +0.05 now clears.
+    assert s(long_e, "transitional", False, 0.05, 0.07,
+             session="ETH", eth_scale=0.5).action == Action.ENTER_LONG
+    # Sustained run confirms a sub-floor transitional long.
+    assert s(long_e, "transitional", False, 0.01, 0.07,
+             recent_signs=[1, 1, 1], sustain_bars=3).action == Action.ENTER_LONG
