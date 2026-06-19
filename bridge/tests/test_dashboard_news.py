@@ -72,3 +72,25 @@ def test_panel_omits_news_when_disabled():
 # --- HTML ------------------------------------------------------------------ #
 def test_html_has_news_element():
     assert 'id="news"' in DASHBOARD_HTML and 'id="nstatus"' in DASHBOARD_HTML
+
+
+# --- entry-window posture (item 3) ----------------------------------------- #
+def test_panel_emits_entry_window():
+    d = _payload(CLEAR)
+    d["entry_window"] = "WIND_DOWN"
+    assert "entry_window=WIND_DOWN" in render_panel(d)
+
+
+def test_text_shows_entry_window():
+    d = _payload(CLEAR)
+    d["entry_window"] = "HALTED"
+    assert "entry: HALTED" in render_text(d)
+
+
+def test_panel_entry_window_blank_when_absent():
+    # No entry_window key (e.g. no bar yet) -> the key still emits, empty (dumb C# parser).
+    assert "entry_window=" in render_panel(_payload(CLEAR))
+
+
+def test_html_has_entry_window_pill():
+    assert 'id="ewin"' in DASHBOARD_HTML

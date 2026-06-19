@@ -204,6 +204,28 @@ def _et_minutes(ts: float) -> int:
     return et.hour * 60 + et.minute
 
 
+def entry_window_state(ts: float, *, halted: bool = False, news_blocked: bool = False) -> str:
+    """The brain's ENTRY posture on this bar, for the dashboard / HUD (DISPLAY ONLY — it does
+    not itself gate anything; the RiskGate + session state do the real gating). Priority high to
+    low so the most restrictive state always shows:
+
+    - HALTED: the daily goal/loss tripped (session.halted) — no new entries the rest of the day.
+    - NEWS: inside a major-news blackout (the RiskGate blocks entries; exits still allowed).
+    - WIND_DOWN: the final 30 min of RTH (15:30-16:00 ET) — entries are still allowed, but the
+      regular session is closing (the one legitimate stand-down window; standing down BEFORE it
+      is forbidden, see risk-management.md).
+    - OPEN: normal entry posture — RTH 09:30-15:30 ET, or any ETH (overnight) bar.
+
+    Surfacing this would have caught the brain's invented "13:30 ET hard gate" at a glance."""
+    if halted:
+        return "HALTED"
+    if news_blocked:
+        return "NEWS"
+    if session_for_ts(ts) == "RTH" and 930 <= _et_minutes(ts) < 960:  # 15:30-16:00 ET
+        return "WIND_DOWN"
+    return "OPEN"
+
+
 def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
     """The multi-hour structure a 200-bar context window cannot see: prior RTH day's
     high/low/close, the overnight (ETH) range since that close, today's RTH range, the

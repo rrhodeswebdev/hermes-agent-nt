@@ -15,6 +15,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .config import BridgeConfig, timeframe_seconds
+from .indicators import entry_window_state
 
 if TYPE_CHECKING:
     from .server import AppState
@@ -157,6 +158,7 @@ def build_dashboard_payload(st: AppState) -> dict:
     last = st.store.last()
     acct = st.session.account_state(mark_price=last.close if last else None)
     now = time.time()
+    news_status = st.news.status(now)
     # Snapshot the decisions ring under its lock — a bare list(deque) raises
     # "deque mutated during iteration" if /ingest/bar appends concurrently.
     with st.decisions_lock:
@@ -176,6 +178,13 @@ def build_dashboard_payload(st: AppState) -> dict:
         "timeframe": cfg.instrument.timeframe,
         "now": now,
         "last_bar": {"ts": last.ts, "close": last.close} if last else None,
+        # The brain's entry posture: OPEN / WIND_DOWN (last 30m RTH) / HALTED / NEWS. Display
+        # only — the RiskGate + session do the real gating; this just makes a stand-down state
+        # visible on the dashboard/HUD (a brain inventing its own cutoff is obvious at a glance).
+        "entry_window": entry_window_state(
+            last.ts, halted=st.session.halted,
+            news_blocked=bool(news_status.get("blackout_active")),
+        ) if last else None,
         # Age from the bar's server arrival time (true UTC), not bar.ts — the strategy may
         # stamp bar.ts in a different timezone, which would skew this readout.
         "data_age_seconds": (
@@ -197,5 +206,5 @@ def build_dashboard_payload(st: AppState) -> dict:
         "recent_decisions": list(reversed(recent)),
         "planner": st.planner.snapshot() if st.planner else None,
         "levels": dashboard_levels(st),
-        "news": st.news.status(now),
+        "news": news_status,
     }
