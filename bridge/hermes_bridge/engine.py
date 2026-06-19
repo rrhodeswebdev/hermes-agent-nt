@@ -44,6 +44,35 @@ from .store import BarStore
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
 
 
+def _delta_confirms(
+    action: Action,
+    delta_ratio: float,
+    floor: float,
+    recent_signs: tuple[int, ...] | list[int] = (),
+    sustain_bars: int = 0,
+) -> bool:
+    """Does order flow confirm an ENTRY's direction at ``floor``?
+
+    Two independent ways to confirm (either suffices):
+    - a SPIKE: the windowed ``delta_ratio`` clears the floor (long >= +floor, short <= -floor);
+    - a SUSTAINED lean (only when ``sustain_bars`` > 0): ``delta_ratio`` has held the direction's
+      sign for the last ``sustain_bars`` decision-bars — the persistent ETH grind a one-bar spike
+      test misses, qualifying even when this bar's magnitude is below the floor.
+
+    ``floor`` <= 0 always confirms (the gate is off). The sustained branch is a pure
+    sign-persistence test (no magnitude), so it only ever RELAXES the gate — enable it with a
+    calibrated floor, never alone."""
+    if floor <= 0.0:
+        return True
+    want = 1 if action == Action.ENTER_LONG else -1
+    spike_ok = delta_ratio >= floor if want > 0 else delta_ratio <= -floor
+    if spike_ok:
+        return True
+    if sustain_bars > 0 and len(recent_signs) >= sustain_bars:
+        return all(s == want for s in recent_signs[-sustain_bars:])
+    return False
+
+
 @dataclass(frozen=True)
 class EngineResult:
     decision: Decision
@@ -72,6 +101,14 @@ class PendingCounterfactual:
     filled: bool = False
     entry_price: float = 0.0
     fill_ts: float = 0.0
+    # Gate attribution (item 2A): which gate suppressed the matching entry on the decline bar
+    # ("min_confidence" | "transitional" | "delta_floor"; "" = this trigger did not match price
+    # that bar, a purely speculative replay), plus the order flow / authored confidence at
+    # decline. A would-win decline then becomes a precise "THIS gate cost a winner" signal that
+    # reflection (and a re-score tool) can cluster by gate + session, instead of a bare miss.
+    suppressed_by: str = ""
+    delta_ratio: float = 0.0
+    confidence: float = 0.0
 
 
 @dataclass
@@ -162,6 +199,9 @@ class TradingEngine:
         # same entry zone is recorded once, not every bar. See _record_missed_triggers.
         self.declines = declines
         self._cf_pending: list[PendingCounterfactual] = []
+        # Recent delta_ratio SIGNS (most recent last, bounded tail) for the sustained-delta gate
+        # (strategy.delta_sustain_bars). Appended once per bar; only the last N are ever read.
+        self._delta_signs: list[int] = []
 
     def _new_id(self) -> str:
         return f"{self.cfg.strategy_id}-{next(self._ids)}"
@@ -200,6 +240,10 @@ class TradingEngine:
         if (sregime, strend) != (ctx.regime, ctx.trend):
             ctx = replace(ctx, regime=sregime, trend=strend)
         self.last_context = ctx  # expose current regime / S/R to the dashboard
+        # Track the sign of the windowed delta for the sustained-delta gate (bounded tail).
+        self._delta_signs.append(
+            1 if ctx.delta_ratio > 0 else -1 if ctx.delta_ratio < 0 else 0)
+        del self._delta_signs[:-64]
         self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
         account = self.session.account_state(mark_price=bar.close)
         mode = "manage_position" if self.session.position != 0 else "seek_entry"
@@ -238,24 +282,42 @@ class TradingEngine:
             if forced is not None:
                 decision = forced
 
-        # Gate entries by minimum confidence (exits always honored).
+        # Gate entries (exits always honored). Capture WHICH gate first turns an ENTRY into a
+        # WAIT so the counterfactual record can later attribute a would-win to the exact gate
+        # that blocked it (item 2A). min_confidence first, then the two delta gates.
+        sp = self.cfg.strategy
+        suppressed_by = ""
         if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
-            if decision.confidence < self.cfg.strategy.min_confidence:
+            if decision.confidence < sp.min_confidence:
                 decision = Decision(action=Action.WAIT,
                                     rationale=f"low_confidence:{decision.confidence}")
+                suppressed_by = "min_confidence"
         # Stand down in an unclear/transitional regime (config-gated). With wait_in_transitional
         # ON this is a blanket WAIT; with it OFF and a transitional_delta_floor set, a
-        # transitional ENTRY is allowed only when order flow confirms at that stricter floor — so
-        # a brain that authored a setup can't fire it into chop, but a delta-confirmed breakout
-        # still goes. Exits/management pass through.
+        # transitional ENTRY is allowed only when order flow confirms at that (session-scaled)
+        # floor — so a brain that authored a setup can't fire it into chop, but a delta-confirmed
+        # breakout still goes. Exits/management pass through.
+        before = decision.action
         decision = self._suppress_transitional(
-            decision, ctx.regime, self.cfg.strategy.wait_in_transitional,
-            ctx.delta_ratio, self.cfg.strategy.transitional_delta_floor)
-        # Require order-flow confirmation: the armed plan trigger fires on a price band
-        # alone (plan.evaluate_plan is price-only), so the delta floor a setup specifies is
-        # enforced HERE — under both brains and the plan cycle. Exits/management pass through.
+            decision, ctx.regime, sp.wait_in_transitional,
+            ctx.delta_ratio, sp.transitional_delta_floor,
+            session=ctx.session, eth_scale=sp.eth_delta_scale,
+            recent_signs=self._delta_signs, sustain_bars=sp.delta_sustain_bars)
+        if not suppressed_by and before in (Action.ENTER_LONG, Action.ENTER_SHORT) and (
+                decision.action == Action.WAIT):
+            suppressed_by = "transitional"
+        # Require order-flow confirmation: the armed plan trigger fires on a price band alone
+        # (plan.evaluate_plan is price-only), so the (session-scaled, optionally sustained) delta
+        # floor a setup specifies is enforced HERE — under both brains and the plan cycle.
+        # Exits/management pass through.
+        before = decision.action
         decision = self._suppress_low_delta(
-            decision, ctx.delta_ratio, self.cfg.strategy.delta_floor)
+            decision, ctx.delta_ratio, sp.delta_floor,
+            session=ctx.session, eth_scale=sp.eth_delta_scale,
+            recent_signs=self._delta_signs, sustain_bars=sp.delta_sustain_bars)
+        if not suppressed_by and before in (Action.ENTER_LONG, Action.ENTER_SHORT) and (
+                decision.action == Action.WAIT):
+            suppressed_by = "delta_floor"
 
         if decision.action == Action.WAIT:
             self._remember_decline(candidate, bar)
@@ -301,7 +363,7 @@ class TradingEngine:
         # the next plan can assume the optimistic post-fill position of anything
         # queued this close. With a synchronous planner this arms before we return.
         if self.planner is not None:
-            self._record_missed_triggers(armed, bar, ctx, result)
+            self._record_missed_triggers(armed, bar, ctx, result, suppressed_by)
             self._schedule_followup(bar, ctx, bars, account, result)
         return result
 
@@ -309,6 +371,8 @@ class TradingEngine:
     def _suppress_transitional(
         decision: Decision, regime: str, enabled: bool,
         delta_ratio: float = 0.0, transitional_delta_floor: float = 0.0,
+        *, session: str = "", eth_scale: float = 1.0,
+        recent_signs: tuple[int, ...] | list[int] = (), sustain_bars: int = 0,
     ) -> Decision:
         """Gate ENTRIES in a 'transitional' regime (config-driven, three modes). Exits and
         position management are never gated; trending/ranging pass through untouched.
@@ -316,10 +380,10 @@ class TradingEngine:
         - enabled (wait_in_transitional) True  -> blanket WAIT (strictest belt; the legacy
           behavior, unchanged).
         - enabled False, transitional_delta_floor > 0 -> allow only if order flow confirms at
-          this STRICTER floor (long needs delta_ratio >= +floor, short <= -floor), else WAIT.
-          Transitional structure (mixed/breaking, or too few pivots yet) needs stronger proof a
-          breakout is real. Stacks above the global delta_floor (_suppress_low_delta): in
-          transitional the effective bar is the stricter of the two.
+          this STRICTER, session-scaled floor (a spike, or a sustained same-sign lean — see
+          _delta_confirms), else WAIT. Transitional structure (mixed/breaking, or too few pivots
+          yet) needs stronger proof a breakout is real. Stacks above the global delta_floor
+          (_suppress_low_delta): in transitional the effective bar is the stricter of the two.
         - enabled False, transitional_delta_floor 0 -> no transitional-specific gate.
         """
         if (regime != "transitional"
@@ -330,41 +394,40 @@ class TradingEngine:
                 action=Action.WAIT,
                 rationale=f"transitional_regime_wait (suppressed {decision.action.value})")
         if transitional_delta_floor > 0.0:
-            confirmed = (
-                delta_ratio >= transitional_delta_floor
-                if decision.action == Action.ENTER_LONG
-                else delta_ratio <= -transitional_delta_floor
-            )
-            if not confirmed:
+            floor = transitional_delta_floor * (eth_scale if session == "ETH" else 1.0)
+            if not _delta_confirms(
+                    decision.action, delta_ratio, floor, recent_signs, sustain_bars):
                 sign = "+" if decision.action == Action.ENTER_LONG else "-"
                 return Decision(
                     action=Action.WAIT,
                     rationale=(
                         f"transitional_delta_below_floor (delta={delta_ratio:+.3f} vs "
-                        f"{sign}{transitional_delta_floor:g}; "
-                        f"suppressed {decision.action.value})"))
+                        f"{sign}{floor:g}; suppressed {decision.action.value})"))
         return decision
 
     @staticmethod
-    def _suppress_low_delta(decision: Decision, delta_ratio: float, floor: float) -> Decision:
+    def _suppress_low_delta(
+        decision: Decision, delta_ratio: float, floor: float,
+        *, session: str = "", eth_scale: float = 1.0,
+        recent_signs: tuple[int, ...] | list[int] = (), sustain_bars: int = 0,
+    ) -> Decision:
         """Convert an ENTRY to WAIT when order-flow delta does not confirm the direction
-        (config-gated). The armed plan trigger fires on a price band alone, so the delta
-        floor a setup names is otherwise never enforced mechanically. Require
-        delta_ratio >= +floor for longs, <= -floor for shorts. floor <= 0 disables the gate
-        (the neutral default; also avoids suppressing replay/backtests with no order-flow
-        data). Exits and position management are never gated."""
+        (config-gated). The armed plan trigger fires on a price band alone, so the delta floor
+        a setup names is otherwise never enforced mechanically. Confirmation is a spike
+        (delta_ratio >= +floor long / <= -floor short) OR, when sustain_bars > 0, a sustained
+        same-sign lean (see _delta_confirms). The floor is session-scaled: in ETH it becomes
+        floor * eth_scale (a lighter, balanced tape rarely spikes to an RTH-sized floor). floor
+        <= 0 disables the gate (the neutral default; also avoids suppressing replay/backtests
+        with no order-flow data). Exits and position management are never gated."""
         if floor <= 0.0 or decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT):
             return decision
-        confirmed = (
-            delta_ratio >= floor if decision.action == Action.ENTER_LONG
-            else delta_ratio <= -floor
-        )
-        if confirmed:
+        eff = floor * (eth_scale if session == "ETH" else 1.0)
+        if _delta_confirms(decision.action, delta_ratio, eff, recent_signs, sustain_bars):
             return decision
         sign = "+" if decision.action == Action.ENTER_LONG else "-"
         return Decision(
             action=Action.WAIT,
-            rationale=f"delta_below_floor (delta={delta_ratio:+.3f} vs {sign}{floor:g}; "
+            rationale=f"delta_below_floor (delta={delta_ratio:+.3f} vs {sign}{eff:g}; "
                       f"suppressed {decision.action.value})")
 
     # ---- pre-armed plan cycle -------------------------------------------------
@@ -549,6 +612,11 @@ class TradingEngine:
                 "stop_price": round(p.stop_price, 4),
                 "target_price": round(p.target_price, 4),
                 "regime": p.regime, "rationale": p.rationale,
+                # Gate attribution (item 2A): which gate blocked it + the order flow / confidence
+                # at decline, so a would-win can be clustered by gate + session for reflection.
+                "suppressed_by": p.suppressed_by,
+                "delta_ratio": round(p.delta_ratio, 4),
+                "confidence": round(p.confidence, 3),
                 # Full timeline so the outcome can be re-verified later without guessing
                 # the anchor: born_ts = the bar it was declined on (replay starts here),
                 # fill_ts = when the limit was touched (None if never filled), resolved_ts
@@ -588,7 +656,8 @@ class TradingEngine:
         return "no_resolution" if p.bars_left <= 0 else None
 
     def _record_missed_triggers(self, plan: TradePlan | None, bar: Bar,
-                                ctx: MarketContext, result: EngineResult) -> None:
+                                ctx: MarketContext, result: EngineResult,
+                                suppressed_by: str = "") -> None:
         """Record (deduped) the entry triggers the brain armed but did NOT fire this close,
         so the replay can later score whether declining them was right. Gated off by default
         (learning.counterfactuals_enabled). The trunk re-arms a plan every bar, so the dedup
@@ -634,6 +703,11 @@ class TradingEngine:
                 stop_price=stop_price, target_price=target_price, born_ts=bar.ts,
                 bars_left=self.cfg.learning.counterfactual_horizon_bars,
                 rationale=t.rationale or plan.rationale, regime=ctx.regime,
+                # Attribute the blocking gate only to the trigger that actually matched price
+                # this bar (the one evaluate_plan turned into the suppressed ENTRY); the others
+                # are speculative replays that simply never triggered.
+                suppressed_by=suppressed_by if t.matches(bar.close) else "",
+                delta_ratio=ctx.delta_ratio, confidence=t.confidence,
             ))
 
     def _record_exit_replay(self, trade: ClosedTrade) -> None:

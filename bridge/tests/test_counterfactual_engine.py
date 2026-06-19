@@ -228,3 +228,42 @@ def test_record_exit_replay_gating(tmp_path):
     assert len(eng._cf_pending) == 1
     p = eng._cf_pending[0]
     assert p.kind == "early_exit" and p.target_price == 4010.0 and p.filled
+
+
+# ---- gate attribution (item 2A): record WHICH gate blocked a would-win + the flow/conf ----
+
+def test_decline_record_attributes_blocking_gate(tmp_path):
+    """A blocked setup records WHICH gate stopped it + the delta_ratio/confidence at decline,
+    so reflection can cluster 'this gate cost a winner' by gate + session instead of guessing.
+    Here a low-confidence trigger is blocked by the min_confidence gate (default 0.55), then
+    replays to a would_win — the persisted record must carry that attribution."""
+    eng, t = _cf_engine(tmp_path)
+    # Same band as _long_plan, but authored at confidence 0.2 — below the 0.55 floor.
+    eng.planner._plan = TradePlan(
+        mode="seek_entry", based_on_bar_ts=t,
+        triggers=[EntryTrigger(direction="long", min_close=3990.0, max_close=3995.0,
+                               qty=1, stop_ticks=16, target_ticks=24, confidence=0.2,
+                               rationale="low-conf pullback")])
+    eng.on_bar(make_bar(t + 300, 3993, 3996, 3990, 3993))  # close in band -> ENTER, conf 0.2 < 0.55
+    p = eng._cf_pending[0]
+    assert p.suppressed_by == "min_confidence"
+    assert p.confidence == 0.2
+    eng.on_bar(make_bar(t + 600, 3994, 3998, 3993, 3996))  # low 3993 <= limit 3995 -> fill
+    eng.on_bar(make_bar(t + 900, 3997, 4002, 3997, 3998))  # high 4002 >= target 4001 -> would_win
+    rec = eng.declines.all()[-1]
+    assert rec["outcome"] == "would_win"
+    assert rec["suppressed_by"] == "min_confidence"
+    assert rec["confidence"] == 0.2
+    assert "delta_ratio" in rec
+
+
+def test_unblocked_speculative_replay_has_no_gate(tmp_path):
+    """A trigger whose price band the bar never reached is a speculative replay, not a
+    gate-block: its record carries suppressed_by == '' (only the matched, suppressed trigger
+    is attributed)."""
+    eng, t = _cf_engine(tmp_path, horizon=2)                # _long_plan, confidence 0.8 (passes)
+    eng.on_bar(make_bar(t + 300, 4005, 4006, 4004, 4005))   # close above band -> not triggered
+    assert eng._cf_pending[0].suppressed_by == ""
+    eng.on_bar(make_bar(t + 600, 4005, 4006, 3998, 4005))   # no touch; 2 -> 1
+    eng.on_bar(make_bar(t + 900, 4005, 4006, 3998, 4005))   # 1 -> 0 -> never_filled
+    assert eng.declines.all()[-1]["suppressed_by"] == ""
