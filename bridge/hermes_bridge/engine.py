@@ -243,7 +243,10 @@ class TradingEngine:
         # Track the sign of the windowed delta for the sustained-delta gate (bounded tail).
         self._delta_signs.append(
             1 if ctx.delta_ratio > 0 else -1 if ctx.delta_ratio < 0 else 0)
-        del self._delta_signs[:-64]
+        # Keep at least delta_sustain_bars (floor 64), else a wide sustain window can never
+        # satisfy the len(recent_signs) >= sustain_bars guard in _delta_confirms.
+        keep = max(64, self.cfg.strategy.delta_sustain_bars)
+        del self._delta_signs[:-keep]
         self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
         account = self.session.account_state(mark_price=bar.close)
         mode = "manage_position" if self.session.position != 0 else "seek_entry"
