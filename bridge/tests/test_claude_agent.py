@@ -1,6 +1,7 @@
 import json
 import subprocess
 
+from hermes_bridge.brain_health import DOWN, OK, THROTTLED, TRANSIENT
 from hermes_bridge.claude_agent import ClaudeAgentClient
 from hermes_bridge.models import Action
 from tests.conftest import make_agent_request, make_claude_client
@@ -57,6 +58,47 @@ def test_decide_failsafe_on_timeout(fake_claude):
     d = c.decide(make_agent_request(c.cfg))
     assert d.action is Action.WAIT
     assert d.rationale.startswith("claude_error:")
+
+
+def test_brain_health_starts_ok():
+    assert make_claude_client().brain_health() == OK
+
+
+def test_timeout_is_transient_brain_health(fake_claude):
+    fake_claude(exc=subprocess.TimeoutExpired(["claude"], 1))
+    c = make_claude_client()
+    c.decide(make_agent_request(c.cfg))
+    assert c.brain_health() == TRANSIENT
+
+
+def test_auth_failure_is_down_and_surfaced(fake_claude):
+    # A non-zero exit with an auth stderr → RuntimeError inside run_claude_oneshot.
+    fake_claude(returncode=1, stderr="Invalid API key · Please run /login")
+    c = make_claude_client()
+    d = c.decide(make_agent_request(c.cfg))
+    assert d.action is Action.WAIT
+    assert d.rationale.startswith("brain_down:")  # distinct from a cautious WAIT
+    assert c.brain_health() == DOWN
+
+
+def test_usage_limit_is_throttled(fake_claude):
+    fake_claude(returncode=1,
+                stderr="Claude usage limit reached. Your limit will reset at 3pm")
+    c = make_claude_client()
+    d = c.decide(make_agent_request(c.cfg))
+    assert d.rationale.startswith("brain_throttled:")
+    assert c.brain_health() == THROTTLED
+
+
+def test_brain_health_recovers_to_ok_after_a_good_call(fake_claude):
+    c = make_claude_client()
+    fake_claude(returncode=1, stderr="Invalid API key · Please run /login")
+    c.decide(make_agent_request(c.cfg))
+    assert c.brain_health() == DOWN
+    # A later successful decision clears the status — the brain is back.
+    fake_claude(stdout=json.dumps({"is_error": False, "result": {"action": "WAIT"}}))
+    c.decide(make_agent_request(c.cfg))
+    assert c.brain_health() == OK
 
 
 def test_build_agent_client_returns_claude():

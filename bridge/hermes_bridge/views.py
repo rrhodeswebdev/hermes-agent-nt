@@ -166,6 +166,10 @@ def build_dashboard_payload(st: AppState) -> dict:
     return {
         "agent": cfg.agent.client,
         "brain": st.engine.agent.describe(),
+        # Health of the last real brain call: OK / TRANSIENT / THROTTLED / DOWN. Display only —
+        # the WAIT fail-safe still protects trading; this just makes an outage (re-auth) or a
+        # subscription cap visible instead of looking identical to a cautious WAIT.
+        "brain_status": st.engine.agent.brain_health(),
         "model": agent_model(cfg),
         "strategy_id": cfg.strategy_id,
         "strategy_source": st.effective_strategy_source(),
