@@ -60,6 +60,13 @@ class AgentClient(ABC):
         """Short brain label for the dashboard header (model name or "rules")."""
         return type(self).__name__
 
+    def brain_health(self) -> str:
+        """Operator-facing brain status for the dashboard: OK / TRANSIENT / THROTTLED / DOWN
+        (see brain_health.py). Base clients (mock/rules) never fail a brain call — they are
+        deterministic and need no subscription — so they are always OK. Overridden by
+        ClaudeAgentClient, which tracks the last real `claude` CLI outcome."""
+        return "OK"
+
     # ---- strategy source (custom vs agent-authored) -------------------------
     def set_strategy_source(self, source: str) -> None:
         """Switch the playbook source at runtime. ``source`` is "custom" or "agent";

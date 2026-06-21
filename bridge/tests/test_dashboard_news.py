@@ -94,3 +94,32 @@ def test_panel_entry_window_blank_when_absent():
 
 def test_html_has_entry_window_pill():
     assert 'id="ewin"' in DASHBOARD_HTML
+
+
+# --- brain health (DOWN / THROTTLED visible at a glance) -------------------- #
+def test_panel_emits_brain_status():
+    d = _payload(CLEAR)
+    d["brain_status"] = "DOWN"
+    assert "brain_status=DOWN" in render_panel(d)
+
+
+def test_panel_brain_status_blank_when_absent():
+    # Key always emits (dumb C# parser), empty when there is no status yet.
+    assert "brain_status=" in render_panel(_payload(CLEAR))
+
+
+def test_text_shows_brain_status_when_not_ok():
+    d = _payload(CLEAR)
+    d["brain_status"] = "THROTTLED"
+    assert "brain: THROTTLED" in render_text(d)
+
+
+def test_text_omits_brain_status_when_ok():
+    # A healthy brain is the common case — don't clutter the panel with "brain: OK".
+    d = _payload(CLEAR)
+    d["brain_status"] = "OK"
+    assert "brain:" not in render_text(d)
+
+
+def test_html_has_brain_status_pill():
+    assert 'id="bhealth"' in DASHBOARD_HTML
