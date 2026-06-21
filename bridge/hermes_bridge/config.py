@@ -166,6 +166,13 @@ class RiskParams(BaseModel):
     full_size_confidence: float = Field(  # confidence at/above which the full budget is used
         default=0.85, ge=0.0, le=1.0
     )
+    # Exchange holiday / early-close protection. On a full US market holiday (all day) or a
+    # futures early-close half day (13:00 ET), flatten any open position once within this many
+    # minutes of the close and take no new entries for the rest of that session — so a position
+    # can't carry the holiday/weekend gap (15 -> 12:45 ET, matching the manual practice).
+    # Deterministic + server-side (same authority as the daily-goal flatten). <= 0 disables it.
+    # See market_calendar; the entry-window pill shows CLOSED / WIND_DOWN accordingly.
+    early_close_flat_lead_min: int = 15
 
 
 class DailyGoal(BaseModel):
