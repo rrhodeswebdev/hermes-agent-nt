@@ -206,22 +206,35 @@ def _et_minutes(ts: float) -> int:
 
 def entry_window_state(ts: float, *, halted: bool = False, news_blocked: bool = False) -> str:
     """The brain's ENTRY posture on this bar, for the dashboard / HUD (DISPLAY ONLY — it does
-    not itself gate anything; the RiskGate + session state do the real gating). Priority high to
-    low so the most restrictive state always shows:
+    not itself gate anything; the RiskGate + session state + the engine's calendar flatten do
+    the real gating). Priority high to low so the most restrictive state always shows:
 
     - HALTED: the daily goal/loss tripped (session.halted) — no new entries the rest of the day.
     - NEWS: inside a major-news blackout (the RiskGate blocks entries; exits still allowed).
-    - WIND_DOWN: the final 30 min of RTH (15:30-16:00 ET) — entries are still allowed, but the
-      regular session is closing (the one legitimate stand-down window; standing down BEFORE it
-      is forbidden, see risk-management.md).
-    - OPEN: normal entry posture — RTH 09:30-15:30 ET, or any ETH (overnight) bar.
+    - CLOSED: a full market holiday (all day), or an early-close half day AFTER its 13:00 ET
+      close — the market is shut, so there is nothing to trade (see market_calendar).
+    - WIND_DOWN: the final 30 min before the close — 15:30-16:00 ET normally, or 12:30-13:00 ET
+      on an early-close day. Entries are still allowed, but the session is closing (the one
+      legitimate stand-down window; standing down BEFORE it is forbidden, see risk-management.md).
+    - OPEN: normal entry posture — RTH up to the wind-down, or any ETH (overnight) bar.
 
-    Surfacing this would have caught the brain's invented "13:30 ET hard gate" at a glance."""
+    Surfacing this would have caught the brain's invented "13:30 ET hard gate" at a glance, and
+    now makes a holiday / early-close stand-down visible instead of a silent dead session."""
+    from .market_calendar import early_close_minute, holiday_name  # lazy: break import cycle
+
     if halted:
         return "HALTED"
     if news_blocked:
         return "NEWS"
-    if session_for_ts(ts) == "RTH" and 930 <= _et_minutes(ts) < 960:  # 15:30-16:00 ET
+    if holiday_name(ts) is not None:
+        return "CLOSED"
+    mins = _et_minutes(ts)
+    ec = early_close_minute(ts)
+    if ec is not None:  # early-close half day: wind down then CLOSED, around the real close
+        if mins >= ec:
+            return "CLOSED"
+        return "WIND_DOWN" if mins >= ec - 30 else "OPEN"
+    if session_for_ts(ts) == "RTH" and 930 <= mins < 960:  # 15:30-16:00 ET
         return "WIND_DOWN"
     return "OPEN"
 

@@ -23,6 +23,7 @@ from .config import BridgeConfig, effective_entry_freshness_s, timeframe_seconds
 from .indicators import MarketContext, atr, build_context
 from .journal import ClosedTrade, DeclineLog, JournalStore, TradeTracker
 from .levels import detect_levels
+from .market_calendar import closing_reason, within_close_cutoff
 from .models import (
     AccountState,
     Action,
@@ -234,6 +235,22 @@ class TradingEngine:
                 Decision(action=Action.FLATTEN, rationale=cmd.reason),
                 rd.command, "halt_flatten", rd.reasons,
             )
+
+        # Stand down for exchange holidays / early closes: flatten any open position ahead of
+        # the close so it can't carry the holiday/weekend gap, and take no new entries for the
+        # rest of that session. Deterministic + server-side (same authority as the halt flatten
+        # above), never the brain. Display mirrors this via indicators.entry_window_state.
+        if within_close_cutoff(bar.ts, self.cfg.risk.early_close_flat_lead_min):
+            reason = closing_reason(bar.ts) or "early_close"
+            if self.session.position != 0:
+                cmd = self.flatten_command(reason)
+                rd = self.risk.evaluate(cmd, self.session, last_price=bar.close, now_ts=bar.ts)
+                return EngineResult(
+                    Decision(action=Action.FLATTEN, rationale=reason),
+                    rd.command, "calendar_flatten", rd.reasons,
+                )
+            return EngineResult(
+                Decision(action=Action.WAIT, rationale=reason), None, "calendar_closed")
 
         bars = self.store.recent(_CONTEXT_WINDOW)
         ctx = build_context(

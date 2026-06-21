@@ -47,21 +47,43 @@ def test_context_exposes_session_and_delta_ratio():
 
 
 def test_entry_window_state():
-    """OPEN / WIND_DOWN (final 30m RTH) / HALTED / NEWS, with the right priority. 2026-06-19 is a
-    Friday; June -> EDT (UTC-4), so RTH 09:30-16:00 ET == 13:30-20:00 UTC."""
+    """OPEN / WIND_DOWN (final 30m RTH) / HALTED / NEWS, with the right priority. 2026-06-12 is a
+    normal Friday (NOT 06-19 — that is now Juneteenth); June -> EDT (UTC-4), so RTH 09:30-16:00
+    ET == 13:30-20:00 UTC."""
     ew = entry_window_state
-    open_rth = _utc_epoch(2026, 6, 19, 16, 0)        # 12:00 ET — normal RTH
-    wind = _utc_epoch(2026, 6, 19, 19, 45)           # 15:45 ET — final 30 min
-    eth = _utc_epoch(2026, 6, 19, 7, 0)              # 03:00 ET — overnight
+    open_rth = _utc_epoch(2026, 6, 12, 16, 0)        # 12:00 ET — normal RTH
+    wind = _utc_epoch(2026, 6, 12, 19, 45)           # 15:45 ET — final 30 min
+    eth = _utc_epoch(2026, 6, 12, 7, 0)              # 03:00 ET — overnight
     assert ew(open_rth) == "OPEN"
     assert ew(eth) == "OPEN"                          # ETH counts as OPEN (entries allowed)
     assert ew(wind) == "WIND_DOWN"
     # Boundaries: 15:30 ET inclusive; 16:00 ET is no longer RTH (-> ETH -> OPEN).
-    assert ew(_utc_epoch(2026, 6, 19, 19, 30)) == "WIND_DOWN"   # 15:30 ET
-    assert ew(_utc_epoch(2026, 6, 19, 19, 29)) == "OPEN"        # 15:29 ET still open
-    assert ew(_utc_epoch(2026, 6, 19, 20, 0)) == "OPEN"         # 16:00 ET -> ETH
+    assert ew(_utc_epoch(2026, 6, 12, 19, 30)) == "WIND_DOWN"   # 15:30 ET
+    assert ew(_utc_epoch(2026, 6, 12, 19, 29)) == "OPEN"        # 15:29 ET still open
+    assert ew(_utc_epoch(2026, 6, 12, 20, 0)) == "OPEN"         # 16:00 ET -> ETH
     # Halt + news override the time phase; halt outranks news.
     assert ew(wind, halted=True) == "HALTED"
     assert ew(wind, news_blocked=True) == "NEWS"
     assert ew(open_rth, news_blocked=True) == "NEWS"
     assert ew(open_rth, halted=True, news_blocked=True) == "HALTED"
+
+
+def test_entry_window_closed_on_a_full_holiday():
+    """A full market holiday is CLOSED all day (2026-06-19 = Juneteenth). HALTED/NEWS still
+    outrank it so an operator stop is never masked by the calendar."""
+    ew = entry_window_state
+    assert ew(_utc_epoch(2026, 6, 19, 16, 0)) == "CLOSED"   # 12:00 ET
+    assert ew(_utc_epoch(2026, 6, 19, 7, 0)) == "CLOSED"    # 03:00 ET — closed all day
+    assert ew(_utc_epoch(2026, 6, 19, 16, 0), halted=True) == "HALTED"
+    assert ew(_utc_epoch(2026, 6, 19, 16, 0), news_blocked=True) == "NEWS"
+
+
+def test_entry_window_early_close_winds_down_before_13_00():
+    """An early-close half day winds down in the 30 min before 13:00 ET and is CLOSED after
+    (2026-11-27 = Black Friday; Nov -> EST (UTC-5))."""
+    ew = entry_window_state
+    assert ew(_utc_epoch(2026, 11, 27, 16, 0)) == "OPEN"        # 11:00 ET — tradeable morning
+    assert ew(_utc_epoch(2026, 11, 27, 17, 29)) == "OPEN"       # 12:29 ET — still open
+    assert ew(_utc_epoch(2026, 11, 27, 17, 30)) == "WIND_DOWN"  # 12:30 ET — final 30 min
+    assert ew(_utc_epoch(2026, 11, 27, 17, 59)) == "WIND_DOWN"  # 12:59 ET
+    assert ew(_utc_epoch(2026, 11, 27, 18, 0)) == "CLOSED"      # 13:00 ET — closed
