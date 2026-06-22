@@ -257,6 +257,26 @@ def test_decline_record_attributes_blocking_gate(tmp_path):
     assert "delta_ratio" in rec
 
 
+def test_decline_record_carries_sustained_delta_inputs(tmp_path):
+    """The decline record stamps the sustained-delta gate's EXACT inputs — the trailing
+    windowed-delta signs and the session — captured at the decline bar, so a future rescore of
+    the sustained branch reads them off the record instead of reconstructing delta from bars.db
+    (whose history-backfill bars carry no bid/ask)."""
+    eng, t = _cf_engine(tmp_path)
+    eng.on_bar(make_bar(t + 300, 4005, 4006, 4004, 4005))   # close above band -> record
+    p = eng._cf_pending[0]
+    # the snapshot is the engine's live trailing-sign window at the decline bar
+    assert p.delta_signs == tuple(eng._delta_signs[-16:])
+    assert p.delta_signs and all(s in (-1, 0, 1) for s in p.delta_signs)
+    assert isinstance(p.session, str) and p.session
+    # ...and it survives unchanged into the persisted record
+    eng.on_bar(make_bar(t + 600, 3997, 3998, 3994, 3996))   # fill
+    eng.on_bar(make_bar(t + 900, 3997, 4002, 3997, 3998))   # resolve would_win
+    rec = eng.declines.all()[-1]
+    assert rec["delta_signs"] == list(p.delta_signs)
+    assert rec["session"] == p.session
+
+
 def test_unblocked_speculative_replay_has_no_gate(tmp_path):
     """A trigger whose price band the bar never reached is a speculative replay, not a
     gate-block: its record carries suppressed_by == '' (only the matched, suppressed trigger
