@@ -199,6 +199,12 @@ dashboard shows is exactly the strategy you trade. Reply with one JSON object:
       the actual level or trigger when you can (e.g. "Fade 29025 Rejection", "Reclaim-and-go
       above 28960", "Lower-High Short into 28990"). Avoid generic textbook labels like
       "Trend Pullback" or "Range Fade" unless that genuinely and uniquely describes it.
+      Any DISTANCE/PROXIMITY word in the name or summary (shallow/deep, near/far, first/quick,
+      reclaim/breakout/fade) MUST match the trigger's distance from the CURRENT price: call a
+      pullback "shallow"/"at-price" ONLY when its entry is within ~1x ATR of the last close —
+      otherwise name it for what it is (e.g. "Deep Pullback Long to 30571", "Dip-Buy 30571
+      Shelf"). The name and summary must never contradict the entry conditions or the trigger's
+      location relative to price (a "shallow pullback" armed 75 pts below price is wrong).
       This EXACT name is how you will later tag the trigger that fires (a plan's per-trigger
       "setup"), so the dashboard can show the setup actually being traded.
     - "regime": exactly one of "trending", "ranging", "transitional" — the regime this setup
