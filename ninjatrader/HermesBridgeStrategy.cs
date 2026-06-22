@@ -1281,11 +1281,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             object wv = Activator.CreateInstance(wvType);
+            // RasterizationScale + ShouldDetectMonitorScaleChanges live on the CoreWebView2Controller
+            // (NOT the WPF control), and the controller is null until async init completes — so the
+            // scale is pinned after Show(), below. The control otherwise picks a wrong scale on this
+            // box and renders the page at ~60% (small text + white margins) even though the control
+            // itself fills (confirmed: wv=1165x783 in a 1180x820 window). ZoomFactor IS on the WPF
+            // control, so keep it neutral here.
+            try { var zfp0 = wvType.GetProperty("ZoomFactor"); if (zfp0 != null) zfp0.SetValue(wv, 1.0, null); } catch { }
             PropertyInfo srcProp = wvType.GetProperty("Source");
             if (srcProp == null) return false;
             srcProp.SetValue(wv, new Uri(url), null);   // setting Source triggers implicit init
 
-            var win = CreateDashboardWindow();
+            // Plain WPF window: an NTWindow measures its content with an UNBOUNDED size, which
+            // collapses an embedded WebView2 (it reports a small fixed default desired size and
+            // never auto-sizes to its HTML) and leaves most of the window grey. A plain Window
+            // measures content against its finite client area, so the WebView2 fills. We trade
+            // NT's themed title bar for a dashboard that actually fills. (#dash-fill)
+            var win = new System.Windows.Window();
             win.Title = "Hermes Dashboard";
             // NTWindow labels its chrome via a "Caption" property (not Window.Title) — set it
             // when present so the NT-themed title bar reads correctly. Reflection: NTWindow is
@@ -1299,9 +1311,38 @@ namespace NinjaTrader.NinjaScript.Strategies
             catch { }
             win.Width = 1180;
             win.Height = 820;
-            win.Content = (System.Windows.UIElement)wv;
+            win.SizeToContent = System.Windows.SizeToContent.Manual;
+            win.Content = (System.Windows.UIElement)wv;   // plain Window stretches content to fill
             win.Closed += delegate { _dashWin = null; };
             win.Show();
+            // Pin RasterizationScale once async init creates the controller (see note above). Poll
+            // on the UI dispatcher because the controller is null until CoreWebView2 finishes init.
+            PropertyInfo ctrlProp = wvType.GetProperty("CoreWebView2Controller");
+            var scaleTimer = new System.Windows.Threading.DispatcherTimer();
+            scaleTimer.Interval = TimeSpan.FromMilliseconds(120);
+            int scaleTicks = 0;
+            scaleTimer.Tick += delegate
+            {
+                scaleTicks++;
+                object ctrl = null;
+                try { if (ctrlProp != null) ctrl = ctrlProp.GetValue(wv, null); } catch { }
+                if (ctrl != null)
+                {
+                    double before = -1;
+                    try
+                    {
+                        var rp = ctrl.GetType().GetProperty("RasterizationScale");
+                        if (rp != null) { before = (double)rp.GetValue(ctrl, null); rp.SetValue(ctrl, 1.0, null); }
+                        var sp = ctrl.GetType().GetProperty("ShouldDetectMonitorScaleChanges");
+                        if (sp != null) sp.SetValue(ctrl, false, null);
+                    }
+                    catch { }
+                    Print(string.Format("[HermesDashboard] controller RasterizationScale was {0:0.###}, pinned to 1.0", before));
+                    scaleTimer.Stop();
+                }
+                else if (scaleTicks > 80) { scaleTimer.Stop(); }   // ~10s guard
+            };
+            scaleTimer.Start();
             _dashWin = win;
             return true;
         }
