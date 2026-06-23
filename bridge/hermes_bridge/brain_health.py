@@ -22,6 +22,7 @@ OK = "OK"                # the brain answered
 TRANSIENT = "TRANSIENT"  # a timeout / overload / transport blip — expected to self-recover
 THROTTLED = "THROTTLED"  # subscription usage / rate cap hit — paused until it resets
 DOWN = "DOWN"            # terminal — see note above; surfaced loudly so re-auth is obvious
+MOCK = "MOCK"            # Claude dead across all models, sustained -> mock rules engine trades
 
 # Substrings (matched case-insensitively in the CLI stderr / error text) that mark a TERMINAL
 # failure: the operator must re-authenticate or fix the invocation. Kept specific — a false

@@ -224,6 +224,10 @@ class ClaudeClientConfig(BaseModel):
     # past the plan budget. None = never recycle.
     max_session_turns: int | None = 40
     extra_args: list[str] = Field(default_factory=list)  # appended verbatim to the claude argv
+    # Per-model overload fallback: appended verbatim as `--fallback-model <csv>` to the claude
+    # argv (one-shot AND persistent). A per-model 529/overload routes down the list inside one
+    # CLI call. [] = off (the neutral default; today's behavior). Live: ["sonnet", "haiku"].
+    fallback_models: list[str] = Field(default_factory=list)
     # Directory of *.md context files loaded verbatim into the system prompt (this is
     # how the agent learns the strategy/order-flow/risk/goal). Absolute or relative to CWD.
     context_dir: str = "hermes/context"
@@ -232,6 +236,20 @@ class ClaudeClientConfig(BaseModel):
         "You are a disciplined futures day-trader. Trade a trend-pullback strategy "
         "with order-flow confirmation, ATR brackets, and strict risk limits."
     )
+
+
+class ResilienceConfig(BaseModel):
+    """Brain-outage resilience for the Claude client (see the heartbeat design spec).
+
+    `enabled` wraps the Claude client in `ResilientBrain` (heartbeat + model-fallback +
+    auto-recover + loud status). `mock_fallback_enabled` separately gates the Tier-2 escalation
+    that trades on the deterministic mock engine once Claude is confirmed dead across all models
+    for a SUSTAINED window (both thresholds must be met). All neutral/off by default."""
+
+    enabled: bool = False
+    mock_fallback_enabled: bool = False
+    mock_after_consecutive_failures: int = Field(default=3, ge=1)
+    mock_after_seconds_down: float = Field(default=300.0, gt=0)
 
 
 class AgentConfig(BaseModel):
@@ -247,6 +265,7 @@ class AgentConfig(BaseModel):
     prefilter_dedup_bars: int = 5
     prefilter_dedup_atr: float = 0.5
     claude: ClaudeClientConfig = Field(default_factory=ClaudeClientConfig)
+    resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
 
 
 class PlannerConfig(BaseModel):
