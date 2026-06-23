@@ -60,12 +60,22 @@ class ResilientBrain(AgentClient):
         return self._mock.analyze_session(preq, history) if self._state == MOCK else ""
 
     def _on_result(self, failed: bool, status: str) -> None:
-        # Placeholder until Task 4: only the HEALTHY path so Task 3's tests pass.
         if not failed:
             self._state = HEALTHY
             self._consec = 0
             self._first_fail_ts = None
             self._status = OK
+            return
+        now = self._now()
+        self._consec += 1
+        if self._first_fail_ts is None:
+            self._first_fail_ts = now
+        self._status = status
+        sustained = (
+            self._consec >= self._r.mock_after_consecutive_failures
+            and (now - self._first_fail_ts) >= self._r.mock_after_seconds_down
+        )
+        self._state = MOCK if (self._r.mock_fallback_enabled and sustained) else DEGRADED
 
     # ---- status -------------------------------------------------------------
     def brain_health(self) -> str:
