@@ -121,6 +121,20 @@ agent:
                                # the conversation grows every turn and latency creeps up
                                # with it (null = never recycle).
     extra_args: []             # appended verbatim to the claude argv (advanced)
+    # Per-model overload fallback: appended as `--fallback-model <csv>` so a 529/overload of the
+    # primary tier routes down the list inside one CLI call. [] = off. e.g. [sonnet, haiku].
+    fallback_models: []
+  # Brain-outage resilience (heartbeat + model fallback + sustained-outage mock failover). All
+  # off here (neutral template); opt in via trading.local.yaml. See the heartbeat design spec.
+  #   enabled                          -> wrap the claude client in ResilientBrain (Tier 1)
+  #   mock_fallback_enabled            -> allow Tier 2 (trade the mock rules engine when dead)
+  #   mock_after_consecutive_failures  -> failed plan cycles in a row before mock can engage
+  #   mock_after_seconds_down          -> AND this many seconds continuously down (both required)
+  resilience:
+    enabled: false
+    mock_fallback_enabled: false
+    mock_after_consecutive_failures: 3
+    mock_after_seconds_down: 300
 
 # Pre-armed plan cycle: the analysis runs BETWEEN bars and arms explicit close
 # conditions; each bar close is then answered instantly from the armed plan (the LLM
