@@ -2,7 +2,11 @@ import json
 
 import pytest
 
-from hermes_bridge.claude_cli import extract_structured, run_claude_oneshot
+from hermes_bridge.claude_cli import (
+    _fallback_model_args,
+    extract_structured,
+    run_claude_oneshot,
+)
 from hermes_bridge.config import ClaudeClientConfig
 
 
@@ -59,3 +63,27 @@ def test_oneshot_uncapped_inherits_parent_env(fake_claude):
     # None → env=None so the subprocess inherits the parent environment unchanged.
     run_claude_oneshot(ClaudeClientConfig(max_thinking_tokens=None), "SYS", "USR")
     assert captured["env"] is None
+
+
+def test_fallback_args_empty_when_unset():
+    assert _fallback_model_args(ClaudeClientConfig()) == []
+
+
+def test_fallback_args_csv_when_set():
+    c = ClaudeClientConfig(fallback_models=["sonnet", "haiku"])
+    assert _fallback_model_args(c) == ["--fallback-model", "sonnet,haiku"]
+
+
+def test_oneshot_includes_fallback_model_when_set(fake_claude):
+    captured = fake_claude()
+    c = ClaudeClientConfig(fallback_models=["sonnet", "haiku"])
+    run_claude_oneshot(c, "SYS", "USR")
+    cmd = captured["cmd"]
+    assert "--fallback-model" in cmd
+    assert cmd[cmd.index("--fallback-model") + 1] == "sonnet,haiku"
+
+
+def test_oneshot_omits_fallback_model_when_unset(fake_claude):
+    captured = fake_claude()
+    run_claude_oneshot(ClaudeClientConfig(), "SYS", "USR")
+    assert "--fallback-model" not in captured["cmd"]

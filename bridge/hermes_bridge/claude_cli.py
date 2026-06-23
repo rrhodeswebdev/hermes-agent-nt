@@ -40,6 +40,13 @@ def _thinking_env(c: ClaudeClientConfig) -> dict[str, str] | None:
     return env
 
 
+def _fallback_model_args(c: ClaudeClientConfig) -> list[str]:
+    """`--fallback-model <csv>` for a per-model overload, or [] when unconfigured. The CLI
+    routes a 529/overload of the primary tier down this list inside a single call."""
+    models = [m for m in (c.fallback_models or []) if m]
+    return ["--fallback-model", ",".join(models)] if models else []
+
+
 def run_claude_oneshot(c: ClaudeClientConfig, system: str, user: str,
                        json_schema: str | None = None, model: str | None = None,
                        timeout_s: float | None = None) -> str:
@@ -59,6 +66,7 @@ def run_claude_oneshot(c: ClaudeClientConfig, system: str, user: str,
             cmd += ["--json-schema", json_schema]
         if c.safe_mode:
             cmd.append("--safe-mode")
+        cmd.extend(_fallback_model_args(c))
         cmd.extend(c.extra_args)
         budget = timeout_s if timeout_s is not None else c.timeout_s
         try:
@@ -125,6 +133,7 @@ class ClaudeSession:
             cmd += ["--json-schema", json_schema]
         if c.safe_mode:
             cmd.append("--safe-mode")
+        cmd.extend(_fallback_model_args(c))
         cmd.extend(c.extra_args)
         self._proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
