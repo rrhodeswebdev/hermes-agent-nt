@@ -136,6 +136,16 @@ agent:
     mock_after_consecutive_failures: 3
     mock_after_seconds_down: 300
 
+# Automatic learning consolidation. A wall-clock daemon periodically runs curate() then
+# distill() so the learned corpus stays compressed without a manual /control/curate|distill.
+# Material-gated (no model call when nothing changed) and OFF here (neutral template); opt in
+# via trading.local.yaml. Freshness/liveness show on /dashboard + /panel.txt (consolidate_*),
+# and the monitor alarms if the daemon goes dormant.
+learning:
+  consolidate_enabled: false
+  consolidate_interval_minutes: 120   # how often the daemon checks for new material
+  consolidate_startup_delay_s: 90     # grace before the first (catch-up) check after boot
+
 # Pre-armed plan cycle: the analysis runs BETWEEN bars and arms explicit close
 # conditions; each bar close is then answered instantly from the armed plan (the LLM
 # is never on the bar-close critical path). Timeouts are bridge-side budgets — the
