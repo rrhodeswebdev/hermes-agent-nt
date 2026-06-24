@@ -133,6 +133,12 @@ class Reflector:
         self.cfg = cfg
         self.learned = learned
         self.journal = journal
+        # Auto-consolidation cadence state (server._start_consolidation drives it).
+        # _last_curate_ts starts at the current lessons mtime so curate fires only on
+        # lessons that change AFTER startup; distill handles the startup catch-up.
+        self._last_curate_ts: float = self.learned.lessons_mtime()
+        self._last_check_ts: float | None = None
+        self._last_summary: str | None = None
 
     def reflect_on_close(self, trade: ClosedTrade, recent: list[dict]) -> dict:
         user = (
@@ -211,6 +217,48 @@ class Reflector:
             return {"lessons": 0, "notes": 0, "profile": 0}
         user = "CURRENT LESSONS:\n" + json.dumps(lessons, separators=(",", ":"))
         return self._run(CURATE_SYSTEM, user, CURATE_SCHEMA)
+
+    def mark_alive(self, now: float) -> None:
+        """Stamp the liveness heartbeat WITHOUT running a pass — called at the daemon
+        thread's start so check_age_s is observable from t0 (a thread that dies during
+        the startup grace still shows a growing age, which the monitor alarms on)."""
+        self._last_check_ts = now
+
+    def consolidate_once(self, now: float) -> dict:
+        """One consolidation check. curate() when lessons changed since the last tidy;
+        distill() when the corpus is newer than distilled.md. Material-gated — makes NO
+        model call when nothing changed, only advances the heartbeat. Best-effort:
+        curate()/distill() already swallow every exception, so this never disrupts trading."""
+        ls = self.learned
+        need_distill = ls.corpus_mtime() > ls.distilled_mtime()
+        need_curate = ls.lessons_mtime() > self._last_curate_ts
+        curated = distilled = 0
+        if need_curate:
+            self.curate()
+            # Watermark to the ACTUAL post-curate lessons mtime (not `now`): curate writes
+            # after `now` was captured, so keying off `now` could re-trigger every cycle.
+            self._last_curate_ts = ls.lessons_mtime()
+            curated = 1
+        if need_curate or need_distill:
+            applied = self.distill()
+            distilled = 1 if applied.get("distilled") else 0
+        self._last_check_ts = now
+        if curated or distilled:
+            self._last_summary = f"curated={curated} distilled={distilled}"
+            return {"curated": curated, "distilled": distilled, "skipped": None}
+        self._last_summary = "skip:no_new_material"
+        return {"curated": 0, "distilled": 0, "skipped": "no_new_material"}
+
+    def consolidation_status(self, now: float) -> dict:
+        """Read-only freshness + liveness for the dashboard/panel. check_age_s is None
+        only when the daemon never started (consolidation disabled)."""
+        dm = self.learned.distilled_mtime()
+        return {
+            "enabled": self.cfg.learning.consolidate_enabled,
+            "check_age_s": (now - self._last_check_ts) if self._last_check_ts else None,
+            "distilled_age_s": (now - dm) if dm else None,
+            "last": self._last_summary,
+        }
 
     def _system(self, header: str) -> str:
         learned = self.learned.format_for_prompt(
