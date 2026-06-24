@@ -146,3 +146,24 @@ def test_dashboard_and_panel_consolidate_enabled(tmp_path):
     assert d["consolidate"]["enabled"] is True            # reflects the config flag
     assert "consolidate_enabled=1" in c.get("/panel.txt").text
     # (the liveness heartbeat is the daemon's job — asserted in the Task 5 daemon tests)
+
+
+def test_daemon_stamps_heartbeat_when_enabled(tmp_path):
+    cfg = BridgeConfig()
+    cfg.learning.reflect_enabled = False
+    cfg.learning.learned_dir = str(tmp_path / "learned")
+    cfg.learning.journal_path = str(tmp_path / "j.jsonl")
+    cfg.learning.consolidate_enabled = True
+    cfg.learning.consolidate_startup_delay_s = 3600.0  # daemon idles in the grace, no CLI
+    c = TestClient(create_app(cfg))
+    # The daemon stamps _last_check_ts synchronously at startup, so liveness is immediate.
+    assert c.get("/dashboard").json()["consolidate"]["check_age_s"] is not None
+
+
+def test_daemon_not_started_when_disabled(tmp_path):
+    cfg = BridgeConfig()
+    cfg.learning.reflect_enabled = False
+    cfg.learning.learned_dir = str(tmp_path / "learned")
+    cfg.learning.journal_path = str(tmp_path / "j.jsonl")
+    c = TestClient(create_app(cfg))  # consolidate_enabled defaults False
+    assert c.get("/dashboard").json()["consolidate"]["check_age_s"] is None
