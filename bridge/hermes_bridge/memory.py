@@ -103,6 +103,30 @@ class LearnedStore:
     def set_distilled(self, text: str) -> None:
         self._atomic_write(self.dir / "distilled.md", text.strip() + "\n")
 
+    @staticmethod
+    def _mtime(path: Path) -> float:
+        return path.stat().st_mtime if path.is_file() else 0.0
+
+    def distilled_mtime(self) -> float:
+        return self._mtime(self.dir / "distilled.md")
+
+    def lessons_mtime(self) -> float:
+        d = self.dir / "lessons"
+        if not d.is_dir():
+            return 0.0
+        return max((f.stat().st_mtime for f in d.glob("*.md")), default=0.0)
+
+    def corpus_mtime(self) -> float:
+        """Newest mtime across the full distillation input: live notes, lessons,
+        profile, and the long-term notes archive. 0.0 when none exist yet. (.history/
+        backups and the *.proposed profile are deliberately excluded — not corpus.)"""
+        return max(
+            self._mtime(self.dir / "agent-notes.md"),
+            self._mtime(self.dir / "trader-profile.md"),
+            self._mtime(self.dir / "archive" / "agent-notes-archive.md"),
+            self.lessons_mtime(),
+        )
+
     def archived_notes(self, tail_chars: int = 3000) -> str:
         """The newest slice of long-term archived notes (distillation input)."""
         f = self.dir / "archive" / "agent-notes-archive.md"
