@@ -205,6 +205,22 @@ def render_panel(d: dict | None) -> str:
         nxt = nw.get("next_event")
         if nxt:
             lines.append(f"news_next={_oneline(nxt.get('title', ''))}")
+    # Learning-consolidation health (emitted whenever the payload carries it). check_age_s is
+    # the daemon liveness heartbeat the monitor watches; distilled_age_s is the compressed
+    # corpus age. enabled=0 means the auto-cadence is off.
+    con = d.get("consolidate") or {}
+    if con.get("enabled"):
+        lines.append("consolidate_enabled=1")
+        ca = con.get("check_age_s")
+        lines.append(f"consolidate_check_age_s={ca:.0f}" if ca is not None
+                     else "consolidate_check_age_s=")
+        da = con.get("distilled_age_s")
+        lines.append(f"consolidate_distilled_age_s={da:.0f}" if da is not None
+                     else "consolidate_distilled_age_s=")
+        if con.get("last"):
+            lines.append(f"consolidate_last={_oneline(con['last'])}")
+    else:
+        lines.append("consolidate_enabled=0")
     for it in (strat.get("list") or []):
         name = _oneline(it.get("name", "")).replace("|", "/")
         regime = _oneline(it.get("regime", "")).replace("|", "/")
