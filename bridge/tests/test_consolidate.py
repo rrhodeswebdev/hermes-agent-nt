@@ -115,3 +115,34 @@ def test_consolidation_status_fields(tmp_path):
     s1 = r.consolidation_status(now=5000.0)
     assert s1["check_age_s"] == 100.0
     assert s1["distilled_age_s"] == 1000.0
+
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from hermes_bridge.server import create_app  # noqa: E402
+
+
+def test_dashboard_and_panel_consolidate_disabled(tmp_path):
+    cfg = BridgeConfig()
+    cfg.learning.reflect_enabled = False
+    cfg.learning.learned_dir = str(tmp_path / "learned")
+    cfg.learning.journal_path = str(tmp_path / "j.jsonl")
+    c = TestClient(create_app(cfg))
+    d = c.get("/dashboard").json()
+    assert d["consolidate"]["enabled"] is False
+    assert d["consolidate"]["check_age_s"] is None
+    assert "consolidate_enabled=0" in c.get("/panel.txt").text
+
+
+def test_dashboard_and_panel_consolidate_enabled(tmp_path):
+    cfg = BridgeConfig()
+    cfg.learning.reflect_enabled = False
+    cfg.learning.learned_dir = str(tmp_path / "learned")
+    cfg.learning.journal_path = str(tmp_path / "j.jsonl")
+    cfg.learning.consolidate_enabled = True
+    cfg.learning.consolidate_startup_delay_s = 3600.0  # keep the daemon idle (no CLI) in-test
+    c = TestClient(create_app(cfg))
+    d = c.get("/dashboard").json()
+    assert d["consolidate"]["enabled"] is True            # reflects the config flag
+    assert "consolidate_enabled=1" in c.get("/panel.txt").text
+    # (the liveness heartbeat is the daemon's job — asserted in the Task 5 daemon tests)

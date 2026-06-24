@@ -219,4 +219,8 @@ def build_dashboard_payload(st: AppState) -> dict:
         "planner": st.planner.snapshot() if st.planner else None,
         "levels": dashboard_levels(st),
         "news": news_status,
+        # Learning-consolidation health: liveness heartbeat (check_age_s) + how old the
+        # compressed corpus is (distilled_age_s). Display only — the monitor alarms on a
+        # stale heartbeat. `now` is already defined above.
+        "consolidate": st.reflector.consolidation_status(now),
     }
