@@ -177,6 +177,7 @@ class AppState:
         self.applied_profile: dict | None = None
         self._seed_account_profile()
         self._start_news_refresh()
+        self._start_consolidation()
 
     def _start_news_refresh(self) -> None:
         """Refresh the economic calendar off the hot path. No-op when news is disabled, so
@@ -188,6 +189,35 @@ class AppState:
             while True:
                 self.news.refresh(time.time())
                 time.sleep(max(60.0, self.cfg.news.refresh_minutes * 60.0))
+
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def _start_consolidation(self) -> None:
+        """Wall-clock cadence for curate()+distill() so the learned corpus stays compressed
+        without a manual /control/curate|distill. No-op when disabled, so tests and the
+        default config never touch the CLI. The heartbeat is stamped synchronously at startup
+        (liveness from t0); the first post-grace check is the startup catch-up (a restart
+        re-distills a stale corpus). One bad cycle never ends the cadence."""
+        lc = self.cfg.learning
+        if not (lc.enabled and lc.consolidate_enabled):
+            return
+        # Stamp liveness SYNCHRONOUSLY (before the thread starts) so check_age_s is observable
+        # the instant the app is built — no race between Thread.start() and the first request.
+        self.reflector.mark_alive(time.time())
+
+        def _loop() -> None:
+            time.sleep(lc.consolidate_startup_delay_s)
+            while True:
+                try:
+                    summary = self.reflector.consolidate_once(time.time())
+                    if summary.get("skipped"):
+                        print("[consolidate] skip: no new material (heartbeat)", flush=True)
+                    else:
+                        print(f"[consolidate] curated={summary['curated']} "
+                              f"distilled={summary['distilled']}", flush=True)
+                except Exception as e:  # noqa: BLE001 — one bad cycle must not end the cadence
+                    print(f"[consolidate] error: {type(e).__name__}", flush=True)
+                time.sleep(max(60.0, lc.consolidate_interval_minutes * 60.0))
 
         threading.Thread(target=_loop, daemon=True).start()
 
