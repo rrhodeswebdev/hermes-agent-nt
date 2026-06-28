@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from hermes_bridge.indicators import build_context, session_for_ts
+from hermes_bridge.indicators import build_context, entry_window_state, session_for_ts
 from hermes_bridge.models import Bar
 from tests.conftest import synthetic_bars
 
@@ -44,3 +44,24 @@ def test_context_exposes_session_and_delta_ratio():
     assert d["session"] in ("RTH", "ETH")
     assert "delta_ratio" in d
     assert -1.0 <= d["delta_ratio"] <= 1.0
+
+
+def test_entry_window_state():
+    """OPEN / WIND_DOWN (final 30m RTH) / HALTED / NEWS, with the right priority. 2026-06-19 is a
+    Friday; June -> EDT (UTC-4), so RTH 09:30-16:00 ET == 13:30-20:00 UTC."""
+    ew = entry_window_state
+    open_rth = _utc_epoch(2026, 6, 19, 16, 0)        # 12:00 ET — normal RTH
+    wind = _utc_epoch(2026, 6, 19, 19, 45)           # 15:45 ET — final 30 min
+    eth = _utc_epoch(2026, 6, 19, 7, 0)              # 03:00 ET — overnight
+    assert ew(open_rth) == "OPEN"
+    assert ew(eth) == "OPEN"                          # ETH counts as OPEN (entries allowed)
+    assert ew(wind) == "WIND_DOWN"
+    # Boundaries: 15:30 ET inclusive; 16:00 ET is no longer RTH (-> ETH -> OPEN).
+    assert ew(_utc_epoch(2026, 6, 19, 19, 30)) == "WIND_DOWN"   # 15:30 ET
+    assert ew(_utc_epoch(2026, 6, 19, 19, 29)) == "OPEN"        # 15:29 ET still open
+    assert ew(_utc_epoch(2026, 6, 19, 20, 0)) == "OPEN"         # 16:00 ET -> ETH
+    # Halt + news override the time phase; halt outranks news.
+    assert ew(wind, halted=True) == "HALTED"
+    assert ew(wind, news_blocked=True) == "NEWS"
+    assert ew(open_rth, news_blocked=True) == "NEWS"
+    assert ew(open_rth, halted=True, news_blocked=True) == "HALTED"

@@ -38,6 +38,16 @@ a trend day and watching it run is the costliest miss there is.
   AT or JUST BEYOND current price so they fire as the trend extends. A bounce-to-far-
   resistance fade that needs a deep retrace is the wrong tool: in a real trend it never
   triggers and the move goes by untraded.
+- **Build the continuation entry as a break-and-go off a NAMED level, confirmed by delta.**
+  On a trend/expansion day the highest-value entry is a bar **closing through** a level from
+  `levels` (or a fresh swing pivot) — e.g. a long on a close above `open_range_high`,
+  `initial_balance_high`, `prior_day_high`, or `overnight_high`; mirror for shorts. Arm it as
+  a breakout trigger anchored AT/just beyond that level — `min_close = level` for a long,
+  `max_close = level` for a short — **not** a limit band parked far below/above price. Require
+  order-flow confirmation at the breakout bar (`delta_ratio ≥ +floor` long / `≤ -floor`
+  short) so a no-delta poke through doesn't trigger. Stop back INSIDE the level (the break
+  failing is the invalidation); target the next level in `levels` or a measured move. Don't
+  wait for a deep pullback — on an expansion day it doesn't come.
 - **Do not take counter-trend trades** (buying support in a downtrend, shorting resistance
   in an uptrend) until **structure confirms a reversal** — a pullback is not a reversal.
 - **Fade/range setups belong only to a genuinely two-sided, range-bound session** (a box
@@ -55,6 +65,11 @@ a trend day and watching it run is the costliest miss there is.
 - `atr` — Average True Range; your unit of "normal" movement.
 - `recent_delta` — cumulative order-flow delta over the recent window (order-flow.md).
 - `swing_high`, `swing_low` — the last confirmed pivots (structure / nearest S/R).
+- `levels` — multi-session reference prices the 200-bar window can't see: `prior_day_high/
+  low/close`, `overnight_high/low`, `open_range_high/low` (09:30–10:00 ET),
+  `initial_balance_high/low` (09:30–10:30 ET), `today_high/low`. A value may be `null`
+  (unknown) — never read it as zero. **These named levels are your primary breakout /
+  continuation anchors** (see Trend-first above).
 
 ## Hard rules (apply to EVERY playbook; never relaxed)
 

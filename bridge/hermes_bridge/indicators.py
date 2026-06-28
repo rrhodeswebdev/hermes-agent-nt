@@ -204,10 +204,33 @@ def _et_minutes(ts: float) -> int:
     return et.hour * 60 + et.minute
 
 
+def entry_window_state(ts: float, *, halted: bool = False, news_blocked: bool = False) -> str:
+    """The brain's ENTRY posture on this bar, for the dashboard / HUD (DISPLAY ONLY — it does
+    not itself gate anything; the RiskGate + session state do the real gating). Priority high to
+    low so the most restrictive state always shows:
+
+    - HALTED: the daily goal/loss tripped (session.halted) — no new entries the rest of the day.
+    - NEWS: inside a major-news blackout (the RiskGate blocks entries; exits still allowed).
+    - WIND_DOWN: the final 30 min of RTH (15:30-16:00 ET) — entries are still allowed, but the
+      regular session is closing (the one legitimate stand-down window; standing down BEFORE it
+      is forbidden, see risk-management.md).
+    - OPEN: normal entry posture — RTH 09:30-15:30 ET, or any ETH (overnight) bar.
+
+    Surfacing this would have caught the brain's invented "13:30 ET hard gate" at a glance."""
+    if halted:
+        return "HALTED"
+    if news_blocked:
+        return "NEWS"
+    if session_for_ts(ts) == "RTH" and 930 <= _et_minutes(ts) < 960:  # 15:30-16:00 ET
+        return "WIND_DOWN"
+    return "OPEN"
+
+
 def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
     """The multi-hour structure a 200-bar context window cannot see: prior RTH day's
-    high/low/close, the overnight (ETH) range since that close, today's RTH range, and the
-    opening range (09:30-10:00 ET). Computed over the FULL bar store (several days), all
+    high/low/close, the overnight (ETH) range since that close, today's RTH range, the
+    opening range (09:30-10:00 ET), and the initial balance (09:30-10:30 ET). Computed over
+    the FULL bar store (several days), all
     sessions ET-bucketed. Levels are None until enough history exists — the agent treats a
     missing level as 'unknown', never as zero."""
     out: dict[str, float | None] = {
@@ -215,6 +238,7 @@ def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
         "overnight_high": None, "overnight_low": None,
         "today_high": None, "today_low": None,
         "open_range_high": None, "open_range_low": None,
+        "initial_balance_high": None, "initial_balance_low": None,
     }
     if not bars:
         return out
@@ -244,9 +268,13 @@ def daily_levels(bars: list[Bar]) -> dict[str, float | None]:
         elif s == "RTH" and d == today:
             out["today_high"] = max(out["today_high"] or b.high, b.high)
             out["today_low"] = min(out["today_low"] or b.low, b.low)
-            if 570 <= _et_minutes(b.ts) < 600:  # 09:30-10:00 ET opening range
+            mins = _et_minutes(b.ts)
+            if 570 <= mins < 600:  # 09:30-10:00 ET opening range
                 out["open_range_high"] = max(out["open_range_high"] or b.high, b.high)
                 out["open_range_low"] = min(out["open_range_low"] or b.low, b.low)
+            if 570 <= mins < 630:  # 09:30-10:30 ET initial balance (contains the OR)
+                out["initial_balance_high"] = max(out["initial_balance_high"] or b.high, b.high)
+                out["initial_balance_low"] = min(out["initial_balance_low"] or b.low, b.low)
         elif s == "ETH" and prior is not None and b.ts > prior_last_ts:
             out["overnight_high"] = max(out["overnight_high"] or b.high, b.high)
             out["overnight_low"] = min(out["overnight_low"] or b.low, b.low)

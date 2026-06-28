@@ -8,8 +8,10 @@ trunk's structural (EMA-free) MarketContext.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from hermes_bridge.indicators import build_context, daily_levels, et_weekday_clock
+from hermes_bridge.views import dashboard_levels
 from tests.conftest import make_bar
 
 
@@ -28,7 +30,10 @@ def _multi_day_bars() -> list:
         make_bar(_ts(2024, 6, 13, 2, 0), 104, 108, 103, 107, 5),
         # Today RTH (Thu 2024-06-13): opening-range bar (09:35 ET) high 110 low 106.
         make_bar(_ts(2024, 6, 13, 13, 35), 107, 110, 106, 109, 10),
-        # Later RTH (11:00 ET) high 112 low 108 — extends today's range, not the OR.
+        # Initial-balance-only bar (10:15 ET) high 111 low 106 — inside 09:30-10:30 but
+        # past the 09:30-10:00 opening range, so IB high (111) exceeds OR high (110).
+        make_bar(_ts(2024, 6, 13, 14, 15), 109, 111, 106, 110, 10),
+        # Later RTH (11:00 ET) high 112 low 108 — extends today's range, not the OR/IB.
         make_bar(_ts(2024, 6, 13, 15, 0), 109, 112, 108, 111, 10),
     ]
 
@@ -44,6 +49,9 @@ def test_daily_levels_prior_overnight_today_opening_range():
     assert lv["today_low"] == 106
     assert lv["open_range_high"] == 110
     assert lv["open_range_low"] == 106
+    # Initial balance = 09:30-10:30 ET, a superset of the OR: the 10:15 bar lifts the high.
+    assert lv["initial_balance_high"] == 111
+    assert lv["initial_balance_low"] == 106
 
 
 def test_daily_levels_empty_is_all_none():
@@ -71,3 +79,20 @@ def test_build_context_surfaces_levels_and_clock(cfg):
     assert "weekday" in d and "clock_et" in d and "levels" in d
     # Regime stays the trunk's structural read — this PR does not touch it.
     assert d["regime"] == ctx.regime
+
+
+def test_dashboard_levels_surfaces_structural_levels(cfg):
+    bars = _multi_day_bars()
+    ctx = build_context(
+        bars,
+        atr_period=cfg.strategy.atr_period,
+        swing_lookback=cfg.strategy.swing_lookback,
+        level_bars=bars,
+    )
+    st = SimpleNamespace(engine=SimpleNamespace(last_context=ctx))
+    lv = dashboard_levels(st)
+    assert lv["swing_high"] == ctx.swing_high  # swing pivots still present
+    assert lv["prior_day_high"] == 106         # multi-session levels now surfaced too
+    assert lv["initial_balance_high"] == 111
+    # No context yet -> None (unchanged contract).
+    assert dashboard_levels(SimpleNamespace(engine=SimpleNamespace(last_context=None))) is None
