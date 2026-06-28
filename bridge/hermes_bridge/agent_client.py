@@ -388,7 +388,11 @@ def build_agent_client(config: BridgeConfig) -> AgentClient:
     client = config.agent.client
     if client == "claude":
         from .claude_agent import ClaudeAgentClient  # lazy: avoid circular import
-        return ClaudeAgentClient(config)
+        claude = ClaudeAgentClient(config)
+        if config.agent.resilience.enabled:
+            from .resilient_brain import ResilientBrain  # lazy: avoid circular import
+            return ResilientBrain(claude, MockAgentClient(config), config)
+        return claude
     if client == "mock":
         return MockAgentClient(config)
     # Config validation already rejects unknown values; this guards the env-override

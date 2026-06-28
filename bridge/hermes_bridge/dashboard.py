@@ -83,7 +83,7 @@ def render_text(d: dict | None) -> str:
     # "brain: OK" on every poll is noise. DOWN = re-auth, THROTTLED = subscription cap.
     bh = d.get("brain_status")
     if bh and bh != "OK":
-        lines.append(f"brain: {bh}")
+        lines.append("brain: MOCK (trading on rules)" if bh == "MOCK" else f"brain: {bh}")
     pl = d.get("planner")
     if pl:
         detail = pl.get("conditions") or pl.get("last_error") or ""
@@ -284,6 +284,7 @@ DASHBOARD_HTML = """<!doctype html>
   .bhealth.down{color:var(--red);border-color:var(--red);background:rgba(248,81,73,.12)}
   .bhealth.thr{color:var(--amber);border-color:var(--amber);background:rgba(210,153,34,.12)}
   .bhealth.tr{color:var(--dim)}
+  .bhealth.mock{color:var(--amber);border-color:var(--amber);background:rgba(210,153,34,.28)}
   .strat{background:var(--panel);border:1px solid var(--line);border-radius:8px;
     padding:12px 14px;margin-bottom:16px}
   .strat .shead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
@@ -371,7 +372,7 @@ async function tick(){
     // (dim). Hidden when OK so a healthy brain shows nothing. Display only.
     const bh=d.brain_status; const bhe=document.getElementById('bhealth');
     if(bh&&bh!='OK'){bhe.textContent='brain '+bh.toLowerCase();
-      bhe.className='bhealth '+(bh=='DOWN'?'down':bh=='THROTTLED'?'thr':'tr'); bhe.style.display='';}
+      bhe.className='bhealth '+(bh=='DOWN'?'down':bh=='THROTTLED'?'thr':bh=='MOCK'?'mock':'tr'); bhe.style.display='';}
     else{bhe.style.display='none';}
     // Agent-authored strategies: list every setup the agent wrote, highlight the one
     // whose regime matches the live market. Built with textContent (agent-authored text).
