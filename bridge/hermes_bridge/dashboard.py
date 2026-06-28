@@ -79,6 +79,11 @@ def render_text(d: dict | None) -> str:
         f"goal: +{goal['profit_target']:.0f} / -{goal['max_daily_loss']:.0f}   [{halt}]",
         f"entry: {d.get('entry_window') or '?'}",
     ]
+    # Surface brain trouble only when there is any — a healthy brain is the common case and
+    # "brain: OK" on every poll is noise. DOWN = re-auth, THROTTLED = subscription cap.
+    bh = d.get("brain_status")
+    if bh and bh != "OK":
+        lines.append(f"brain: {bh}")
     pl = d.get("planner")
     if pl:
         detail = pl.get("conditions") or pl.get("last_error") or ""
@@ -152,6 +157,9 @@ def render_panel(d: dict | None) -> str:
         f"halt_reason={_oneline(s['halt_reason'])}",
         # Entry posture for the HUD pill: OPEN / WIND_DOWN / HALTED / NEWS (display only).
         f"entry_window={d.get('entry_window') or ''}",
+        # Brain health for the HUD: OK / TRANSIENT / THROTTLED / DOWN (display only). Tells an
+        # outage (DOWN: re-auth) or a subscription cap (THROTTLED) apart from ordinary caution.
+        f"brain_status={d.get('brain_status') or ''}",
         f"goal_hit={1 if s['daily_goal_hit'] else 0}",
         f"goal_target={goal['profit_target']:.0f}",
         f"goal_loss={goal['max_daily_loss']:.0f}",
@@ -271,6 +279,11 @@ DASHBOARD_HTML = """<!doctype html>
   .ewin.open{color:var(--grn);border-color:var(--grn);background:rgba(63,185,80,.10)}
   .ewin.wind{color:var(--amber);border-color:var(--amber);background:rgba(210,153,34,.12)}
   .ewin.stop{color:var(--red);border-color:var(--red);background:rgba(248,81,73,.12)}
+  .bhealth{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;
+    letter-spacing:.5px;border:1px solid var(--line);margin-left:6px;vertical-align:middle}
+  .bhealth.down{color:var(--red);border-color:var(--red);background:rgba(248,81,73,.12)}
+  .bhealth.thr{color:var(--amber);border-color:var(--amber);background:rgba(210,153,34,.12)}
+  .bhealth.tr{color:var(--dim)}
   .strat{background:var(--panel);border:1px solid var(--line);border-radius:8px;
     padding:12px 14px;margin-bottom:16px}
   .strat .shead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
@@ -304,7 +317,7 @@ DASHBOARD_HTML = """<!doctype html>
   .acct .anums{margin-top:10px;line-height:1.6;font-size:12px}
 </style></head>
 <body>
-<header><h1>HERMES · <span id="inst">—</span> <span id="ewin" class="ewin" style="display:none">—</span></h1><div id="conn">connecting…</div></header>
+<header><h1>HERMES · <span id="inst">—</span> <span id="ewin" class="ewin" style="display:none">—</span> <span id="bhealth" class="bhealth" style="display:none">—</span></h1><div id="conn">connecting…</div></header>
 <div class="wrap">
   <div class="acct" id="acct">
     <div class="ahead">
@@ -354,6 +367,12 @@ async function tick(){
     if(ew){ewe.textContent=ew.replace('_',' ');
       ewe.className='ewin '+(ew=='OPEN'?'open':ew=='WIND_DOWN'?'wind':'stop'); ewe.style.display='';}
     else{ewe.style.display='none';}
+    // Brain-health pill: DOWN (red · re-auth) / THROTTLED (amber · usage cap) / TRANSIENT
+    // (dim). Hidden when OK so a healthy brain shows nothing. Display only.
+    const bh=d.brain_status; const bhe=document.getElementById('bhealth');
+    if(bh&&bh!='OK'){bhe.textContent='brain '+bh.toLowerCase();
+      bhe.className='bhealth '+(bh=='DOWN'?'down':bh=='THROTTLED'?'thr':'tr'); bhe.style.display='';}
+    else{bhe.style.display='none';}
     // Agent-authored strategies: list every setup the agent wrote, highlight the one
     // whose regime matches the live market. Built with textContent (agent-authored text).
     const strat=d.strategy||{}; const se=document.getElementById('strat');

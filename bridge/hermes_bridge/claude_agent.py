@@ -26,6 +26,7 @@ from .agent_client import (
     build_user_prompt,
     load_context_files,
 )
+from .brain_health import DOWN, OK, THROTTLED, classify_brain_error
 from .claude_cli import ClaudeSession, extract_structured, run_claude_oneshot
 from .config import BridgeConfig
 from .journal import JournalStore, select_similar
@@ -198,6 +199,12 @@ dashboard shows is exactly the strategy you trade. Reply with one JSON object:
       the actual level or trigger when you can (e.g. "Fade 29025 Rejection", "Reclaim-and-go
       above 28960", "Lower-High Short into 28990"). Avoid generic textbook labels like
       "Trend Pullback" or "Range Fade" unless that genuinely and uniquely describes it.
+      Any DISTANCE/PROXIMITY word in the name or summary (shallow/deep, near/far, first/quick,
+      reclaim/breakout/fade) MUST match the trigger's distance from the CURRENT price: call a
+      pullback "shallow"/"at-price" ONLY when its entry is within ~1x ATR of the last close —
+      otherwise name it for what it is (e.g. "Deep Pullback Long to 30571", "Dip-Buy 30571
+      Shelf"). The name and summary must never contradict the entry conditions or the trigger's
+      location relative to price (a "shallow pullback" armed 75 pts below price is wrong).
       This EXACT name is how you will later tag the trigger that fires (a plan's per-trigger
       "setup"), so the dashboard can show the setup actually being traded.
     - "regime": exactly one of "trending", "ranging", "transitional" — the regime this setup
@@ -345,9 +352,20 @@ class ClaudeAgentClient(AgentClient):
         # journal are read back into prompts so reflection actually feeds the brain.
         self._learned = LearnedStore(config.learning.learned_dir)
         self._journal = JournalStore(config.learning.journal_path)
+        # Operator-facing health of the last real brain call (every call routes through
+        # _ask, which sets it). Sticky: a non-brain bar (prefilter screen, gate WAIT) never
+        # touches it, so a DOWN brain that then sits out stays visibly DOWN until it answers.
+        self._brain_health: str = OK
 
     def describe(self) -> str:
         return self.cfg.agent.claude.model
+
+    def brain_health(self) -> str:
+        """The last real `claude` CLI call's status: OK / TRANSIENT / THROTTLED / DOWN. Lets
+        the dashboard tell an outage (DOWN: re-auth) or a subscription cap (THROTTLED) apart
+        from ordinary caution — without it, a brain whose login expired looks like a brain
+        that is simply waiting. Display only; the WAIT fail-safe is unchanged."""
+        return self._brain_health
 
     def decide(self, req: AgentRequest) -> Decision:
         try:
@@ -355,7 +373,12 @@ class ClaudeAgentClient(AgentClient):
                               self._user_message(req), DECISION_JSON_SCHEMA)
             return self._parse(reply)
         except Exception as exc:  # noqa: BLE001 — fail safe: never auto-trade on error
-            return Decision(action=Action.WAIT, rationale=f"claude_error:{type(exc).__name__}")
+            # _ask already classified the failure into self._brain_health; tag the rationale
+            # so the decisions ring shows WHY (brain_down / brain_throttled), not a bare WAIT.
+            # TRANSIENT keeps the legacy "claude_error:" prefix (log/test back-compat).
+            tag = {DOWN: "brain_down", THROTTLED: "brain_throttled"}.get(
+                self._brain_health, "claude_error")
+            return Decision(action=Action.WAIT, rationale=f"{tag}:{type(exc).__name__}")
 
     def _user_message(self, req: AgentRequest) -> str:
         """Market state, plus the most similar past trades from the journal so the
@@ -603,6 +626,20 @@ class ClaudeAgentClient(AgentClient):
 
     def _ask(self, system: str, user: str, json_schema: str,
              timeout_s: float | None = None) -> str:
+        """Every brain call (decide / propose_plan / analyze_session / distill) funnels
+        through here, so this is where we record health: OK on a reply, the classified
+        failure on an exception (then re-raise so callers keep their own fail-safe). Sticky
+        until the next call — a transient blip clears as soon as the brain answers again."""
+        try:
+            reply = self._ask_call(system, user, json_schema, timeout_s)
+        except Exception as exc:  # noqa: BLE001 — record, then let the caller fail safe
+            self._brain_health = classify_brain_error(exc)
+            raise
+        self._brain_health = OK
+        return reply
+
+    def _ask_call(self, system: str, user: str, json_schema: str,
+                  timeout_s: float | None = None) -> str:
         c = self.cfg.agent.claude
         if c.persistent:
             try:
