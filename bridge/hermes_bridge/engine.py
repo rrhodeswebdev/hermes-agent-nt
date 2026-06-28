@@ -156,6 +156,7 @@ class TradingEngine:
         journal: JournalStore | None = None,
         on_close: Callable[[ClosedTrade], None] | None = None,
         declines: DeclineLog | None = None,
+        decision_tf: Callable[[], str] | None = None,
     ) -> None:
         self.cfg = config
         self.store = store
@@ -203,9 +204,16 @@ class TradingEngine:
         # Recent delta_ratio SIGNS (most recent last, bounded tail) for the sustained-delta gate
         # (strategy.delta_sustain_bars). Appended once per bar; only the last N are ever read.
         self._delta_signs: list[int] = []
+        # The CURRENT decision timeframe (the resampler varies it by session). Defaults to the
+        # static config value, so the non-resampled path is unchanged.
+        self._decision_tf_getter = decision_tf or (lambda: self.cfg.instrument.timeframe)
 
     def _new_id(self) -> str:
         return f"{self.cfg.strategy_id}-{next(self._ids)}"
+
+    def _decision_tf(self) -> str:
+        """The decision timeframe in force right now (resampler-driven, else the config value)."""
+        return self._decision_tf_getter()
 
     # ---- bar handling -------------------------------------------------------
     def on_bar(self, bar: Bar) -> EngineResult:
@@ -555,6 +563,12 @@ class TradingEngine:
               f"authored={s.authored_regime}/{s.authored_trend}", flush=True)
         self._trigger_session_study(self.store.all(), force=True, outcome=f"reauthor:{why}")
 
+    def reauthor(self, *, outcome: str) -> None:
+        """Force a fresh pre-session study + playbook from the current store (agent mode).
+        force=True keeps the old playbook trading until the new one lands (no WAIT gap).
+        Used on a resampler session/TF switch."""
+        self._trigger_session_study(self.store.all(), force=True, outcome=outcome)
+
     def _levels(self, bars: list[Bar]) -> list[Level]:
         lc = self.cfg.levels
         if not lc.enabled:
@@ -580,7 +594,7 @@ class TradingEngine:
         p = self._pending_entry
         if p is None or p.get("side") != side:
             return None
-        tf_s = timeframe_seconds(self.cfg.instrument.timeframe)
+        tf_s = timeframe_seconds(self._decision_tf())
         if fill_ts - float(p.get("ts", 0.0)) > effective_entry_freshness_s(self.cfg) + tf_s:
             return None
         return p
@@ -600,7 +614,7 @@ class TradingEngine:
         knobs = self.cfg.agent
         if d is None or knobs.prefilter_dedup_bars <= 0:
             return None
-        tf_s = timeframe_seconds(self.cfg.instrument.timeframe) or 120
+        tf_s = timeframe_seconds(self._decision_tf()) or 120
         bars_elapsed = int(max(0.0, bar.ts - d["ts"]) // tf_s)
         if bars_elapsed >= knobs.prefilter_dedup_bars:
             self._declined = None
