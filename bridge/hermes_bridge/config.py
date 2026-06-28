@@ -50,6 +50,12 @@ class InstrumentConfig(BaseModel):
     timeframe: str = "5m"
     tick_size: float = 0.25
     tick_value: float = 12.50  # USD per tick per contract (ES e-mini = $12.50)
+    # Bar resampler (opt-in; neutral defaults keep today's behavior). feed_timeframe is what
+    # NinjaTrader streams (empty => == timeframe); decision_timeframe is what the engine reasons
+    # on: "static" => == timeframe, "auto" => 2m in RTH / 1m in ETH (session_for_ts), or a fixed
+    # "1m"/"2m" override. See resample.py and the bridge-bar-resampler design spec.
+    feed_timeframe: str = ""
+    decision_timeframe: str = "static"
 
 
 class StrategyParams(BaseModel):

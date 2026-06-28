@@ -50,6 +50,7 @@ from .prop_firms import (
     persist_account_profile,
 )
 from .reflect import Reflector
+from .resample import Resampler, feed_tf_of, resampler_engaged
 from .risk import RiskGate
 from .session import SessionState
 from .store import BarStore
@@ -98,8 +99,23 @@ class AppState:
         self.config_path = config_path or "config/trading.yaml"
         self.entry_freshness_s = effective_entry_freshness_s(config)
         self.stale_drops = 0  # entries dropped by the freshness guard (shown on the panel)
-        self.store = BarStore(config.instrument.symbol, config.instrument.timeframe,
-                              db_path=config.storage.bars_db or None)
+        # Bar resampler (opt-in): keep a persisted FEED store (raw feed TF) and an in-memory
+        # DECISION store the engine reasons on, rebuilt losslessly from the feed on each session
+        # switch. Disabled => a single persisted store, exactly as before.
+        self.resampler: Resampler | None = None
+        self.feed_store: BarStore | None = None
+        inst = config.instrument
+        if resampler_engaged(inst):
+            feed_tf = feed_tf_of(inst)
+            self.feed_store = BarStore(inst.symbol, feed_tf,
+                                       db_path=config.storage.bars_db or None)
+            self.store = BarStore(inst.symbol, feed_tf, db_path=None)  # decision store (in-memory)
+            self.resampler = Resampler(self.feed_store, self.store, feed_tf=feed_tf,
+                                       decision_timeframe=inst.decision_timeframe)
+            self.resampler.initial_rebuild()
+        else:
+            self.store = BarStore(inst.symbol, inst.timeframe,
+                                  db_path=config.storage.bars_db or None)
         self.session = SessionState(
             instrument=config.instrument.symbol,
             timeframe=config.instrument.timeframe,
@@ -130,7 +146,14 @@ class AppState:
         self.engine = TradingEngine(
             config, self.store, self.session, self.agent, self.risk,
             planner=self.planner, journal=self.journal, on_close=self._on_trade_closed,
-            declines=self.declines)
+            declines=self.declines,
+            decision_tf=(lambda: self.resampler.current_tf) if self.resampler else None)
+        # Warm restart: the decision store was rebuilt from bars.db (resampler) or loaded from
+        # the persisted store, so NT8's need_history handshake won't fire and /ingest/history
+        # won't kick the pre-session study. Kick it here so the brain authors a playbook without
+        # a manual /control/reauthor. A cold start (thin store) still relies on the NT8 push.
+        if self.planner is not None and len(self.store) >= HISTORY_MIN_BARS:
+            self.engine.on_history(self.store.all())
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
@@ -437,10 +460,17 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
     @app.post("/ingest/history")
     def ingest_history(request: Request, batch: BarBatch) -> dict:
         st = _state(request)
-        stored = st.store.replace_history(batch.bars)
-        # Kick off the one-time session study + initial plan in the background.
-        with st.lock:
-            st.engine.on_history(batch.bars)
+        # With the resampler, NinjaTrader's history is the FEED series; rebuild the decision
+        # series from it before the engine's one-time session study runs.
+        if st.resampler is not None:
+            stored = st.resampler.replace_feed_history(batch.bars)
+            with st.lock:
+                st.engine.on_history(st.store.all())
+        else:
+            stored = st.store.replace_history(batch.bars)
+            # Kick off the one-time session study + initial plan in the background.
+            with st.lock:
+                st.engine.on_history(batch.bars)
         return {"ok": True, "stored": stored}
 
     @app.post("/ingest/bar", response_model=Decision)
@@ -458,7 +488,24 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
                   "strategy's EpochSeconds timezone conversion (session labels "
                   "depend on it)", flush=True)
         with st.lock:
-            result = st.engine.on_bar(payload.bar)
+            if st.resampler is not None:
+                # Aggregate the 1m feed into the decision timeframe. A forming (intra-decision)
+                # bar gets an instant WAIT — the engine only runs on a decision-bar close. Switch
+                # when flat (no open position); an armed plan is just resting triggers, and we
+                # re-author for the new TF on a switch (below).
+                is_flat = st.session.position == 0
+                decision_bar = st.resampler.on_feed_bar(payload.bar, is_flat=is_flat)
+                if st.resampler.take_switch():
+                    st.engine.reauthor(outcome="tf_switch")
+                if decision_bar is None:
+                    d = Decision(action=Action.WAIT, rationale="resample:forming")
+                    if len(st.store) < HISTORY_MIN_BARS:
+                        d = d.model_copy(update={"need_history": True})
+                    return d
+                bar = decision_bar
+            else:
+                bar = payload.bar
+            result = st.engine.on_bar(bar)
             d = result.decision
             cmd = result.command
             elapsed = time.time() - t0
@@ -475,13 +522,13 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
             d = d.model_copy(update={"need_history": True})
         queued = f"QUEUED:{cmd.action} qty={cmd.qty}" if cmd is not None else "no-order"
         why = f" reasons={result.risk_reasons}" if cmd is None and result.risk_reasons else ""
-        print(f"[decision] close={payload.bar.close} {d.action} [{result.mode}] "
+        print(f"[decision] close={bar.close} {d.action} [{result.mode}] "
               f"conf={d.confidence:.2f} lat={elapsed:.1f}s -> {queued}{why} | {d.rationale[:160]}",
               flush=True)
         with st.decisions_lock:
             st.decisions.append({
-                "ts": payload.bar.ts,
-                "close": payload.bar.close,
+                "ts": bar.ts,
+                "close": bar.close,
                 "action": str(d.action),
                 "confidence": round(d.confidence, 2),
                 "mode": result.mode,
