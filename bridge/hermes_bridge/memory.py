@@ -103,6 +103,36 @@ class LearnedStore:
     def set_distilled(self, text: str) -> None:
         self._atomic_write(self.dir / "distilled.md", text.strip() + "\n")
 
+    def day_reviews_mtime(self) -> float:
+        return self._mtime(self.dir / "day-reviews.md")
+
+    def day_reviews(self, n: int) -> list[tuple[str, str]]:
+        """Newest-first (date, body) pairs from day-reviews.md (## <date> sections)."""
+        text = self._read("day-reviews.md")
+        if not text.strip():
+            return []
+        out: list[tuple[str, str]] = []
+        cur_date: str | None = None
+        cur: list[str] = []
+        for line in text.splitlines():
+            if line.startswith("## "):
+                if cur_date is not None:
+                    out.append((cur_date, "\n".join(cur).strip()))
+                cur_date, cur = line[3:].strip(), []
+            elif cur_date is not None:
+                cur.append(line)
+        if cur_date is not None:
+            out.append((cur_date, "\n".join(cur).strip()))
+        return out[:n]
+
+    def append_day_review(self, date_str: str, body: str, keep: int) -> None:
+        """Prepend a dated review, keep the newest `keep`. Atomic; tool-less text only."""
+        existing = [(d, b) for d, b in self.day_reviews(10_000) if d != date_str]
+        entries = [(date_str, body.strip())] + existing
+        entries = entries[: max(1, keep)]
+        rendered = "\n\n".join(f"## {d}\n{b}" for d, b in entries)
+        self._atomic_write(self.dir / "day-reviews.md", rendered.strip() + "\n")
+
     @staticmethod
     def _mtime(path: Path) -> float:
         return path.stat().st_mtime if path.is_file() else 0.0
