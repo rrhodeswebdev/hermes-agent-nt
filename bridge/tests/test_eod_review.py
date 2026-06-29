@@ -30,3 +30,13 @@ def test_day_review_rolling_cap(tmp_path):
     revs = s.day_reviews(10)
     assert len(revs) == 3                                          # capped to keep=3
     assert revs[0][0] == "2026-06-24"                             # newest kept
+
+
+def test_format_for_prompt_includes_day_reviews(tmp_path):
+    s = LearnedStore(str(tmp_path))
+    s.append_day_review("2026-06-29", "Trend grind, sub-0.50 pullbacks blocked.", keep=10)
+    out = s.format_for_prompt(day_reviews_n=3)
+    assert "RECENT DAY-REVIEWS" in out
+    assert "Trend grind" in out
+    # Off by default:
+    assert "RECENT DAY-REVIEWS" not in s.format_for_prompt()

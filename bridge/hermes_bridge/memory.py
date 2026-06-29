@@ -183,7 +183,8 @@ class LearnedStore:
         return out
 
     def format_for_prompt(self, profile_chars: int = 1400, notes_chars: int = 2200,
-                          lessons_chars: int = 2500) -> str:
+                          lessons_chars: int = 2500, day_reviews_n: int = 0,
+                          day_reviews_chars: int = 1800) -> str:
         sections: list[str] = []
         notes_dropped = lessons_dropped = 0
         p = self.profile()
@@ -215,6 +216,18 @@ class LearnedStore:
                              f"run curation to consolidate)")
             if lines:
                 sections.append("=== LEARNED LESSONS ===\n" + "\n".join(lines))
+        if day_reviews_n > 0:
+            revs = self.day_reviews(day_reviews_n)
+            if revs:
+                block, used = [], 0
+                for d, b in revs:
+                    entry = f"[{d}] {b}"
+                    if used + len(entry) > day_reviews_chars:
+                        break
+                    block.append(entry)
+                    used += len(entry)
+                if block:
+                    sections.append("=== RECENT DAY-REVIEWS ===\n" + "\n\n".join(block))
         # Truncation was silent before; tell the operator once per change, not per call.
         report = (notes_dropped, lessons_dropped)
         if any(report) and report != getattr(self, "_last_trunc_report", None):
