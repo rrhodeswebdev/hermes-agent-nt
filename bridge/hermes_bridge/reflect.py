@@ -11,21 +11,35 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from datetime import UTC, timedelta
 
 from .claude_cli import extract_structured, run_claude_oneshot
 from .config import BridgeConfig
+from .indicators import _EPOCH, _eastern_offset
 from .journal import ClosedTrade, JournalStore
-from .market_calendar import _et, _et_date
+from .market_calendar import _et_date
 from .memory import LearnedStore
 
 
 def _rth_window(now: float) -> tuple[float, float]:
-    """(start_ts, end_ts) of the RTH session (09:30-16:00 ET) on now's ET date."""
-    et = _et(now)
+    """(start_ts, end_ts) of the RTH session (09:30-16:00 ET) on now's ET date.
+
+    _et() returns a naive datetime whose wall-clock values are already in ET
+    (UTC + eastern offset applied via timedelta, no tzinfo attached).  To convert
+    ET wall-clock times back to UTC epoch seconds we must undo that same offset,
+    i.e. subtract the eastern offset (which is negative, so subtracting a negative
+    offset adds hours back).
+    """
+    dt_utc = _EPOCH + timedelta(seconds=now)
+    offset = _eastern_offset(dt_utc)          # e.g. timedelta(hours=-4) for EDT
+    et = dt_utc + offset                      # naive datetime with ET wall-clock values
     base = et.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = base.replace(hour=9, minute=30)
-    end = base.replace(hour=16, minute=0)
-    return start.timestamp(), end.timestamp()
+    start_et = base.replace(hour=9, minute=30)
+    end_et = base.replace(hour=16, minute=0)
+    # Convert ET wall-clock back to UTC by subtracting the offset, then to epoch.
+    start_utc = (start_et - offset).replace(tzinfo=UTC)
+    end_utc = (end_et - offset).replace(tzinfo=UTC)
+    return start_utc.timestamp(), end_utc.timestamp()
 
 
 def build_day_digest(now: float, declines: list[dict], pa: dict,
@@ -39,7 +53,7 @@ def build_day_digest(now: float, declines: list[dict], pa: dict,
         return lo <= t <= hi
 
     dec = [d for d in declines if _in(d, "resolved_ts")]
-    trd = [t for t in trades if _in(t, "ts")]
+    trd = [t for t in trades if lo <= (t.get("exit_ts") or 0) <= hi]
 
     def _band(c) -> str:
         c = c or 0
@@ -282,7 +296,9 @@ class Reflector:
         theme, count = Counter(themes).most_common(1)[0]
         if count < lc.day_lesson_repeat_n:
             return out
-        same = [f"[{d}] {b}" for d, b in revs if f"_theme: {theme}" in b]
+        same = [f"[{d}] {b}" for d, b in revs
+                if (lambda m: m and m.group(1) == theme)(
+                    re.search(r"_theme:\s*([a-z0-9]+(?:_[a-z0-9]+)*)", b))]
         user = "RECURRING THEME: " + theme + "\n\nDAY-REVIEWS:\n" + "\n\n".join(same)
         try:
             reply = run_claude_oneshot(self.cfg.agent.claude, PROMOTE_SYSTEM, user,
