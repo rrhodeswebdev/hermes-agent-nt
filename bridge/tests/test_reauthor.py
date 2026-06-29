@@ -325,3 +325,46 @@ def test_price_drift_skipped_when_disabled_no_anchor_or_no_atr(cfg):
     _, r2 = step(s, no_atr, cfg=rc, generated_strategy="pb",
                  generated_strategies=setups, baseline_atr=None)
     assert r2 is None                                      # no ATR to scale by
+
+
+def test_post_trade_fires_past_its_floor(cfg):
+    rc = cfg.strategies.reauthor
+    rc.reauthor_after_trade = True
+    rc.post_trade_min_bars = 2
+    rc.min_interval_bars, rc.max_interval_bars, rc.confirm_bars = 10, 999, 99
+    setups = [{"name": "x", "regime": "trending"}]
+    s = ReauthorState(authored_regime="trending", authored_trend="up",
+                      authored_close=5000.0, bars_since_author=1)   # -> 2 after step
+    ctx = _ctx("trending", "up", atr=10.0, close=5001.0)            # not stale, no drift
+    s2, r = step(s, ctx, cfg=rc, generated_strategy="pb",
+                 generated_strategies=setups, baseline_atr=None, just_closed=True)
+    # Fires at bars_since 2 even though min_interval_bars is 10 — post-trade has its own floor.
+    assert r == "post_trade" and s2.bars_since_author == 2
+
+
+def test_post_trade_blocked_under_its_floor(cfg):
+    rc = cfg.strategies.reauthor
+    rc.reauthor_after_trade = True
+    rc.post_trade_min_bars = 3
+    rc.min_interval_bars, rc.max_interval_bars, rc.confirm_bars = 10, 999, 99
+    setups = [{"name": "x", "regime": "trending"}]
+    s = ReauthorState(authored_regime="trending", authored_trend="up",
+                      authored_close=5000.0, bars_since_author=1)   # -> 2
+    ctx = _ctx("trending", "up", atr=10.0, close=5001.0)
+    _, r = step(s, ctx, cfg=rc, generated_strategy="pb",
+                generated_strategies=setups, baseline_atr=None, just_closed=True)
+    assert r is None                                                # 2 < post_trade_min_bars 3
+
+
+def test_post_trade_disabled_by_config(cfg):
+    rc = cfg.strategies.reauthor
+    rc.reauthor_after_trade = False                                 # gate off
+    rc.post_trade_min_bars = 1
+    rc.min_interval_bars, rc.max_interval_bars, rc.confirm_bars = 10, 999, 99
+    setups = [{"name": "x", "regime": "trending"}]
+    s = ReauthorState(authored_regime="trending", authored_trend="up",
+                      authored_close=5000.0, bars_since_author=5)
+    ctx = _ctx("trending", "up", atr=10.0, close=5001.0)
+    _, r = step(s, ctx, cfg=rc, generated_strategy="pb",
+                generated_strategies=setups, baseline_atr=None, just_closed=True)
+    assert r is None

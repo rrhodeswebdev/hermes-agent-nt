@@ -87,6 +87,7 @@ def step(
     generated_strategy: str | None,
     generated_strategies: list[dict] | None,
     baseline_atr: float | None,
+    just_closed: bool = False,
 ) -> tuple[ReauthorState, str | None]:
     """Advance the clocks by one bar and return ``(next_state, reason)`` — ``reason`` is the
     trigger to re-author now, or None. Pure: call once per bar in agent mode, after the engine's
@@ -111,6 +112,8 @@ def step(
     drift = _price_drift(state, ctx, rc)
     if bars_since >= rc.max_interval_bars:
         reason: str | None = f"ceiling({rc.max_interval_bars}b)"
+    elif rc.reauthor_after_trade and just_closed and bars_since >= rc.post_trade_min_bars:
+        reason = "post_trade"
     elif past_floor and stale and struct_change >= rc.confirm_bars:
         reason = f"{stale} x{struct_change}b"
     elif past_floor and drift is not None:
