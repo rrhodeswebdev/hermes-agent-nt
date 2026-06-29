@@ -194,6 +194,9 @@ class TradingEngine:
         # threaded through reauthor.step each bar. The reducer decides WHEN to refresh the
         # authored playbook; the engine owns the guards + the act (see _maybe_reauthor).
         self.reauthor_state = ReauthorState()
+        # Set True when a position goes flat (on_fill), consumed by _maybe_reauthor → a
+        # post-trade re-author so the next setup is authored at current levels.
+        self._post_trade_refresh = False
         # Temporal hysteresis on the mechanical regime label — smooths build_context's read
         # before any consumer (decision, counterfactual tag, reauthor governor) sees it, so a
         # one-bar structural wiggle can't thrash re-authoring/bias. 1 = off. See RegimeSmoother.
@@ -553,11 +556,14 @@ class TradingEngine:
                 or self.planner.is_analyzing_session()):          # one already in flight
             return
         baseline = atr(self.store.recent(rc.baseline_atr_period + 1), rc.baseline_atr_period)
+        just_closed = self._post_trade_refresh
+        self._post_trade_refresh = False  # consume once past the guards (else it persists)
         self.reauthor_state, reason = step(
             self.reauthor_state, ctx, cfg=rc,
             generated_strategy=self.agent.generated_strategy(),
             generated_strategies=self.agent.generated_strategies(),
             baseline_atr=baseline,
+            just_closed=just_closed,
         )
         if reason is not None:
             self._reauthor_now(ctx, reason)
@@ -817,6 +823,7 @@ class TradingEngine:
             # the running weighted-average entry so it closes as one full-size trade.
             self.tracker.note_scale(qty=abs(after_pos), avg_price=self.session.avg_price)
         elif before_pos != 0 and after_pos == 0:
+            self._post_trade_refresh = True  # arm a post-trade re-author for the next tick
             # Flat: the trade manager's 1R and trailed high-water no longer apply.
             self._active_stop_ticks = None
             self._managed_level = None

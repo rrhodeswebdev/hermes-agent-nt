@@ -4,7 +4,8 @@ plus the volatility-shock fallback, the freshness ceiling, and the failed-author
 
 from hermes_bridge.agent_client import MockAgentClient
 from hermes_bridge.engine import TradingEngine
-from hermes_bridge.indicators import MarketContext
+from hermes_bridge.indicators import MarketContext, build_context
+from hermes_bridge.models import Fill, Side
 from hermes_bridge.plan import Planner
 from hermes_bridge.reauthor import (
     ReauthorState,
@@ -368,3 +369,42 @@ def test_post_trade_disabled_by_config(cfg):
     _, r = step(s, ctx, cfg=rc, generated_strategy="pb",
                 generated_strategies=setups, baseline_atr=None, just_closed=True)
     assert r is None
+
+
+def test_engine_reauthors_after_trade_close(cfg):
+    # End-to-end: a closed trade arms the flag; the next governor tick consumes it and
+    # re-authors, even with NO structural trigger (regime covered, no drift).
+    _tune(cfg, enabled=True, min_interval_bars=10, max_interval_bars=999,
+          confirm_bars=99, baseline_atr_period=500)
+    cfg.strategies.reauthor.reauthor_after_trade = True
+    cfg.strategies.reauthor.post_trade_min_bars = 1
+    agent = _SpyAgent(cfg)
+    engine = _ready(cfg, agent, authored=("trending", "up"))
+    bars = engine.store.all()
+    ctx = build_context(bars, atr_period=cfg.strategy.atr_period)
+    px, ts = bars[-1].close, bars[-1].ts
+    engine._pending_entry = {"cmd_id": "t1", "ts": ts, "side": Side.LONG,
+                             "context": ctx, "rationale": "test"}
+    engine.on_fill(Fill(side=Side.LONG, qty=1, price=px, ts=ts))
+    engine.on_fill(Fill(side=Side.SHORT, qty=1, price=px, ts=ts + 60))
+    assert engine.session.position == 0
+    assert engine._post_trade_refresh is True            # close branch armed the flag
+    base = agent.session_studies
+    engine._maybe_reauthor(_ctx("trending", "up"))        # covered + no drift → only post_trade
+    assert agent.session_studies == base + 1
+    assert engine._post_trade_refresh is False            # consumed
+
+
+def test_engine_post_trade_flag_consumed_and_cleared(cfg):
+    # Isolate the consume->study path without driving fills.
+    _tune(cfg, enabled=True, min_interval_bars=10, max_interval_bars=999,
+          confirm_bars=99, baseline_atr_period=500)
+    cfg.strategies.reauthor.reauthor_after_trade = True
+    cfg.strategies.reauthor.post_trade_min_bars = 1
+    agent = _SpyAgent(cfg)
+    engine = _ready(cfg, agent, authored=("trending", "up"))
+    engine._post_trade_refresh = True
+    base = agent.session_studies
+    engine._maybe_reauthor(_ctx("trending", "up"))
+    assert agent.session_studies == base + 1
+    assert engine._post_trade_refresh is False
