@@ -437,6 +437,13 @@ class LearningConfig(BaseModel):
     consolidate_enabled: bool = False
     consolidate_interval_minutes: float = Field(120.0, gt=0)
     consolidate_startup_delay_s: float = Field(90.0, ge=0)
+    # End-of-day reflection (descriptive day-review + gated cross-day lesson). OFF by default
+    # (neutral); trading.local.yaml opts in. Fires once per CME day after the ET cutoff.
+    eod_review_enabled: bool = False
+    eod_review_cutoff_et: str = "16:05"   # ET HH:MM after which the day-review may fire
+    day_review_keep: int = Field(10, ge=1)        # rolling day-reviews retained + shown in prompt
+    day_lesson_repeat_n: int = Field(3, ge=2)     # a theme must recur in this many reviews to promote
+    day_lesson_lookback_m: int = Field(5, ge=1)   # window of recent reviews scanned for a repeat
 
 
 class NewsConfig(BaseModel):
