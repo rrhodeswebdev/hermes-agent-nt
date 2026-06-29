@@ -9,11 +9,62 @@ Every failure is swallowed -- reflection is best-effort and must never disrupt t
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 from .claude_cli import extract_structured, run_claude_oneshot
 from .config import BridgeConfig
 from .journal import ClosedTrade, JournalStore
+from .market_calendar import _et, _et_date
 from .memory import LearnedStore
+
+
+def _rth_window(now: float) -> tuple[float, float]:
+    """(start_ts, end_ts) of the RTH session (09:30-16:00 ET) on now's ET date."""
+    et = _et(now)
+    base = et.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = base.replace(hour=9, minute=30)
+    end = base.replace(hour=16, minute=0)
+    return start.timestamp(), end.timestamp()
+
+
+def build_day_digest(now: float, declines: list[dict], pa: dict,
+                     trades: list[dict], session: dict) -> dict:
+    """Deterministic RTH-day digest (no model call). Filters declines/trades to today's
+    RTH window by resolved_ts/ts and rolls up the counts the day-review narrates."""
+    lo, hi = _rth_window(now)
+
+    def _in(d: dict, key: str) -> bool:
+        t = d.get(key) or 0
+        return lo <= t <= hi
+
+    dec = [d for d in declines if _in(d, "resolved_ts")]
+    trd = [t for t in trades if _in(t, "ts")]
+
+    def _band(c) -> str:
+        c = c or 0
+        return "<0.30" if c < 0.30 else "0.30-0.50" if c < 0.50 else ">=0.50"
+
+    items = [{"side": d.get("side"), "regime": d.get("regime"),
+              "conf": d.get("confidence"), "delta": d.get("delta_ratio"),
+              "outcome": d.get("outcome"), "supp": d.get("suppressed_by"),
+              "why": str(d.get("rationale"))[:80]} for d in dec[:20]]
+    return {
+        "date": _et_date(now).isoformat(),
+        "trades": {"count": len(trd),
+                   "pnl": round(sum(t.get("realized_pnl") or 0 for t in trd), 2)},
+        "declines": {
+            "total": len(dec),
+            "by_outcome": dict(Counter(d.get("outcome") for d in dec)),
+            "by_suppressed": dict(Counter(str(d.get("suppressed_by") or "") for d in dec)),
+            "by_regime": dict(Counter(d.get("regime") for d in dec)),
+            "by_side": dict(Counter(d.get("side") for d in dec)),
+            "conf_bands": dict(Counter(_band(d.get("confidence")) for d in dec)),
+            "items": items,
+        },
+        "pa": pa,
+        "session": session,
+    }
+
 
 _LESSON_PROPS = {
     "type": "object",
