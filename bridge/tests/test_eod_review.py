@@ -1,4 +1,9 @@
+from unittest.mock import patch
+
 from hermes_bridge.config import LearningConfig
+from hermes_bridge.journal import JournalStore
+from hermes_bridge.memory import LearnedStore
+from hermes_bridge.reflect import Reflector, build_day_digest
 
 
 def test_eod_config_defaults_are_neutral():
@@ -8,9 +13,6 @@ def test_eod_config_defaults_are_neutral():
     assert lc.day_review_keep == 10
     assert lc.day_lesson_repeat_n == 3
     assert lc.day_lesson_lookback_m == 5
-
-
-from hermes_bridge.memory import LearnedStore
 
 
 def test_day_review_append_and_read(tmp_path):
@@ -40,10 +42,6 @@ def test_format_for_prompt_includes_day_reviews(tmp_path):
     assert "Trend grind" in out
     # Off by default:
     assert "RECENT DAY-REVIEWS" not in s.format_for_prompt()
-
-
-import time
-from hermes_bridge.reflect import build_day_digest
 
 
 def _rth_ts(now):
@@ -81,3 +79,27 @@ def test_build_day_digest_caps_items():
                  "rationale": "x"} for _ in range(40)]
     d = build_day_digest(now, declines, {"range": 0.0}, [], {})
     assert d["declines"]["total"] == 40 and len(d["declines"]["items"]) == 20
+
+
+def _reflector(tmp_path, cfg):
+    return Reflector(cfg, LearnedStore(str(tmp_path)), JournalStore(str(tmp_path / "j.jsonl")))
+
+
+def test_reflect_on_day_writes_review(tmp_path, cfg):
+    r = _reflector(tmp_path, cfg)
+    digest = {"date": "2026-06-29", "declines": {"total": 11}, "pa": {"range": 761.0}}
+    fake = '{"narrative": "Trend grind; pullbacks sub-0.50, correctly blocked.", ' \
+           '"theme": "trend_day_pullback_subconf", "observation": "edge gap = momentum entry"}'
+    with patch("hermes_bridge.reflect.run_claude_oneshot", return_value=fake):
+        out = r.reflect_on_day(digest)
+    assert out["written"] == 1 and out["theme"] == "trend_day_pullback_subconf"
+    revs = r.learned.day_reviews(5)
+    assert revs and revs[0][0] == "2026-06-29" and "Trend grind" in revs[0][1]
+
+
+def test_reflect_on_day_swallows_failure(tmp_path, cfg):
+    r = _reflector(tmp_path, cfg)
+    with patch("hermes_bridge.reflect.run_claude_oneshot", side_effect=RuntimeError("boom")):
+        out = r.reflect_on_day({"date": "2026-06-29"})
+    assert out["written"] == 0 and out["error"] == "RuntimeError"
+    assert r.learned.day_reviews(5) == []

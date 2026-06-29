@@ -155,6 +155,25 @@ their stats. Consolidate overlapping lessons (update one, retire the duplicates)
 retire lessons that are stale or contradicted. Return ONLY structured output: a
 "lessons" array of op/name/body/regime_tags changes. Make NO change you are unsure of."""
 
+EOD_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "narrative": {"type": "string"},
+        "theme": {"type": "string"},
+        "observation": {"type": "string"},
+    },
+    "required": ["narrative", "theme"],
+})
+
+EOD_SYSTEM = """\
+You are reviewing one RTH trading day for a futures day-trading agent. You are given a \
+DETERMINISTIC digest (price action, declined/unfilled setups with outcomes, trades). Write a \
+concise, specific day-review of what the price action did and why the agent traded or didn't \
+— name the regime, the entry-style fit, and the would-win/would-lose verdict. Do NOT propose \
+config or risk numbers. Return JSON: narrative (the writeup), theme (a short snake_case \
+pattern key for this day, e.g. trend_day_pullback_subconfidence), observation (one candidate \
+insight). Be honest when sitting out was correct."""
+
 DISTILL_SCHEMA = json.dumps({
     "type": "object",
     "properties": {"distilled": {"type": "string"}},
@@ -211,6 +230,34 @@ class Reflector:
             + json.dumps(recent[-self.cfg.learning.reflect_recent:], separators=(",", ":"))
         )
         return self._run_with_error(self._system(REFLECT_SYSTEM), user, REFLECT_SCHEMA)
+
+    def reflect_on_day(self, digest: dict) -> dict:
+        """Descriptive once-a-day review over the deterministic digest. Best-effort: writes a
+        dated day-review on success, swallows every failure (never disrupts trading)."""
+        lc = self.cfg.learning
+        out = {"written": 0, "theme": None, "error": None}
+        user = "RTH DAY DIGEST:\n" + json.dumps(digest, separators=(",", ":"))
+        try:
+            reply = run_claude_oneshot(self.cfg.agent.claude, EOD_SYSTEM, user,
+                                       json_schema=EOD_SCHEMA, model=lc.reflect_model,
+                                       timeout_s=self.cfg.agent.claude.timeout_s)
+            proposals = extract_structured(reply)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            out["error"] = type(e).__name__
+            return out
+        if not isinstance(proposals, dict) or not str(proposals.get("narrative", "")).strip():
+            out["error"] = "no_narrative"
+            return out
+        body = str(proposals["narrative"]).strip()
+        theme = str(proposals.get("theme") or "").strip() or None
+        obs = str(proposals.get("observation") or "").strip()
+        if obs:
+            body += f"\n\n_theme: {theme or '?'} · observation: {obs}_"
+        elif theme:
+            body += f"\n\n_theme: {theme}_"
+        self.learned.append_day_review(digest.get("date", "?"), body, lc.day_review_keep)
+        out["written"], out["theme"] = 1, theme
+        return out
 
     @staticmethod
     def _declines_block(declines: list[dict] | None) -> str:
