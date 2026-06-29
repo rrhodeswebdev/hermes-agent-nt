@@ -108,15 +108,33 @@ def step(
     next_state = replace(state, bars_since_author=bars_since, struct_change_bars=struct_change)
 
     past_floor = bars_since >= rc.min_interval_bars
+    drift = _price_drift(state, ctx, rc)
     if bars_since >= rc.max_interval_bars:
         reason: str | None = f"ceiling({rc.max_interval_bars}b)"
     elif past_floor and stale and struct_change >= rc.confirm_bars:
         reason = f"{stale} x{struct_change}b"
+    elif past_floor and drift is not None:
+        reason = drift
     elif past_floor and is_volatility_shock(ctx.atr, baseline_atr, rc.shock_ratio):
         reason = "volatility_shock"
     else:
         reason = None
     return next_state, reason
+
+
+def _price_drift(
+    state: ReauthorState, ctx: MarketContext, cfg: ReauthorConfig
+) -> str | None:
+    """Live price has walked >= ``drift_atr_mult`` x ATR from the price the playbook was
+    authored at — its level-anchored setups are likely out of reach even when the regime still
+    fits. None when disabled (mult <= 0), before the first author (no anchor), or with no ATR
+    to scale by (0/None)."""
+    if cfg.drift_atr_mult <= 0 or state.authored_close is None or not ctx.atr:
+        return None
+    drift = abs(ctx.last_close - state.authored_close)
+    if drift >= cfg.drift_atr_mult * ctx.atr:
+        return f"price_drift({drift:.1f}/{ctx.atr:.1f})"
+    return None
 
 
 def _playbook_stale(

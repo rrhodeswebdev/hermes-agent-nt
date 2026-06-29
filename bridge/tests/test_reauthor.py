@@ -276,3 +276,52 @@ def test_record_authored_stamps_close():
     assert s.authored_close == 5123.5
     assert s.authored_regime == "trending" and s.authored_trend == "up"
     assert s.bars_since_author == 0 and s.struct_change_bars == 0
+
+
+def test_price_drift_fires_past_floor(cfg):
+    rc = cfg.strategies.reauthor
+    rc.confirm_bars, rc.min_interval_bars, rc.max_interval_bars = 99, 3, 999
+    rc.drift_atr_mult = 2.0
+    setups = [{"name": "x", "regime": "trending"}]      # covered → not stale; isolate drift
+    s = ReauthorState(authored_regime="trending", authored_trend="up",
+                      authored_close=5000.0, bars_since_author=2)
+    far = _ctx("trending", "up", atr=10.0, close=5025.0)   # 25 pts = 2.5x ATR
+    s2, r = step(s, far, cfg=rc, generated_strategy="pb",
+                 generated_strategies=setups, baseline_atr=None)
+    assert r == "price_drift(25.0/10.0)" and s2.bars_since_author == 3
+
+
+def test_price_drift_blocked_under_floor(cfg):
+    rc = cfg.strategies.reauthor
+    rc.confirm_bars, rc.min_interval_bars, rc.max_interval_bars = 99, 5, 999
+    rc.drift_atr_mult = 2.0
+    setups = [{"name": "x", "regime": "trending"}]
+    s = ReauthorState(authored_regime="trending", authored_trend="up",
+                      authored_close=5000.0, bars_since_author=2)
+    far = _ctx("trending", "up", atr=10.0, close=5025.0)
+    _, r = step(s, far, cfg=rc, generated_strategy="pb",
+                generated_strategies=setups, baseline_atr=None)
+    assert r is None                                       # bars_since 3 < floor 5
+
+
+def test_price_drift_skipped_when_disabled_no_anchor_or_no_atr(cfg):
+    rc = cfg.strategies.reauthor
+    rc.confirm_bars, rc.min_interval_bars, rc.max_interval_bars = 99, 1, 999
+    setups = [{"name": "x", "regime": "trending"}]
+    far = _ctx("trending", "up", atr=10.0, close=5025.0)
+    s = ReauthorState(authored_regime="trending", authored_trend="up",
+                      authored_close=5000.0, bars_since_author=5)
+    rc.drift_atr_mult = 0.0                                # disabled
+    _, r0 = step(s, far, cfg=rc, generated_strategy="pb",
+                 generated_strategies=setups, baseline_atr=None)
+    assert r0 is None
+    rc.drift_atr_mult = 2.0
+    s_no_anchor = ReauthorState(authored_regime="trending", authored_trend="up",
+                                authored_close=None, bars_since_author=5)
+    _, r1 = step(s_no_anchor, far, cfg=rc, generated_strategy="pb",
+                 generated_strategies=setups, baseline_atr=None)
+    assert r1 is None                                      # no anchor yet
+    no_atr = _ctx("trending", "up", atr=0.0, close=5025.0)
+    _, r2 = step(s, no_atr, cfg=rc, generated_strategy="pb",
+                 generated_strategies=setups, baseline_atr=None)
+    assert r2 is None                                      # no ATR to scale by
