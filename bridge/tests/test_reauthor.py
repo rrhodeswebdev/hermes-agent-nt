@@ -268,3 +268,11 @@ def test_reauthor_config_defaults_are_neutral():
     assert rc.reauthor_after_trade is False
     assert rc.post_trade_min_bars == 2
     assert rc.drift_atr_mult == 0.0
+
+
+def test_record_authored_stamps_close():
+    ctx = _ctx("trending", "up", close=5123.5)
+    s = record_authored(ctx)
+    assert s.authored_close == 5123.5
+    assert s.authored_regime == "trending" and s.authored_trend == "up"
+    assert s.bars_since_author == 0 and s.struct_change_bars == 0

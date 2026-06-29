@@ -69,12 +69,14 @@ class ReauthorState:
     struct_change_bars: int = 0
     authored_regime: str | None = None
     authored_trend: str | None = None
+    authored_close: float | None = None
 
 
 def record_authored(ctx: MarketContext) -> ReauthorState:
     """The state after a fresh study authored from ``ctx``: clocks reset, anchored to THIS read
     so the next re-author fires when the live market drifts off the new playbook."""
-    return ReauthorState(authored_regime=ctx.regime, authored_trend=ctx.trend)
+    return ReauthorState(
+        authored_regime=ctx.regime, authored_trend=ctx.trend, authored_close=ctx.last_close)
 
 
 def step(
