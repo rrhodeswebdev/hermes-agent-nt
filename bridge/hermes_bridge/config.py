@@ -312,6 +312,9 @@ class ReauthorConfig(BaseModel):
     retry_bars: int = 5              # re-attempt this many bars after a failed/empty author
     baseline_atr_period: int = 100   # longer-window ATR = the "normal" volatility reference
     shock_ratio: float = 2.0         # |current/baseline ATR| past this (or its inverse) = a shock
+    reauthor_after_trade: bool = False  # re-author when a trade closes (own small floor below)
+    post_trade_min_bars: int = 2        # bars-since-author debounce for the post-trade trigger
+    drift_atr_mult: float = 0.0         # re-author when |close-authored_close| >= this x ATR; 0=off
 
 
 class StrategyAuthoringConfig(BaseModel):

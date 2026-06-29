@@ -259,3 +259,12 @@ def test_reauthor_volatility_shock_fires_early(cfg):
     for i in range(8):
         engine.on_bar(_bar(1_700_000_000 + (120 + i) * 60, 5012 + i * 0.1, 10.0))
     assert agent.session_studies > before                 # the shock forced an early re-author
+
+
+def test_reauthor_config_defaults_are_neutral():
+    # New triggers must be OFF in the committed template so default behavior is unchanged.
+    from hermes_bridge.config import ReauthorConfig
+    rc = ReauthorConfig()
+    assert rc.reauthor_after_trade is False
+    assert rc.post_trade_min_bars == 2
+    assert rc.drift_atr_mult == 0.0
