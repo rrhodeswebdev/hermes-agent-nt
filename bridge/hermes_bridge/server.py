@@ -28,8 +28,10 @@ from .config import (
 )
 from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
+from .indicators import cme_trading_day
 from .journal import DeclineLog, JournalStore
 from .levels import detect_levels
+from .market_calendar import _et, _et_minute, holiday_name
 from .memory import LearnedStore
 from .models import (
     AccountReport,
@@ -49,7 +51,7 @@ from .prop_firms import (
     load_catalog,
     persist_account_profile,
 )
-from .reflect import Reflector
+from .reflect import Reflector, build_day_digest
 from .resample import Resampler, feed_tf_of, resampler_engaged
 from .risk import RiskGate
 from .session import SessionState
@@ -68,6 +70,34 @@ def is_stale_entry(action: Action, elapsed_s: float, budget_s: float) -> bool:
 # pushes history once per ENABLE, so a bridge restarted mid-session would otherwise
 # compute EMAs/ATR/swings on a thin live-bar seed (2026-06-11 incident: 25 bars).
 HISTORY_MIN_BARS = 50
+
+
+def eod_should_run(now: float, cutoff_et: str, last_day: int | None, enabled: bool) -> bool:
+    """True when the EOD review should fire: enabled, a weekday non-holiday, at/after the ET
+    cutoff, and not yet done for now's CME trading day."""
+    if not enabled:
+        return False
+    if _et(now).weekday() >= 5 or holiday_name(now) is not None:
+        return False
+    try:
+        hh, mm = (int(x) for x in cutoff_et.split(":"))
+    except ValueError:
+        hh, mm = 16, 5
+    if _et_minute(now) < hh * 60 + mm:
+        return False
+    return cme_trading_day(now) != last_day
+
+
+def _pa_summary(bars: list, now: float) -> dict:
+    from .reflect import _rth_window
+    lo, hi = _rth_window(now)
+    win = [b for b in bars if lo <= b.ts <= hi]
+    if not win:
+        return {"range": 0.0, "bars": 0}
+    highs = max(b.high for b in win)
+    lows = min(b.low for b in win)
+    return {"open": win[0].open, "high": highs, "low": lows, "close": win[-1].close,
+            "range": round(highs - lows, 2), "bars": len(win)}
 
 
 class CommandQueue:
@@ -175,6 +205,7 @@ class AppState:
         # contracts) into cfg/session and loads the firm's context file into the brain.
         self.catalog = load_catalog(config.account_profile.catalog_path)
         self.applied_profile: dict | None = None
+        self._last_eod_review_day: int | None = None
         self._seed_account_profile()
         self._start_news_refresh()
         self._start_consolidation()
@@ -215,11 +246,35 @@ class AppState:
                     else:
                         print(f"[consolidate] curated={summary['curated']} "
                               f"distilled={summary['distilled']}", flush=True)
+                    self._maybe_eod_review(time.time())
                 except Exception as e:  # noqa: BLE001 — one bad cycle must not end the cadence
                     print(f"[consolidate] error: {type(e).__name__}", flush=True)
                 time.sleep(max(60.0, lc.consolidate_interval_minutes * 60.0))
 
         threading.Thread(target=_loop, daemon=True).start()
+
+    def _maybe_eod_review(self, now: float) -> None:
+        lc = self.cfg.learning
+        if not eod_should_run(now, lc.eod_review_cutoff_et, self._last_eod_review_day,
+                              lc.enabled and lc.eod_review_enabled):
+            return
+        self._last_eod_review_day = cme_trading_day(now)
+        try:
+            declines = self.declines.all()           # DeclineLog.all() -> list[dict] (verified)
+            bars = self.store.all()                  # server-level BarStore (verified)
+            pa = _pa_summary(bars, now)
+            trades = self.journal.recent(200)
+            session = {"realized_pnl": self.session.realized_pnl,
+                       "trades_today": self.session.trades_today}
+            digest = build_day_digest(now, declines, pa, trades, session)
+            if digest["declines"]["total"] == 0 and digest["trades"]["count"] == 0:
+                return                                # nothing happened in-window; skip
+            res = self.reflector.reflect_on_day(digest)
+            print(f"[eod-review] {res}", flush=True)
+            if res.get("written"):
+                self.reflector.maybe_promote_day_lesson()
+        except Exception as e:  # noqa: BLE001 — best-effort; never disrupt trading
+            print(f"[eod-review] error: {type(e).__name__}", flush=True)
 
     def effective_account(self) -> str:
         """Live NT account if the strategy has reported one, else the config default."""

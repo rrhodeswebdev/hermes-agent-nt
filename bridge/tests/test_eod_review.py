@@ -1,9 +1,12 @@
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from hermes_bridge.config import LearningConfig
+from hermes_bridge.indicators import cme_trading_day
 from hermes_bridge.journal import JournalStore
 from hermes_bridge.memory import LearnedStore
 from hermes_bridge.reflect import Reflector, build_day_digest
+from hermes_bridge.server import eod_should_run
 
 
 def test_eod_config_defaults_are_neutral():
@@ -131,3 +134,16 @@ def test_promote_silent_without_repeat(tmp_path, cfg):
     with patch("hermes_bridge.reflect.run_claude_oneshot") as m:
         out = r.maybe_promote_day_lesson()
     assert out["promoted"] == 0 and m.call_count == 0          # no model call on a one-off
+
+
+def test_eod_should_run_guard():
+    # 2026-06-29 is a Monday (EDT = UTC-4).
+    # Build UTC timestamps: 16:30 ET = 20:30 UTC, 15:00 ET = 19:00 UTC.
+    after = datetime(2026, 6, 29, 20, 30, tzinfo=UTC).timestamp()   # 16:30 ET — past cutoff
+    before = datetime(2026, 6, 29, 19, 0, tzinfo=UTC).timestamp()   # 15:00 ET — pre-cutoff
+    assert eod_should_run(after, "16:05", last_day=None, enabled=True) is True
+    assert eod_should_run(before, "16:05", last_day=None, enabled=True) is False   # pre-cutoff
+    assert eod_should_run(after, "16:05", last_day=99, enabled=True) is True        # diff day
+    assert eod_should_run(after, "16:05", last_day=cme_trading_day(after),
+                          enabled=True) is False                                    # already done
+    assert eod_should_run(after, "16:05", last_day=None, enabled=False) is False    # gated off
