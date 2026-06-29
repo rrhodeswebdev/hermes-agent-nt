@@ -9,6 +9,7 @@ Every failure is swallowed -- reflection is best-effort and must never disrupt t
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 
 from .claude_cli import extract_structured, run_claude_oneshot
@@ -174,6 +175,12 @@ config or risk numbers. Return JSON: narrative (the writeup), theme (a short sna
 pattern key for this day, e.g. trend_day_pullback_subconfidence), observation (one candidate \
 insight). Be honest when sitting out was correct."""
 
+PROMOTE_SYSTEM = """\
+A theme has recurred across multiple recent day-reviews of a futures day-trading agent. From \
+the day-reviews below, propose AT MOST ONE durable, actionable lesson that would improve \
+behavior on this recurring pattern. Do NOT propose config or risk numbers. Return JSON with a \
+"lessons" array (op=create, name, body) — one lesson, or an empty array if nothing durable."""
+
 DISTILL_SCHEMA = json.dumps({
     "type": "object",
     "properties": {"distilled": {"type": "string"}},
@@ -257,6 +264,39 @@ class Reflector:
             body += f"\n\n_theme: {theme}_"
         self.learned.append_day_review(digest.get("date", "?"), body, lc.day_review_keep)
         out["written"], out["theme"] = 1, theme
+        return out
+
+    def maybe_promote_day_lesson(self) -> dict:
+        """Promote ONE corpus lesson only when a day-review theme recurs across days. Theme
+        repeat-detection is deterministic; the model is called only on a qualifying repeat."""
+        lc = self.cfg.learning
+        out = {"promoted": 0, "theme": None}
+        revs = self.learned.day_reviews(lc.day_lesson_lookback_m)
+        themes: list[str] = []
+        for _d, body in revs:
+            m = re.search(r"_theme:\s*([a-z0-9]+(?:_[a-z0-9]+)*)", body)
+            if m:
+                themes.append(m.group(1))
+        if not themes:
+            return out
+        theme, count = Counter(themes).most_common(1)[0]
+        if count < lc.day_lesson_repeat_n:
+            return out
+        same = [f"[{d}] {b}" for d, b in revs if f"_theme: {theme}" in b]
+        user = "RECURRING THEME: " + theme + "\n\nDAY-REVIEWS:\n" + "\n\n".join(same)
+        try:
+            reply = run_claude_oneshot(self.cfg.agent.claude, PROMOTE_SYSTEM, user,
+                                       json_schema=REFLECT_SCHEMA, model=lc.reflect_model,
+                                       timeout_s=self.cfg.agent.claude.timeout_s)
+            proposals = extract_structured(reply)
+        except Exception:  # noqa: BLE001 — best-effort
+            return out
+        lessons = (proposals or {}).get("lessons") or [] if isinstance(proposals, dict) else []
+        for ls in lessons[:1]:
+            if ls.get("op") and ls.get("name"):
+                self.learned.apply_lesson(ls["op"], ls["name"], ls.get("body", ""),
+                                          ls.get("regime_tags"))
+                out["promoted"], out["theme"] = 1, theme
         return out
 
     @staticmethod

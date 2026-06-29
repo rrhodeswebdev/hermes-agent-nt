@@ -103,3 +103,31 @@ def test_reflect_on_day_swallows_failure(tmp_path, cfg):
         out = r.reflect_on_day({"date": "2026-06-29"})
     assert out["written"] == 0 and out["error"] == "RuntimeError"
     assert r.learned.day_reviews(5) == []
+
+
+def _seed_reviews(store, themes):
+    for i, th in enumerate(themes):
+        store.append_day_review(f"2026-06-{10 + i}", f"day {i}\n\n_theme: {th}_", keep=50)
+
+
+def test_promote_fires_on_repeated_theme(tmp_path, cfg):
+    r = _reflector(tmp_path, cfg)
+    cfg.learning.day_lesson_repeat_n = 3
+    cfg.learning.day_lesson_lookback_m = 5
+    _seed_reviews(r.learned, ["trend_subconf", "x", "trend_subconf", "y", "trend_subconf"])
+    fake = '{"lessons":[{"op":"create","name":"Trend-day momentum entry",' \
+           '"body":"On trend grinds, pullback setups come sub-0.50; need a momentum entry."}]}'
+    with patch("hermes_bridge.reflect.run_claude_oneshot", return_value=fake):
+        out = r.maybe_promote_day_lesson()
+    assert out["promoted"] == 1 and out["theme"] == "trend_subconf"
+    names = [ls.name for ls in r.learned.lessons()]
+    assert "Trend-day momentum entry" in names
+
+
+def test_promote_silent_without_repeat(tmp_path, cfg):
+    r = _reflector(tmp_path, cfg)
+    cfg.learning.day_lesson_repeat_n = 3
+    _seed_reviews(r.learned, ["a", "b", "c", "trend_subconf", "d"])
+    with patch("hermes_bridge.reflect.run_claude_oneshot") as m:
+        out = r.maybe_promote_day_lesson()
+    assert out["promoted"] == 0 and m.call_count == 0          # no model call on a one-off
