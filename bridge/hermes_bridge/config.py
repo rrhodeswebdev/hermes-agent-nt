@@ -442,7 +442,7 @@ class LearningConfig(BaseModel):
     eod_review_enabled: bool = False
     eod_review_cutoff_et: str = "16:05"   # ET HH:MM after which the day-review may fire
     day_review_keep: int = Field(10, ge=1)        # rolling day-reviews retained + shown in prompt
-    day_lesson_repeat_n: int = Field(3, ge=2)     # a theme must recur in this many reviews to promote
+    day_lesson_repeat_n: int = Field(3, ge=2)     # theme must recur in this many reviews
     day_lesson_lookback_m: int = Field(5, ge=1)   # window of recent reviews scanned for a repeat
 
 
