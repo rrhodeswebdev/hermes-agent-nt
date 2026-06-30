@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+from hermes_bridge.claude_agent import ClaudeAgentClient
 from hermes_bridge.config import LearningConfig
-from hermes_bridge.indicators import cme_trading_day
 from hermes_bridge.journal import ClosedTrade, JournalStore
+from hermes_bridge.market_calendar import _et_date
 from hermes_bridge.memory import LearnedStore
 from hermes_bridge.reflect import Reflector, _rth_window, build_day_digest
 from hermes_bridge.server import eod_should_run
@@ -45,6 +46,17 @@ def test_format_for_prompt_includes_day_reviews(tmp_path):
     assert "Trend grind" in out
     # Off by default:
     assert "RECENT DAY-REVIEWS" not in s.format_for_prompt()
+
+
+def test_learned_block_wires_day_reviews(tmp_path, cfg):
+    # The brain's prompt builder must pass day_reviews_n so it reads its own recent day-reviews.
+    cfg.learning.enabled = True
+    cfg.learning.day_review_keep = 10
+    c = ClaudeAgentClient(cfg)
+    c._learned = LearnedStore(str(tmp_path))
+    c._learned.append_day_review("2026-06-29", "Trend grind day-review body.", keep=10)
+    block = c._learned_block()
+    assert "RECENT DAY-REVIEWS" in block and "Trend grind" in block
 
 
 def _rth_ts(now):
@@ -158,12 +170,22 @@ def test_eod_should_run_guard():
     # Build UTC timestamps: 16:30 ET = 20:30 UTC, 15:00 ET = 19:00 UTC.
     after = datetime(2026, 6, 29, 20, 30, tzinfo=UTC).timestamp()   # 16:30 ET — past cutoff
     before = datetime(2026, 6, 29, 19, 0, tzinfo=UTC).timestamp()   # 15:00 ET — pre-cutoff
-    assert eod_should_run(after, "16:05", last_day=None, enabled=True) is True
-    assert eod_should_run(before, "16:05", last_day=None, enabled=True) is False   # pre-cutoff
-    assert eod_should_run(after, "16:05", last_day=99, enabled=True) is True        # diff day
-    assert eod_should_run(after, "16:05", last_day=cme_trading_day(after),
+    assert eod_should_run(after, "16:05", last_date=None, enabled=True) is True
+    assert eod_should_run(before, "16:05", last_date=None, enabled=True) is False   # pre-cutoff
+    assert eod_should_run(after, "16:05", last_date="2020-01-01", enabled=True) is True  # diff date
+    assert eod_should_run(after, "16:05", last_date=_et_date(after).isoformat(),
                           enabled=True) is False                                    # already done
-    assert eod_should_run(after, "16:05", last_day=None, enabled=False) is False    # gated off
+    assert eod_should_run(after, "16:05", last_date=None, enabled=False) is False   # gated off
+
+
+def test_eod_dedupe_by_et_date_not_cme_day():
+    # One ET calendar date can span TWO cme_trading_days (the 17:00 ET roll). Dedupe must key on
+    # the RTH date, so a post-roll evening tick does NOT re-fire the same day's review.
+    afternoon = datetime(2026, 6, 29, 20, 30, tzinfo=UTC).timestamp()  # 16:30 ET (pre-17:00 roll)
+    evening = datetime(2026, 6, 30, 0, 30, tzinfo=UTC).timestamp()     # 20:30 ET, same ET date
+    stamp = _et_date(afternoon).isoformat()
+    assert _et_date(evening).isoformat() == stamp                      # same RTH date
+    assert eod_should_run(evening, "16:05", last_date=stamp, enabled=True) is False
 
 
 # ---------------------------------------------------------------------------

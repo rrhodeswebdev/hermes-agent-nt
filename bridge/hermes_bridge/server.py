@@ -28,10 +28,9 @@ from .config import (
 )
 from .dashboard import DASHBOARD_HTML, render_panel, render_text
 from .engine import TradingEngine
-from .indicators import cme_trading_day
 from .journal import DeclineLog, JournalStore
 from .levels import detect_levels
-from .market_calendar import _et, _et_minute, holiday_name
+from .market_calendar import _et, _et_date, _et_minute, holiday_name
 from .memory import LearnedStore
 from .models import (
     AccountReport,
@@ -72,9 +71,10 @@ def is_stale_entry(action: Action, elapsed_s: float, budget_s: float) -> bool:
 HISTORY_MIN_BARS = 50
 
 
-def eod_should_run(now: float, cutoff_et: str, last_day: int | None, enabled: bool) -> bool:
+def eod_should_run(now: float, cutoff_et: str, last_date: str | None, enabled: bool) -> bool:
     """True when the EOD review should fire: enabled, a weekday non-holiday, at/after the ET
-    cutoff, and not yet done for now's CME trading day."""
+    cutoff, and not yet done for now's RTH (ET calendar) date. Dedupe keys on the ET date (not
+    cme_trading_day) so the 17:00 ET roll can't re-fire a day already reviewed."""
     if not enabled:
         return False
     if _et(now).weekday() >= 5 or holiday_name(now) is not None:
@@ -85,7 +85,7 @@ def eod_should_run(now: float, cutoff_et: str, last_day: int | None, enabled: bo
         hh, mm = 16, 5
     if _et_minute(now) < hh * 60 + mm:
         return False
-    return cme_trading_day(now) != last_day
+    return _et_date(now).isoformat() != last_date
 
 
 def _pa_summary(bars: list, now: float) -> dict:
@@ -205,7 +205,7 @@ class AppState:
         # contracts) into cfg/session and loads the firm's context file into the brain.
         self.catalog = load_catalog(config.account_profile.catalog_path)
         self.applied_profile: dict | None = None
-        self._last_eod_review_day: int | None = None
+        self._last_eod_review_date: str | None = None
         self._seed_account_profile()
         self._start_news_refresh()
         self._start_consolidation()
@@ -255,10 +255,10 @@ class AppState:
 
     def _maybe_eod_review(self, now: float) -> None:
         lc = self.cfg.learning
-        if not eod_should_run(now, lc.eod_review_cutoff_et, self._last_eod_review_day,
+        if not eod_should_run(now, lc.eod_review_cutoff_et, self._last_eod_review_date,
                               lc.enabled and lc.eod_review_enabled):
             return
-        self._last_eod_review_day = cme_trading_day(now)
+        self._last_eod_review_date = _et_date(now).isoformat()
         try:
             declines = self.declines.all()           # DeclineLog.all() -> list[dict] (verified)
             bars = self.store.all()                  # server-level BarStore (verified)
