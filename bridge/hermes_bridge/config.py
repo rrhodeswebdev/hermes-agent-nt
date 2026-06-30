@@ -380,6 +380,9 @@ class ExecutionConfig(BaseModel):
     # seconds as stale (the bar it reasoned about is old). EXIT/FLATTEN always execute.
     # Set explicitly to be stricter (e.g. 60 on 2m bars, prioritizing fill quality).
     entry_freshness_s: float = 0.0
+    # Per-contract-per-side commission in USD. 0.0 = neutral (net == gross). The live
+    # box sets this to 0.65 in trading.local.yaml (e.g. NinjaTrader flat-rate plan).
+    commission_per_contract: float = Field(default=0.0, ge=0.0)
 
 
 class LearningConfig(BaseModel):

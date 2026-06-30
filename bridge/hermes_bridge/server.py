@@ -154,6 +154,7 @@ class AppState:
             profit_target=config.daily_goal.profit_target,
             max_daily_loss=config.daily_goal.max_daily_loss,
             state_path=config.storage.session_state or None,
+            commission_per_contract=config.execution.commission_per_contract,
         )
         # Major-news blackout guard (shared: this server refreshes it on a background
         # thread; the RiskGate only reads it). Disabled ⇒ inert (no thread, never blocks).

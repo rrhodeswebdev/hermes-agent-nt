@@ -49,6 +49,7 @@ class SessionState:
         profit_target: float,
         max_daily_loss: float,
         state_path: str | None = None,
+        commission_per_contract: float = 0.0,
     ) -> None:
         self.instrument = instrument
         self.timeframe = timeframe
@@ -58,10 +59,12 @@ class SessionState:
         self.point_value = tick_value / tick_size if tick_size else 1.0
         self.profit_target = profit_target
         self.max_daily_loss = abs(max_daily_loss)
+        self.commission_per_contract = commission_per_contract
 
         self.position: int = 0          # signed contracts
         self.avg_price: float = 0.0
         self.realized_pnl: float = 0.0
+        self.commission_total: float = 0.0
         self.trades_today: int = 0
         self.halted: bool = False
         self.halt_reason: str = ""
@@ -95,6 +98,8 @@ class SessionState:
             if self._pending_restore is not None:
                 if self._pending_restore.get("day") == key.value:
                     self.realized_pnl = float(self._pending_restore.get("realized_pnl", 0.0))
+                    self.commission_total = float(
+                        self._pending_restore.get("commission_total", 0.0))
                     self.trades_today = int(self._pending_restore.get("trades_today", 0))
                     self.halted = bool(self._pending_restore.get("halted", False))
                     self.halt_reason = self._pending_restore.get("halt_reason", "") or ""
@@ -106,6 +111,7 @@ class SessionState:
         if key.value != self._day.value:
             self._day = key
             self.realized_pnl = 0.0
+            self.commission_total = 0.0
             self.trades_today = 0
             self.halted = False
             self.halt_reason = ""
@@ -125,6 +131,7 @@ class SessionState:
             p.write_text(json.dumps({
                 "day": self._day.value if self._day else None,
                 "realized_pnl": self.realized_pnl,
+                "commission_total": self.commission_total,
                 "trades_today": self.trades_today,
                 "halted": self.halted,
                 "halt_reason": self.halt_reason,
@@ -146,6 +153,8 @@ class SessionState:
         signed = self._signed(fill)
         if signed == 0:
             return
+        # Commission accrues on every fill (entry AND exit), per side.
+        self.commission_total += abs(signed) * self.commission_per_contract
         price = fill.price
         opening_from_flat = self.position == 0
 
@@ -184,6 +193,11 @@ class SessionState:
         if self.position == 0:
             return 0.0
         return (mark_price - self.avg_price) * self.position * self.point_value
+
+    @property
+    def realized_net(self) -> float:
+        """Realized P&L after deducting all commissions paid this session."""
+        return self.realized_pnl - self.commission_total
 
     def check_daily_goal(self) -> str | None:
         """Evaluate the daily goal against realized P&L. Returns a halt reason if a
@@ -230,4 +244,6 @@ class SessionState:
             halt_reason=self.halt_reason,
             daily_goal_hit=self.daily_goal_hit,
             last_bar_ts=self.last_bar_ts,
+            realized_net=round(self.realized_net, 2),
+            commission=round(self.commission_total, 2),
         )

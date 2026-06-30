@@ -151,6 +151,8 @@ def render_panel(d: dict | None) -> str:
         f"position={s['position']}",
         f"avg_price={s['avg_price']:.10g}",
         f"realized={s['realized_pnl']:.2f}",
+        f"realized_net={s.get('realized_net', s['realized_pnl']):.2f}",
+        f"commission={s.get('commission', 0.0):.2f}",
         f"unrealized={s['unrealized_pnl']:.2f}",
         f"trades={s['trades_today']}",
         f"halted={1 if s['halted'] else 0}",
@@ -426,7 +428,10 @@ async function tick(){
     const pos=s.position===0?'FLAT':(s.position>0?'LONG ':'SHORT ')+Math.abs(s.position)+' @'+s.avg_price;
     const pe=document.getElementById('pos'); pe.textContent=pos;
     pe.className='val '+(s.position>0?'grn':s.position<0?'red':'dim');
-    const re=document.getElementById('rpnl'); re.textContent=fmt(s.realized_pnl); re.className='val '+cls(s.realized_pnl);
+    const re=document.getElementById('rpnl');
+    const net=s.realized_net!=null?s.realized_net:s.realized_pnl;
+    const comm=s.commission!=null&&s.commission>0?' (net '+fmt(net)+')':'';
+    re.textContent=fmt(s.realized_pnl)+comm; re.className='val '+cls(s.realized_pnl);
     document.getElementById('trades').textContent=s.trades_today+' · +'+d.goal.profit_target+'/-'+d.goal.max_daily_loss;
     const age=d.data_age_seconds; const ae=document.getElementById('age');
     ae.textContent=(age==null?'?':Math.round(age)+'s'); ae.className='val '+(age==null?'dim':age>120?'red':'grn');

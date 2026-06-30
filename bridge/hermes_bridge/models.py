@@ -174,3 +174,5 @@ class AccountState(FrozenModel):
     halt_reason: str = ""
     daily_goal_hit: bool = False
     last_bar_ts: float | None = None
+    realized_net: float = 0.0        # realized P&L minus commissions paid
+    commission: float = 0.0          # total commission paid this session
