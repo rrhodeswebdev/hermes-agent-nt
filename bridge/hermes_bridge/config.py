@@ -426,6 +426,14 @@ class LearningConfig(BaseModel):
     # per-bar claude.timeout_s (30s). It runs off the hot path (manual /control/distill),
     # so a generous budget is safe.
     distill_timeout_s: float = Field(300.0, gt=0)
+    # Automatic consolidation cadence: a wall-clock daemon (server._start_consolidation)
+    # periodically runs curate() then distill() so the learned corpus stays compressed
+    # without a manual /control/curate|distill. Material-gated — no model call when nothing
+    # changed. OFF by default (neutral); trading.local.yaml opts in. Freshness/liveness show
+    # on /dashboard + /panel.txt (consolidate_*).
+    consolidate_enabled: bool = False
+    consolidate_interval_minutes: float = Field(120.0, gt=0)
+    consolidate_startup_delay_s: float = Field(90.0, ge=0)
 
 
 class NewsConfig(BaseModel):

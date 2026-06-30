@@ -15,3 +15,10 @@ def test_learning_from_yaml(tmp_path):
     c = load_config(str(p))
     assert c.learning.retrieve_k == 5
     assert c.learning.enabled is False
+
+
+def test_consolidate_cadence_defaults_are_neutral():
+    lc = BridgeConfig().learning
+    assert lc.consolidate_enabled is False          # OFF in the committed template
+    assert lc.consolidate_interval_minutes == 120.0
+    assert lc.consolidate_startup_delay_s == 90.0
