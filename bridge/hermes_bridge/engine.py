@@ -741,22 +741,26 @@ class TradingEngine:
                 stop_price, target_price = limit - stop_ticks * tick, limit + target_ticks * tick
             else:
                 stop_price, target_price = limit + stop_ticks * tick, limit - target_ticks * tick
-            # Dedup by proximity to a same-side pending: the plan cycle re-arms the same band
+            # A shadowed (over-cap) trigger goes in its OWN bucket so the "did the $125 cap cost
+            # a winner?" tally stays separate from the gate-skip scoreboard (delta/confidence).
+            kind = "over_cap_trigger" if not t.feasible else "missed_trigger"
+            # Dedup by proximity to a same-KIND pending: the plan cycle re-arms the same band
             # every bar, so without this one missed pullback would log on every bar. tol uses
             # the live ATR but the compare is on raw price, so it stays stable as ATR drifts.
             tol = self.cfg.learning.counterfactual_dedup_atr * atr_value
-            if any(p.kind == "missed_trigger" and p.side == side
+            if any(p.kind == kind and p.side == side
                    and abs(p.limit_price - limit) <= tol for p in self._cf_pending):
                 continue
             self._cf_pending.append(PendingCounterfactual(
-                kind="missed_trigger", side=side, limit_price=limit,
+                kind=kind, side=side, limit_price=limit,
                 stop_price=stop_price, target_price=target_price, born_ts=bar.ts,
                 bars_left=self.cfg.learning.counterfactual_horizon_bars,
                 rationale=t.rationale or plan.rationale, regime=ctx.regime,
-                # Attribute the blocking gate only to the trigger that actually matched price
-                # this bar (the one evaluate_plan turned into the suppressed ENTRY); the others
-                # are speculative replays that simply never triggered.
-                suppressed_by=suppressed_by if t.matches(bar.close) else "",
+                # A shadowed trigger is blocked by the RISK CAP, not a decision gate — attribute it
+                # as such. Otherwise attribute the blocking gate only to the trigger that actually
+                # matched price this bar (the suppressed ENTRY); the others are speculative replays.
+                suppressed_by=("risk_cap" if not t.feasible
+                               else suppressed_by if t.matches(bar.close) else ""),
                 delta_ratio=ctx.delta_ratio, confidence=t.confidence,
                 # Snapshot the gate's sustained-delta inputs at this bar (last 16 signs covers any
                 # plausible delta_sustain_bars with headroom) + the session for the ETH floor scale.

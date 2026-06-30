@@ -196,6 +196,10 @@ def render_panel(d: dict | None) -> str:
         lines.append(f"planner_error={_oneline(pl['last_error'])}")
     if pl.get("session_error"):
         lines.append(f"session_error={_oneline(pl['session_error'])}")
+    if pl.get("triggers_shadowed"):
+        lines.append(f"triggers_shadowed={pl['triggers_shadowed']}")
+        if pl.get("shadow_reason"):
+            lines.append(f"shadow_reason={_oneline(pl['shadow_reason'])}")
     # Major-news blackout (emitted only when the feature is on).
     nw = d.get("news") or {}
     if nw.get("enabled"):

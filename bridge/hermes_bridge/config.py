@@ -163,6 +163,12 @@ class RiskParams(BaseModel):
     # 0.5 = halve size in a shock; size clamps down accordingly). 1.0 disables scaling
     # (the neutral default). See stops.risk_scale_for_atr.
     shock_risk_scale: float = Field(default=1.0, gt=0)
+    # Plan-time shadow of un-fillable triggers. When True, the Planner flags any entry trigger
+    # whose stop would bust max_risk_per_trade (the gate's single-contract check) feasible=False:
+    # shown on the dashboard + replayed in the counterfactual over_cap bucket, but never fired.
+    # The RiskGate still re-checks every real order. Neutral default off (trigger stays armed and
+    # the gate rejects it at fire time, as before). See risk.trigger_feasible.
+    shadow_infeasible_triggers: bool = False
     # Confidence-scaled sizing. When True, an entry's size ramps with the decision's
     # confidence: 1 contract at strategy.min_confidence (the lowest confidence an entry is
     # taken at) up to the full budget — the lesser of max_contracts and the per-trade

@@ -150,15 +150,16 @@ def evaluate_risk(
         )
 
     # 7) Per-trade dollar risk (clamp qty down to fit). The budget itself shrinks in a
-    # volatility shock via risk_scale, so wild conditions get smaller size.
+    # volatility shock via risk_scale, so wild conditions get smaller size. The cap math is
+    # factored into max_qty_for_risk so the plan-time trigger_feasible filter reuses the
+    # SAME rule (one risk authority, never a drifting copy).
     risk_ticks = _risk_ticks(cfg, stop_ticks, stop_price, command.action, last_price)
     if risk_ticks is None or risk_ticks <= 0:
         return RiskDecision(False, None, ["cannot_determine_stop_distance"])
     per_contract_risk = risk_ticks * cfg.instrument.tick_value
-    effective_max_risk = cfg.risk.max_risk_per_trade * max(0.0, risk_scale)
     if risk_scale < 1.0:
         reasons.append(f"risk_scaled:{risk_scale:g}")
-    max_qty_by_risk = int(effective_max_risk // per_contract_risk)
+    max_qty_by_risk = max_qty_for_risk(cfg, per_contract_risk, risk_scale)
     if max_qty_by_risk < 1:
         return RiskDecision(
             False, None, [f"single_contract_risk_exceeds_max:{per_contract_risk:.2f}"]
@@ -229,6 +230,44 @@ def evaluate_risk(
     )
     reasons.append(f"approved:risk={trade_risk:.2f}")
     return RiskDecision(True, approved, reasons)
+
+
+# ---- shared cap math (gate + plan-time filter use the SAME rule) ------------
+def max_qty_for_risk(cfg: BridgeConfig, per_contract_risk: float, risk_scale: float = 1.0) -> int:
+    """The most contracts the per-trade dollar budget admits for a given per-contract risk.
+    The budget shrinks by ``risk_scale`` in a volatility shock. Returns 0 when even ONE
+    contract's risk exceeds the (scaled) cap — the ``single_contract_risk_exceeds_max``
+    condition. Shared by ``evaluate_risk`` (step 7) and ``trigger_feasible`` so the gate and
+    the plan-time filter can never drift apart."""
+    if per_contract_risk <= 0:
+        return 0
+    eff = cfg.risk.max_risk_per_trade * max(0.0, risk_scale)
+    return int(eff // per_contract_risk)
+
+
+def per_contract_risk_usd(
+    cfg: BridgeConfig, *, stop_ticks: int | None, atr: float | None
+) -> float:
+    """Post-clamp per-contract dollar risk for a TICKS-based stop, computed exactly as the
+    gate's step 6–7: inject ``default_stop_ticks`` when None, raise to the volatility floor,
+    clamp to the band, × tick_value. Triggers are always ticks-based (no price-stop path)."""
+    st = stop_ticks if stop_ticks is not None else cfg.risk.default_stop_ticks
+    clamped = clamp_stop_ticks(st, cfg, floor_ticks=vol_stop_floor_ticks(atr, cfg))
+    return clamped * cfg.instrument.tick_value
+
+
+def trigger_feasible(
+    cfg: BridgeConfig, *, stop_ticks: int | None, atr: float | None, risk_scale: float = 1.0
+) -> tuple[bool, str | None]:
+    """Would the RiskGate admit at least one contract for an entry with this stop? Mirrors the
+    gate's single-contract risk check (same vol floor + band clamp + cap math via the shared
+    helpers above), so a plan-time filter can shadow un-fillable triggers without standing up a
+    second, drift-prone risk authority. ``(True, None)`` when fillable, else ``(False, reason)``."""
+    risk = per_contract_risk_usd(cfg, stop_ticks=stop_ticks, atr=atr)
+    if max_qty_for_risk(cfg, risk, risk_scale) >= 1:
+        return True, None
+    cap = cfg.risk.max_risk_per_trade * max(0.0, risk_scale)
+    return False, f"over_cap(${risk:.0f}>${cap:.0f})"
 
 
 # ---- helpers (pure) ---------------------------------------------------------

@@ -50,8 +50,16 @@ class EntryTrigger(FrozenModel):
     # so the dashboard highlights the setup actually traded. Display only — never gates firing.
     setup: str | None = None
     rationale: str = ""
+    # Plan-time risk-cap feasibility (set by the Planner when risk.shadow_infeasible_triggers
+    # is on). False = the stop would bust the RiskGate's single-contract cap, so the trigger is
+    # SHADOWED: shown + counterfactually replayed (over_cap bucket) but never fired (see
+    # matches()). Default True so behavior is unchanged when the feature is off.
+    feasible: bool = True
+    infeasible_reason: str | None = None
 
     def matches(self, close: float) -> bool:
+        if not self.feasible:
+            return False  # shadowed: un-fillable at the risk cap — never fires
         if self.qty <= 0:
             return False  # a trigger that would buy 0 contracts is not a trigger
         if self.min_close is None and self.max_close is None:
@@ -68,7 +76,10 @@ class EntryTrigger(FrozenModel):
             parts.append(f"close>={self.min_close:g}")
         if self.max_close is not None:
             parts.append(f"close<={self.max_close:g}")
-        return f"{self.direction}[{' and '.join(parts) or 'never'}]"
+        desc = f"{self.direction}[{' and '.join(parts) or 'never'}]"
+        if not self.feasible:
+            desc += f" ~shadow({self.infeasible_reason or 'over_cap'})"
+        return desc
 
 
 class ExitRule(FrozenModel):
@@ -232,13 +243,17 @@ class Planner:
 
     def snapshot(self) -> dict:
         with self._lock:
+            plan = self._plan
+            shadowed = [t for t in plan.triggers if not t.feasible] if plan else []
             return {
                 "status": self._status,
                 "last_error": self._last_error,
                 "session_error": self._session_error,
                 "session_brief_chars": len(self._brief),
-                "conditions": self._plan.describe_conditions() if self._plan else None,
-                "plan": self._plan.model_dump() if self._plan else None,
+                "conditions": plan.describe_conditions() if plan else None,
+                "plan": plan.model_dump() if plan else None,
+                "triggers_shadowed": len(shadowed),
+                "shadow_reason": shadowed[-1].infeasible_reason if shadowed else None,
             }
 
     # ---- scheduling ---------------------------------------------------------
@@ -308,7 +323,29 @@ class Planner:
         # The bridge is authoritative for mode + basis bar; never trust the LLM. Stamp them
         # by building a new plan (the models are frozen — values, not mutated in place).
         plan = plan.model_copy(update={"mode": preq.mode, "based_on_bar_ts": preq.bar_ts})
+        plan = self._mark_feasibility(plan, preq)
         self.arm(plan)
+
+    def _mark_feasibility(self, plan: TradePlan, preq: PlanRequest) -> TradePlan:
+        """Shadow any entry trigger the RiskGate would reject for single-contract risk: flag
+        it feasible=False (shown + counterfactually replayed, but never fired) instead of
+        leaving it armed to be silently rejected at fire time. Off unless
+        risk.shadow_infeasible_triggers; a no-op when nothing is over the cap."""
+        if not self.cfg.risk.shadow_infeasible_triggers or not plan.triggers:
+            return plan
+        from .risk import trigger_feasible
+        atr = preq.context.atr if preq.context is not None else None
+        marked, changed = [], False
+        for t in plan.triggers:
+            ok, reason = trigger_feasible(self.cfg, stop_ticks=t.stop_ticks, atr=atr)
+            if ok:
+                marked.append(t)
+            else:
+                marked.append(
+                    t.model_copy(update={"feasible": False, "infeasible_reason": reason})
+                )
+                changed = True
+        return plan.model_copy(update={"triggers": marked}) if changed else plan
 
     def arm(self, plan: TradePlan) -> None:
         """Install a plan — unless one based on a newer bar is already armed, or an
