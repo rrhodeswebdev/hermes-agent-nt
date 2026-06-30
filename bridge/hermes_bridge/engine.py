@@ -110,6 +110,12 @@ class PendingCounterfactual:
     suppressed_by: str = ""
     delta_ratio: float = 0.0
     confidence: float = 0.0
+    # The trailing windowed-delta SIGNS the sustained-delta gate reads (_delta_confirms) and the
+    # session (ETH scales the floor), snapshotted at the decline bar. Stamped onto the record so a
+    # future rescore of the sustained branch reads the EXACT gate inputs instead of reconstructing
+    # delta from bars.db (whose history-backfill bars carry no bid/ask).
+    delta_signs: tuple[int, ...] = ()
+    session: str = ""
 
 
 @dataclass
@@ -651,6 +657,10 @@ class TradingEngine:
                 "suppressed_by": p.suppressed_by,
                 "delta_ratio": round(p.delta_ratio, 4),
                 "confidence": round(p.confidence, 3),
+                # Exact sustained-delta-gate inputs at the decline bar (see PendingCounterfactual):
+                # the trailing windowed-delta signs + session, so a rescore needs no reconstruction.
+                "delta_signs": list(p.delta_signs),
+                "session": p.session,
                 # Full timeline so the outcome can be re-verified later without guessing
                 # the anchor: born_ts = the bar it was declined on (replay starts here),
                 # fill_ts = when the limit was touched (None if never filled), resolved_ts
@@ -742,6 +752,9 @@ class TradingEngine:
                 # are speculative replays that simply never triggered.
                 suppressed_by=suppressed_by if t.matches(bar.close) else "",
                 delta_ratio=ctx.delta_ratio, confidence=t.confidence,
+                # Snapshot the gate's sustained-delta inputs at this bar (last 16 signs covers any
+                # plausible delta_sustain_bars with headroom) + the session for the ETH floor scale.
+                delta_signs=tuple(self._delta_signs[-16:]), session=ctx.session,
             ))
 
     def _record_exit_replay(self, trade: ClosedTrade) -> None:
