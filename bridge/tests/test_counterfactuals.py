@@ -112,3 +112,36 @@ def test_corrupt_watermark_reseeds_everything(tmp_path):
     p.with_suffix(".watermark.json").write_text("{not json", encoding="utf-8")
     log2 = DeclineLog(str(p))
     assert len(log2.unreported_wins()) == 1  # duplicate over lost — by design
+
+
+def test_tied_resolved_ts_across_drain_survives_restart(tmp_path):
+    from hermes_bridge.journal import DeclineLog
+    p = str(tmp_path / "declines.jsonl")
+    log = DeclineLog(p)
+    log.append(_win(100.0))
+    assert len(log.take_unreported()) == 1      # watermark: ts=100, n=1
+    log.append(_win(100.0))                     # same-ts record lands after the drain
+    log2 = DeclineLog(p)                        # restart
+    assert len(log2.unreported_wins()) == 1     # NOT lost
+
+
+def test_reported_tie_cohort_does_not_reseed(tmp_path):
+    from hermes_bridge.journal import DeclineLog
+    p = str(tmp_path / "declines.jsonl")
+    log = DeclineLog(p)
+    log.append(_win(100.0))
+    log.append(_win(100.0))
+    assert len(log.take_unreported()) == 2      # watermark: ts=100, n=2
+    log2 = DeclineLog(p)
+    assert log2.unreported_wins() == []         # no steady-state duplicates
+
+
+def test_non_dict_watermark_json_reseeds(tmp_path):
+    from hermes_bridge.journal import DeclineLog
+    p = tmp_path / "declines.jsonl"
+    log = DeclineLog(str(p))
+    log.append(_win(100.0))
+    log.take_unreported()
+    p.with_suffix(".watermark.json").write_text("null", encoding="utf-8")
+    log2 = DeclineLog(str(p))
+    assert len(log2.unreported_wins()) == 1     # AttributeError path degrades to (0,0)

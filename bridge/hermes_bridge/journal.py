@@ -187,27 +187,40 @@ class DeclineLog:
             return []
         return self.all()[-n:]
 
-    def _read_watermark(self) -> float:
+    def _read_watermark(self) -> tuple[float, int]:
         try:
             data = json.loads(self._watermark_path.read_text(encoding="utf-8"))
-            return float(data.get("reported_through_ts", 0.0))
-        except (OSError, ValueError, TypeError):
-            return 0.0  # missing/corrupt -> re-seed everything (duplicate over lost)
+            return (float(data.get("reported_through_ts", 0.0)),
+                    int(data.get("reported_at_ts", 0)))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return (0.0, 0)  # missing/corrupt -> re-seed everything (duplicate over lost)
 
-    def _write_watermark(self, ts: float) -> None:
+    def _write_watermark(self, ts: float, n_at_ts: int) -> None:
         try:
             self._watermark_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._watermark_path.with_name(self._watermark_path.name + ".tmp")
-            tmp.write_text(json.dumps({"reported_through_ts": ts}), encoding="utf-8")
+            tmp.write_text(json.dumps({"reported_through_ts": ts, "reported_at_ts": n_at_ts}),
+                           encoding="utf-8")
             tmp.replace(self._watermark_path)
         except OSError:
             pass  # best-effort: worst case is re-reporting after the next restart
 
     def _seed_unreported(self) -> None:
-        wm = self._read_watermark()
+        """Rebuild the unreported queue from disk. The counted watermark makes ties
+        safe: of the would_win records AT the watermark ts, the first n (file order =
+        append order) are already reported; later ones re-seed."""
+        wm_ts, wm_n = self._read_watermark()
+        seen_at_wm = 0
         for rec in self.all():
-            if rec.get("outcome") == "would_win" and float(rec.get("resolved_ts") or 0.0) > wm:
+            if rec.get("outcome") != "would_win":
+                continue
+            ts = float(rec.get("resolved_ts") or 0.0)
+            if ts > wm_ts:
                 self._unreported_wins.append(rec)
+            elif ts == wm_ts:
+                seen_at_wm += 1
+                if seen_at_wm > wm_n:
+                    self._unreported_wins.append(rec)
 
     def unreported_wins(self) -> list[dict]:
         with self._lock:
@@ -217,14 +230,21 @@ class DeclineLog:
         self.take_unreported()  # discard == reported: advance the watermark too
 
     def take_unreported(self) -> list[dict]:
-        """Atomic snapshot-and-clear; advances the persisted watermark so a restart
-        cannot resurface already-reported wins. A win resolved concurrently lands in
-        the NEXT snapshot instead of being cleared unseen."""
+        """Atomic snapshot-and-clear; advances the persisted counted watermark so a
+        restart cannot resurface already-reported wins, and a tie on resolved_ts
+        cannot lose one. A win resolved concurrently lands in the NEXT snapshot."""
         with self._lock:
             out = list(self._unreported_wins)
             self._unreported_wins.clear()
         if out:
-            self._write_watermark(max(float(r.get("resolved_ts") or 0.0) for r in out))
+            wm_ts, wm_n = self._read_watermark()
+            max_ts = max(float(r.get("resolved_ts") or 0.0) for r in out)
+            if max_ts >= wm_ts:
+                n_at_max = sum(1 for r in out
+                               if float(r.get("resolved_ts") or 0.0) == max_ts)
+                if max_ts == wm_ts:
+                    n_at_max += wm_n
+                self._write_watermark(max_ts, n_at_max)
         return out
 
 
