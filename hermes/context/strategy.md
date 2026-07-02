@@ -71,13 +71,21 @@ playbook header.
   to "don't enter on the breakout bar," which continues to govern every other
   breakout context (Trend-first above already endorses break-and-go off a named
   level; open air + sustained flow is the variant that keeps getting missed).
+  This exception applies ONLY when there is genuinely NO overhead structure: a break
+  into or under ANY overhead shelf, stacked prior highs, or a nearby ceiling remains
+  fully governed by the don't-enter-the-breakout-bar rule — that overhead-shelf case
+  is exactly where the recorded break-bar losses came from. If in doubt whether the
+  air is open, it is not: take the pullback entry instead.
 - **Delta-sign persistence grind** — a trend leg with textbook shallow-pullback/hold
   structure where per-bar delta magnitude runs weak but the delta SIGN is uniform
   across many consecutive bars (a grinding one-sided tape). Author the normal
-  continuation arm and tag its trigger `"confirm_mode": "sign_persist"`. The hard
-  delta floor STILL gates firing — the tag exists so the suppressed fires are
-  measured as their own counterfactual cohort, not lost. Do not loosen any floor on
-  the basis of this shape; the measurement decides its future.
+  continuation arm and include the literal marker line
+  `confirm: sign_persist` in that setup's detail — the between-bars plan cycle reads
+  the setup detail and must set `"confirm_mode": "sign_persist"` on every trigger it
+  arms for such a setup (the study authors the setup; the plan cycle tags the
+  triggers). The hard delta floor STILL gates firing — the tag exists so the
+  suppressed fires are measured as their own counterfactual cohort, not lost. Do not
+  loosen any floor on the basis of this shape; the measurement decides its future.
 
 ## Definitions (provided to you each bar in `context`)
 

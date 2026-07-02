@@ -116,8 +116,9 @@ Reply with one JSON object:
   Set each trigger's "setup" to the EXACT name of the authored setup it implements (from
   "Your setups" in the ACTIVE STRATEGY block above), so the dashboard highlights the setup
   that actually fires. Use null only if the trigger maps to no named setup.
-  If a trigger implements a sign-persistence grind arm (see "Coverage shapes" in the
-  strategy framework), set "confirm_mode": "sign_persist" on it; otherwise omit/null.
+  If a trigger implements a sign-persistence grind arm (the setup's detail carries the
+  marker `confirm: sign_persist`; see "Coverage shapes" in the strategy framework),
+  set "confirm_mode": "sign_persist" on that trigger; otherwise omit/null.
 - "exit": invalidation thresholds (manage_position plans): exit if the close is at/
   beyond exit_below or exit_above. null = hold, the resting bracket protects. Tag its
   "setup" the same way (the setup the open position is being managed under).
@@ -510,7 +511,7 @@ class ClaudeAgentClient(AgentClient):
         if not isinstance(raw, list):
             raw = []  # malformed reply shapes degrade to no-coverage, never raise
         # bounded: max 8 coverage header comments, not prose
-        coverage = [str(x).strip() for x in raw if str(x).strip()][:8]
+        coverage = [" ".join(str(x).split()) for x in raw if str(x).strip()][:8]
         # Setups are the single source of truth: the binding playbook the brain trades is
         # RENDERED from them, so the dashboard list and the strategy can't diverge. No
         # usable setups → author nothing → the system prompt instructs WAIT (never trades

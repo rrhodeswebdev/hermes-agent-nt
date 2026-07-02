@@ -319,3 +319,30 @@ def test_untagged_trigger_decline_has_no_shape_key(tmp_path):
     recs = eng.declines.all()
     assert recs, "expected at least one resolved decline record"
     assert all("shape" not in r for r in recs), "untagged declines must not grow a shape key"
+
+
+def test_sign_persist_trigger_suppressed_by_delta_floor_carries_both(tmp_path):
+    """The exact measurement cohort (Package B): a confirm_mode='sign_persist' trigger whose
+    PRICE fires but whose order flow the delta floor suppresses must resolve with BOTH
+    shape=='sign_persist' AND suppressed_by=='delta_floor' — a merely-tagged-but-unsuppressed
+    or a suppressed-but-untagged decline is a different bucket and does not prove this
+    combination lands on one record."""
+    eng, t = _cf_engine(tmp_path)
+    # Far above any real windowed delta_ratio (bounded ~[-1,1], mixed up/down synthetic bars),
+    # so the delta gate suppresses regardless of the fire bar's sign — mirrors the existing
+    # suppressed_by tests' use of an unmissable gate value (test_suppress_low_delta_gate).
+    eng.cfg.strategy.delta_floor = 0.9
+    eng.planner._plan = TradePlan(
+        mode="seek_entry", based_on_bar_ts=t,
+        triggers=[EntryTrigger(direction="long", min_close=3990.0, max_close=3995.0,
+                               qty=1, stop_ticks=16, target_ticks=24, confidence=0.8,
+                               confirm_mode="sign_persist", rationale="grind-trend pullback")])
+    eng.on_bar(make_bar(t + 300, 3993, 3996, 3990, 3993))  # close in band -> ENTER, delta blocks
+    p = eng._cf_pending[0]
+    assert p.suppressed_by == "delta_floor"
+    assert p.shape == "sign_persist"
+    eng.on_bar(make_bar(t + 600, 3994, 3998, 3993, 3996))  # low 3993 <= limit 3995 -> fill
+    eng.on_bar(make_bar(t + 900, 3997, 4002, 3997, 3998))  # high 4002 >= target 4001 -> would_win
+    rec = eng.declines.all()[-1]
+    assert rec["shape"] == "sign_persist"
+    assert rec["suppressed_by"] == "delta_floor"
