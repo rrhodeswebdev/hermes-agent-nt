@@ -250,6 +250,10 @@ class LearnedStore:
                 for d, b in revs:
                     entry = f"[{d}] {b}"
                     if used + len(entry) > day_reviews_chars:
+                        if not block:
+                            # Never emit an empty section while reviews exist: the
+                            # NEWEST review truncates to fit instead of dropping.
+                            block.append(truncate_at_boundary(entry, day_reviews_chars))
                         break
                     block.append(entry)
                     used += len(entry)

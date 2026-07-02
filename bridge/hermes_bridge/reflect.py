@@ -187,7 +187,7 @@ concise, specific day-review of what the price action did and why the agent trad
 — name the regime, the entry-style fit, and the would-win/would-lose verdict. Do NOT propose \
 config or risk numbers. Return JSON: narrative (the writeup), theme (a short snake_case \
 pattern key for this day, e.g. trend_day_pullback_subconfidence), observation (one candidate \
-insight). Be honest when sitting out was correct."""
+insight). Be honest when sitting out was correct. Keep the narrative under ~350 words."""
 
 PROMOTE_SYSTEM = """\
 A theme has recurred across multiple recent day-reviews of a futures day-trading agent. From \

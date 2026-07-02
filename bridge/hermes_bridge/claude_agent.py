@@ -623,7 +623,7 @@ class ClaudeAgentClient(AgentClient):
             return ""
         return self._learned.format_for_prompt(
             lc.profile_char_limit, lc.notes_char_limit, lc.lessons_char_limit,
-            day_reviews_n=lc.day_review_keep)
+            day_reviews_n=lc.day_review_keep, day_reviews_chars=lc.day_review_char_limit)
 
     def _ask(self, system: str, user: str, json_schema: str,
              timeout_s: float | None = None) -> str:

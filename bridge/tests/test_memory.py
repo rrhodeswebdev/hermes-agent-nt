@@ -82,3 +82,48 @@ def test_truncate_tiny_limits_respect_length_contract():
         for text in ("ab", "abc", "a b c", "word " * 10):
             out = truncate_at_boundary(text, limit)
             assert len(out) <= limit, (text, limit, out)
+
+
+def _store_with_reviews(tmp_path, bodies):
+    """LearnedStore over a tmp learned dir seeded with day-reviews (bodies newest first,
+    written in the same newest-first file order append_day_review produces)."""
+    from hermes_bridge.memory import LearnedStore
+    d = tmp_path / "learned"
+    d.mkdir()
+    sections = [f"## 2026-07-{len(bodies) - i:02d}\n{b}" for i, b in enumerate(bodies)]
+    (d / "day-reviews.md").write_text("\n\n".join(sections) + "\n", encoding="utf-8")
+    return LearnedStore(str(d))
+
+
+def test_day_reviews_small_all_included(tmp_path):
+    ls = _store_with_reviews(tmp_path, ["tiny review one", "tiny review two"])
+    out = ls.format_for_prompt(1400, 2200, 2500, day_reviews_n=10, day_reviews_chars=4000)
+    assert "=== RECENT DAY-REVIEWS ===" in out
+    assert "tiny review one" in out and "tiny review two" in out
+
+
+def test_day_reviews_oversized_newest_truncates_to_fit(tmp_path):
+    big = "word " * 700  # ~3500 chars, larger than the 1800 budget below
+    ls = _store_with_reviews(tmp_path, [big])
+    out = ls.format_for_prompt(1400, 2200, 2500, day_reviews_n=10, day_reviews_chars=1800)
+    assert "=== RECENT DAY-REVIEWS ===" in out  # never an empty section
+    section = out.split("=== RECENT DAY-REVIEWS ===\n", 1)[1]
+    assert len(section) <= 1800
+    assert section.endswith("…")
+
+
+def test_day_reviews_older_dropped_newest_kept_whole(tmp_path):
+    ls = _store_with_reviews(tmp_path, ["newest fits fine", "y" * 3000])
+    out = ls.format_for_prompt(1400, 2200, 2500, day_reviews_n=10, day_reviews_chars=1800)
+    assert "newest fits fine" in out
+    assert "yyy" not in out
+
+
+def test_day_reviews_default_budget_fits_real_sized_review(tmp_path):
+    from hermes_bridge.config import LearningConfig
+    lc = LearningConfig()
+    big = "z" * 3103  # today's largest real review body
+    ls = _store_with_reviews(tmp_path, [big])
+    out = ls.format_for_prompt(1400, 2200, 2500, day_reviews_n=lc.day_review_keep,
+                               day_reviews_chars=lc.day_review_char_limit)
+    assert "z" * 3103 in out  # fits whole under the new default

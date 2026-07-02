@@ -451,6 +451,10 @@ class LearningConfig(BaseModel):
     eod_review_enabled: bool = False
     eod_review_cutoff_et: str = "16:05"   # ET HH:MM after which the day-review may fire
     day_review_keep: int = Field(10, ge=1)        # rolling day-reviews retained + shown in prompt
+    # Prompt budget for the RECENT DAY-REVIEWS section. Must comfortably exceed one
+    # review body (~2.5-3k chars live) or the section starves; the newest review is
+    # truncated to fit rather than ever dropping the whole section.
+    day_review_char_limit: int = Field(4000, ge=200)
     day_lesson_repeat_n: int = Field(3, ge=2)     # theme must recur in this many reviews
     day_lesson_lookback_m: int = Field(5, ge=1)   # window of recent reviews scanned for a repeat
 
