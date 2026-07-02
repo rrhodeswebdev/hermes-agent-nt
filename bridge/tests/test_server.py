@@ -13,6 +13,7 @@ def test_health(cfg):
     r = c.get("/health")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+    assert r.json()["config_warnings"] == []
 
 
 def test_history_and_recent_bars(cfg):

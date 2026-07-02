@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -533,6 +533,11 @@ class BridgeConfig(BaseModel):
     news: NewsConfig = Field(default_factory=NewsConfig)
     account_profile: AccountProfileConfig = Field(default_factory=AccountProfileConfig)
 
+    # Loader-populated diagnostics (never serialized): unknown-key + consistency
+    # warnings. Runtime policy is WARN (an unattended boot must not be blocked by a
+    # stale yaml); the strict half lives in tests (test_config_strict.py).
+    config_warnings: list[str] = Field(default_factory=list, exclude=True)
+
     def apply_env(self) -> BridgeConfig:
         host = os.getenv("HERMES_BRIDGE_HOST")
         port = os.getenv("HERMES_BRIDGE_PORT")
@@ -544,6 +549,23 @@ class BridgeConfig(BaseModel):
         if agent:
             self.agent.client = agent
         return self
+
+
+def _unknown_keys(data: dict, model_cls: type[BaseModel], prefix: str = "") -> list[str]:
+    """Dotted paths in `data` that no field on `model_cls` (or a nested model) accepts."""
+    out: list[str] = []
+    fields = model_cls.model_fields
+    for key, val in data.items():
+        if key not in fields:
+            out.append(prefix + key)
+            continue
+        ann = fields[key].annotation
+        candidates = get_args(ann) or (ann,)
+        sub = next((c for c in candidates
+                    if isinstance(c, type) and issubclass(c, BaseModel)), None)
+        if sub is not None and isinstance(val, dict):
+            out.extend(_unknown_keys(val, sub, prefix + key + "."))
+    return out
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -575,4 +597,16 @@ def load_config(path: str | Path | None = None) -> BridgeConfig:
     if local.exists():
         overrides = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
         data = _deep_merge(data, overrides)
-    return BridgeConfig.model_validate(data).apply_env()
+    unknown = _unknown_keys(data, BridgeConfig)
+    for k in unknown:
+        print(f"[config] WARNING: unknown key '{k}' (ignored)", flush=True)
+    cfg = BridgeConfig.model_validate(data).apply_env()
+    cfg.config_warnings = [f"unknown key: {k}" for k in unknown]
+    lc = cfg.learning
+    if lc.distilled_char_limit > lc.lessons_char_limit:
+        msg = (f"learning.distilled_char_limit ({lc.distilled_char_limit}) > "
+               f"lessons_char_limit ({lc.lessons_char_limit}): distilled text will be "
+               "re-truncated at prompt time")
+        print(f"[config] WARNING: {msg}", flush=True)
+        cfg.config_warnings.append(msg)
+    return cfg

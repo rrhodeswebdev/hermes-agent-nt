@@ -446,6 +446,7 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
             "strategy_source": st.effective_strategy_source(),
             "account_profile": st.account_profile_selection(),
             "news": st.news.status(time.time()),
+            "config_warnings": cfg.config_warnings,
         }
 
     @app.get("/session/status", response_model=AccountState)
