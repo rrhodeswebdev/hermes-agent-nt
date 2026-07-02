@@ -116,6 +116,10 @@ class PendingCounterfactual:
     # delta from bars.db (whose history-backfill bars carry no bid/ask).
     delta_signs: tuple[int, ...] = ()
     session: str = ""
+    # Coverage-shape tag copied from the trigger (Package B): "" for untagged triggers,
+    # "sign_persist" for grind-trend arms. Written to the decline record as "shape"
+    # (omitted when empty) so the suppressed cohort is measurable in isolation.
+    shape: str = ""
 
 
 @dataclass
@@ -667,6 +671,8 @@ class TradingEngine:
                 # the trailing windowed-delta signs + session, so a rescore needs no reconstruction.
                 "delta_signs": list(p.delta_signs),
                 "session": p.session,
+                # Coverage-shape cohort tag (Package B) — present only when tagged.
+                **({"shape": p.shape} if p.shape else {}),
                 # Full timeline so the outcome can be re-verified later without guessing
                 # the anchor: born_ts = the bar it was declined on (replay starts here),
                 # fill_ts = when the limit was touched (None if never filled), resolved_ts
@@ -765,6 +771,9 @@ class TradingEngine:
                 # Snapshot the gate's sustained-delta inputs at this bar (last 16 signs covers any
                 # plausible delta_sustain_bars with headroom) + the session for the ETH floor scale.
                 delta_signs=tuple(self._delta_signs[-16:]), session=ctx.session,
+                # Coverage-shape tag copied straight from the trigger (Task 1's confirm_mode);
+                # "" for untagged triggers so the decline record omits the key entirely.
+                shape=(t.confirm_mode or ""),
             ))
 
     def _record_exit_replay(self, trade: ClosedTrade) -> None:

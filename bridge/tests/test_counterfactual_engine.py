@@ -287,3 +287,35 @@ def test_unblocked_speculative_replay_has_no_gate(tmp_path):
     eng.on_bar(make_bar(t + 600, 4005, 4006, 3998, 4005))   # no touch; 2 -> 1
     eng.on_bar(make_bar(t + 900, 4005, 4006, 3998, 4005))   # 1 -> 0 -> never_filled
     assert eng.declines.all()[-1]["suppressed_by"] == ""
+
+
+# ---- coverage-shape tag (Package B): confirm_mode flows onto the decline record ----
+
+def test_tagged_trigger_decline_carries_shape(tmp_path):
+    """A trigger tagged confirm_mode='sign_persist' (Package B grind-trend arm) writes its
+    coverage-shape tag onto the resolved decline record, so the suppressed cohort is
+    measurable in isolation from the untagged population."""
+    eng, t = _cf_engine(tmp_path)
+    eng.planner._plan = TradePlan(
+        mode="seek_entry", based_on_bar_ts=t,
+        triggers=[EntryTrigger(direction="long", min_close=3990.0, max_close=3995.0,
+                               qty=1, stop_ticks=16, target_ticks=24, confidence=0.8,
+                               confirm_mode="sign_persist", rationale="grind-trend pullback")])
+    eng.on_bar(make_bar(t + 300, 4005, 4006, 4004, 4005))   # close above band -> no fire -> record
+    eng.on_bar(make_bar(t + 600, 3997, 3998, 3994, 3996))   # low 3994 touches limit -> fill
+    eng.on_bar(make_bar(t + 900, 3997, 4002, 3997, 3998))   # high 4002 >= target 4001 -> would_win
+    recs = eng.declines.all()
+    tagged = [r for r in recs if r.get("shape") == "sign_persist"]
+    assert tagged, "tagged trigger's decline record must carry shape=sign_persist"
+
+
+def test_untagged_trigger_decline_has_no_shape_key(tmp_path):
+    """A plain (untagged) trigger's decline record must not grow a shape key at all — the
+    scoreboard (Package B) filters on the key's presence, not on an empty-string value."""
+    eng, t = _cf_engine(tmp_path)
+    eng.on_bar(make_bar(t + 300, 4005, 4006, 4004, 4005))   # record (untagged _long_plan trigger)
+    eng.on_bar(make_bar(t + 600, 3997, 3998, 3994, 3996))   # fill
+    eng.on_bar(make_bar(t + 900, 3997, 4002, 3997, 3998))   # resolve would_win
+    recs = eng.declines.all()
+    assert recs, "expected at least one resolved decline record"
+    assert all("shape" not in r for r in recs), "untagged declines must not grow a shape key"
