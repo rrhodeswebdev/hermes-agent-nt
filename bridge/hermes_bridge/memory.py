@@ -63,6 +63,31 @@ def _split_bullets(text: str) -> tuple[str, list[str]]:
     return "\n".join(header).strip(), bullets
 
 
+def truncate_at_boundary(text: str, limit: int) -> str:
+    """Cap ``text`` at ``limit`` chars without cutting mid-word or mid-bullet.
+
+    Within limit -> unchanged. Otherwise cut at the last complete unit before the
+    limit — a bullet/heading line boundary first, then a sentence end, then the
+    last whitespace, then a hard cut — and append a truncation marker."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    head = text[: max(0, limit - 2)]  # reserve room for the "\n…" marker
+    line_cut = max(head.rfind("\n- "), head.rfind("\n#"))
+    sent_cut = head.rfind(". ")
+    space_cut = max(head.rfind(" "), head.rfind("\n"))
+    if line_cut > 0:
+        cut = line_cut
+    elif sent_cut > 0:
+        cut = sent_cut + 1  # keep the period
+    elif space_cut > 0:
+        cut = space_cut
+    else:
+        cut = len(head)
+    return head[:cut].rstrip() + "\n…"
+
+
 def _render_lesson(meta: dict, body: str) -> str:
     fm = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{fm}\n---\n{body.strip()}\n"
