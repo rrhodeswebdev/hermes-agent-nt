@@ -433,7 +433,7 @@ class LearningConfig(BaseModel):
     # reads INSTEAD of raw lessons — knowledge can grow without bloating the per-bar
     # prompt. Trigger via POST /control/distill.
     distill_model: str = "opus"       # the slow, deep tier for the distillation pass
-    distilled_char_limit: int = Field(1600, ge=1)  # hard cap on the distilled artifact
+    distilled_char_limit: int = Field(2400, ge=1)  # hard cap on the distilled artifact
     # Distillation is an opus pass over the FULL corpus — it needs far more than the
     # per-bar claude.timeout_s (30s). It runs off the hot path (manual /control/distill),
     # so a generous budget is safe.

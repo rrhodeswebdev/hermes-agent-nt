@@ -18,7 +18,7 @@ from .config import BridgeConfig
 from .indicators import _EPOCH, _eastern_offset
 from .journal import ClosedTrade, JournalStore
 from .market_calendar import _et_date
-from .memory import LearnedStore
+from .memory import LearnedStore, truncate_at_boundary
 
 
 def _rth_window(now: float) -> tuple[float, float]:
@@ -216,7 +216,8 @@ Rules:
   merge, and structure what exists. When notes conflict, keep the newer reading and
   fold the older one into a watch-item.
 - Stay under {limit} characters. Plain markdown bullets. Text only — never numeric
-  config or risk values as instructions to change."""
+  config or risk values as instructions to change.
+- End with a complete bullet — never stop mid-sentence."""
 
 
 class Reflector:
@@ -360,7 +361,7 @@ class Reflector:
         # show — an over-limit tail would be silently cut at display time otherwise).
         # Atomic write keeps a .history/ backup; revert by restoring or deleting
         # hermes/learned/distilled.md (raw lessons take over again).
-        self.learned.set_distilled(str(text)[: lc.distilled_char_limit])
+        self.learned.set_distilled(truncate_at_boundary(str(text), lc.distilled_char_limit))
         applied["distilled"] = 1
         return applied
 

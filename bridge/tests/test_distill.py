@@ -83,3 +83,28 @@ def test_prompt_prefers_distilled_over_raw_lessons(tmp_path):
     assert "distilled rule one" in out
     assert "RAW LESSON BODY" not in out                # distilled replaces raw lessons
     assert "fresh note since distill" in out           # fresh notes keep flowing
+
+
+def test_distill_write_is_boundary_aware(tmp_path, monkeypatch):
+    cfg, learned, r = _setup(tmp_path)
+    cfg.learning.distilled_char_limit = 120
+    long_text = "### RULES\n" + "\n".join(f"- rule number {i} holds firmly" for i in range(30))
+    monkeypatch.setattr("hermes_bridge.reflect.run_claude_oneshot", lambda *a, **k: "stubbed")
+
+    def _extract_distilled(reply):
+        return {"distilled": long_text}
+
+    monkeypatch.setattr("hermes_bridge.reflect.extract_structured", _extract_distilled)
+
+    applied = r.distill()
+    assert applied["distilled"] == 1
+    written = learned.distilled()
+    assert 0 < len(written) <= 120
+    # boundary-aware: ends with the marker, never mid-word
+    assert written.endswith("…")
+    assert "- rule number" in written
+
+
+def test_distilled_char_limit_default_raised():
+    from hermes_bridge.config import LearningConfig
+    assert LearningConfig().distilled_char_limit == 2400
