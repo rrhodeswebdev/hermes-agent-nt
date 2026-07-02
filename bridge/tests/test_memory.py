@@ -127,3 +127,14 @@ def test_day_reviews_default_budget_fits_real_sized_review(tmp_path):
     out = ls.format_for_prompt(1400, 2200, 2500, day_reviews_n=lc.day_review_keep,
                                day_reviews_chars=lc.day_review_char_limit)
     assert "z" * 3103 in out  # fits whole under the new default
+
+
+def test_corpus_mtime_includes_day_reviews(tmp_path):
+    from hermes_bridge.memory import LearnedStore
+    d = tmp_path / "learned"
+    d.mkdir()
+    ls = LearnedStore(str(d))
+    assert ls.corpus_mtime() == 0.0
+    ls.append_day_review("2026-07-01", "a review body\n\n_theme: some_theme_", keep=10)
+    assert ls.corpus_mtime() > 0.0
+    assert ls.corpus_mtime() >= ls.day_reviews_mtime()

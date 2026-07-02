@@ -112,3 +112,32 @@ def test_distill_write_is_boundary_aware(tmp_path, monkeypatch):
 def test_distilled_char_limit_default_raised():
     from hermes_bridge.config import LearningConfig
     assert LearningConfig().distilled_char_limit == 2400
+
+
+def test_distill_input_includes_day_review_footers(tmp_path, monkeypatch):
+    import hermes_bridge.reflect as reflect_mod
+    from hermes_bridge.config import BridgeConfig
+    from hermes_bridge.journal import JournalStore
+    from hermes_bridge.memory import LearnedStore
+
+    cfg = BridgeConfig()
+    cfg.learning.learned_dir = str(tmp_path / "learned")
+    learned = LearnedStore(cfg.learning.learned_dir)
+    learned.append_day_review(
+        "2026-07-01",
+        "Narrative text here.\n\n_theme: whipsaw_range · observation: flat day wins._",
+        keep=10)
+    journal = JournalStore(str(tmp_path / "journal.jsonl"))
+    r = reflect_mod.Reflector(cfg, learned, journal)
+
+    captured = {}
+
+    def fake_oneshot(claude_cfg, system, user, **kw):
+        captured["user"] = user
+        return "stubbed"
+
+    monkeypatch.setattr(reflect_mod, "run_claude_oneshot", fake_oneshot)
+    monkeypatch.setattr(reflect_mod, "extract_structured", lambda reply: {"distilled": "- ok"})
+    assert r.distill()["distilled"] == 1
+    assert "DAY-REVIEW THEMES" in captured["user"]
+    assert "_theme: whipsaw_range · observation: flat day wins._" in captured["user"]

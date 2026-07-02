@@ -235,7 +235,9 @@ Rules:
   fold the older one into a watch-item.
 - Stay under {limit} characters. Plain markdown bullets. Text only — never numeric
   config or risk values as instructions to change.
-- End with a complete bullet — never stop mid-sentence."""
+- End with a complete bullet — never stop mid-sentence.
+- A compact "Day-review watch-items" bullet group distilled from DAY-REVIEW THEMES
+  is allowed — same rule: no numeric config."""
 
 
 class Reflector:
@@ -365,6 +367,15 @@ class Reflector:
             + "\n\nAGENT NOTES (live):\n" + (self.learned.notes() or "(none)")
             + "\n\nARCHIVED NOTES (older):\n" + (self.learned.archived_notes() or "(none)")
         )
+        reviews = self.learned.day_reviews(lc.day_lesson_lookback_m)
+        footers = []
+        for d, b in reviews:
+            lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
+            footer = lines[-1] if lines and lines[-1].startswith("_theme:") else ""
+            if footer:
+                footers.append(f"- [{d}] {footer}")
+        if footers:
+            user += "\n\nDAY-REVIEW THEMES (newest first):\n" + "\n".join(footers)
         system = DISTILL_SYSTEM.replace("{limit}", str(lc.distilled_char_limit))
         try:
             reply = run_claude_oneshot(self.cfg.agent.claude, system, user,

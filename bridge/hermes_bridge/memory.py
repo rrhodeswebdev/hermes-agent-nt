@@ -175,12 +175,14 @@ class LearnedStore:
 
     def corpus_mtime(self) -> float:
         """Newest mtime across the full distillation input: live notes, lessons,
-        profile, and the long-term notes archive. 0.0 when none exist yet. (.history/
-        backups and the *.proposed profile are deliberately excluded — not corpus.)"""
+        profile, day-reviews, and the long-term notes archive. 0.0 when none exist
+        yet. (.history/ backups and the *.proposed profile are deliberately
+        excluded — not corpus.)"""
         return max(
             self._mtime(self.dir / "agent-notes.md"),
             self._mtime(self.dir / "trader-profile.md"),
             self._mtime(self.dir / "archive" / "agent-notes-archive.md"),
+            self._mtime(self.dir / "day-reviews.md"),
             self.lessons_mtime(),
         )
 
