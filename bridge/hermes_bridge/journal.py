@@ -152,10 +152,14 @@ class DeclineLog:
 
     def __init__(self, path: str) -> None:
         self.path = Path(path)
+        self._watermark_path = self.path.with_suffix(".watermark.json")
         self._unreported_wins: list[dict] = []
         # Appends come from the bar-loop thread (engine), snapshots/clears from the
         # reflection trigger paths — guard the in-memory list with its own lock.
         self._lock = threading.Lock()
+        # Restart-safe: rebuild the queue from disk (would_win records resolved after
+        # the last reported watermark). Runs before any thread touches this instance.
+        self._seed_unreported()
 
     def append(self, rec: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,21 +187,45 @@ class DeclineLog:
             return []
         return self.all()[-n:]
 
+    def _read_watermark(self) -> float:
+        try:
+            data = json.loads(self._watermark_path.read_text(encoding="utf-8"))
+            return float(data.get("reported_through_ts", 0.0))
+        except (OSError, ValueError, TypeError):
+            return 0.0  # missing/corrupt -> re-seed everything (duplicate over lost)
+
+    def _write_watermark(self, ts: float) -> None:
+        try:
+            self._watermark_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._watermark_path.with_name(self._watermark_path.name + ".tmp")
+            tmp.write_text(json.dumps({"reported_through_ts": ts}), encoding="utf-8")
+            tmp.replace(self._watermark_path)
+        except OSError:
+            pass  # best-effort: worst case is re-reporting after the next restart
+
+    def _seed_unreported(self) -> None:
+        wm = self._read_watermark()
+        for rec in self.all():
+            if rec.get("outcome") == "would_win" and float(rec.get("resolved_ts") or 0.0) > wm:
+                self._unreported_wins.append(rec)
+
     def unreported_wins(self) -> list[dict]:
         with self._lock:
             return list(self._unreported_wins)
 
     def clear_unreported(self) -> None:
-        with self._lock:
-            self._unreported_wins.clear()
+        self.take_unreported()  # discard == reported: advance the watermark too
 
     def take_unreported(self) -> list[dict]:
-        """Atomic snapshot-and-clear: a win resolved concurrently lands in the NEXT
-        snapshot instead of being cleared unseen."""
+        """Atomic snapshot-and-clear; advances the persisted watermark so a restart
+        cannot resurface already-reported wins. A win resolved concurrently lands in
+        the NEXT snapshot instead of being cleared unseen."""
         with self._lock:
             out = list(self._unreported_wins)
             self._unreported_wins.clear()
-            return out
+        if out:
+            self._write_watermark(max(float(r.get("resolved_ts") or 0.0) for r in out))
+        return out
 
 
 def select_similar(trades: list[dict], ctx: MarketContext, k: int) -> list[dict]:

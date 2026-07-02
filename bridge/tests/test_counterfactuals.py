@@ -72,3 +72,43 @@ def test_missed_trigger_fires_only_flat_and_above_threshold(tmp_path, monkeypatc
     st.maybe_reflect_missed()                       # flat + threshold met
     assert ran.wait(2)
     assert st.declines.unreported_wins() == []      # marked reported (no double-fire)
+
+
+def _win(ts):
+    return {"kind": "missed_trigger", "outcome": "would_win", "resolved_ts": ts,
+            "side": "LONG", "entry_price": 30000.0}
+
+
+def test_unreported_wins_survive_restart(tmp_path):
+    from hermes_bridge.journal import DeclineLog
+    p = str(tmp_path / "declines.jsonl")
+    log = DeclineLog(p)
+    log.append(_win(100.0))
+    log.append({"kind": "missed_trigger", "outcome": "would_lose", "resolved_ts": 101.0})
+    log.append(_win(102.0))
+    # simulate a bridge restart: a fresh instance over the same path
+    log2 = DeclineLog(p)
+    assert [r["resolved_ts"] for r in log2.unreported_wins()] == [100.0, 102.0]
+
+
+def test_take_unreported_advances_watermark_across_restart(tmp_path):
+    from hermes_bridge.journal import DeclineLog
+    p = str(tmp_path / "declines.jsonl")
+    log = DeclineLog(p)
+    log.append(_win(100.0))
+    log.append(_win(102.0))
+    assert len(log.take_unreported()) == 2
+    log.append(_win(103.0))  # resolved after the drain
+    log3 = DeclineLog(p)
+    assert [r["resolved_ts"] for r in log3.unreported_wins()] == [103.0]
+
+
+def test_corrupt_watermark_reseeds_everything(tmp_path):
+    from hermes_bridge.journal import DeclineLog
+    p = tmp_path / "declines.jsonl"
+    log = DeclineLog(str(p))
+    log.append(_win(100.0))
+    log.take_unreported()
+    p.with_suffix(".watermark.json").write_text("{not json", encoding="utf-8")
+    log2 = DeclineLog(str(p))
+    assert len(log2.unreported_wins()) == 1  # duplicate over lost — by design
