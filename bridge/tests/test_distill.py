@@ -103,6 +103,10 @@ def test_distill_write_is_boundary_aware(tmp_path, monkeypatch):
     # boundary-aware: ends with the marker, never mid-word
     assert written.endswith("…")
     assert "- rule number" in written
+    # boundary-aware: the last kept line is a COMPLETE bullet from the source, not a
+    # fragment (a raw slice + stamped marker would fail this)
+    last_line = written.removesuffix("…").rstrip().splitlines()[-1]
+    assert last_line.startswith("- rule number") and last_line.endswith("holds firmly")
 
 
 def test_distilled_char_limit_default_raised():
