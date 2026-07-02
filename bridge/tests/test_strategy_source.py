@@ -261,6 +261,21 @@ def test_generated_playbook_renders_coverage_lines(tmp_path, fake_claude):
     assert "# Coverage: sign_persist: armed on Grind Long 30310" in text
 
 
+def test_author_coverage_audit_non_list_degrades_to_empty(tmp_path, fake_claude):
+    # authoring must succeed and render zero coverage lines when the reply
+    # carries a malformed (non-list) coverage_audit
+    fake_claude(stdout=_author_response(
+        [{"name": "Grind Long 30310", "regime": "trending", "summary": "ride the grind",
+          "detail": "ENTRY on the grind; STOP under swing low; TARGET measured move"}],
+        coverage_audit=5,  # malformed: truthy non-list
+    ))
+    c = _client_with_ctx(tmp_path, "agent")
+    c.analyze_session(_preq(c.cfg), synthetic_bars(120))
+    text = (tmp_path / "generated" / "latest.md").read_text(encoding="utf-8")
+    assert "# Coverage:" not in text  # no coverage lines rendered
+    assert "# Setup:" in text  # authoring itself succeeded
+
+
 def test_author_session_no_setups_authors_nothing(tmp_path, fake_claude):
     # Setups are the single source of truth: with no usable setups there is no playbook to
     # render, so nothing is authored and the brain WAITs (never trades a fabricated setup).

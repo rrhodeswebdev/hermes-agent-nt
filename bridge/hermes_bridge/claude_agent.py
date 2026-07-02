@@ -506,8 +506,11 @@ class ClaudeAgentClient(AgentClient):
         if not isinstance(data, dict):
             return ""
         brief = (data.get("brief") or "").strip()
-        coverage = [str(x).strip() for x in (data.get("coverage_audit") or [])
-                    if str(x).strip()][:8]  # bounded: header comments, not prose
+        raw = data.get("coverage_audit")
+        if not isinstance(raw, list):
+            raw = []  # malformed reply shapes degrade to no-coverage, never raise
+        # bounded: max 8 coverage header comments, not prose
+        coverage = [str(x).strip() for x in raw if str(x).strip()][:8]
         # Setups are the single source of truth: the binding playbook the brain trades is
         # RENDERED from them, so the dashboard list and the strategy can't diverge. No
         # usable setups → author nothing → the system prompt instructs WAIT (never trades
