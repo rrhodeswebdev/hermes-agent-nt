@@ -75,3 +75,10 @@ def test_truncate_hard_fallback_single_token():
     out = truncate_at_boundary("A" * 500, 40)
     assert len(out) <= 40
     assert out.endswith("…")
+
+
+def test_truncate_tiny_limits_respect_length_contract():
+    for limit in (1, 2, 3):
+        for text in ("ab", "abc", "a b c", "word " * 10):
+            out = truncate_at_boundary(text, limit)
+            assert len(out) <= limit, (text, limit, out)

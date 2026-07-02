@@ -73,6 +73,8 @@ def truncate_at_boundary(text: str, limit: int) -> str:
         return ""
     if len(text) <= limit:
         return text
+    if limit <= 2:
+        return text[:limit]  # no room for a marker — the length contract wins
     head = text[: max(0, limit - 2)]  # reserve room for the "\n…" marker
     line_cut = max(head.rfind("\n- "), head.rfind("\n#"))
     sent_cut = head.rfind(". ")
