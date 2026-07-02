@@ -165,6 +165,9 @@ AUTHOR_STRATEGY_JSON_SCHEMA = json.dumps(
                 },
             },
             "brief": {"type": "string"},
+            # Package B: one arm-or-explain line per coverage shape (see strategy.md
+            # "Coverage shapes"). Optional — old replies without it validate unchanged.
+            "coverage_audit": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["strategies", "brief"],
     },
@@ -191,6 +194,15 @@ moves, NOT a bounce-to-far-resistance fade that needs a deep retrace the trend m
 Do NOT author counter-trend setups (buying support in a downtrend, shorting resistance in an
 uptrend) unless structure has CONFIRMED a reversal — a pullback is not a reversal. Fade/range
 setups belong only to a genuinely two-sided, range-bound session.
+
+COVERAGE AUDIT: the framework's "Coverage shapes (pre-session audit)" section (in the
+strategy knowledge above) names recurring miss shapes with their arming conditions.
+For EACH coverage shape, decide whether this session's structure could plausibly
+produce its preconditions: if yes, author the arm (as a setup, or note which existing
+setup covers it); if no, say why not in ONE line. Report these decisions in the
+"coverage_audit" array below — one line per shape, e.g.
+"break-and-go: armed via 'Open-Air Continuation Long above 30183'" or
+"sign_persist: not applicable — no grind-trend leg in this data".
 
 Author your setups as ONE list. The binding playbook you trade against is assembled
 directly from these setups — there is no separate prose to keep in sync, so the list the
@@ -228,6 +240,9 @@ dashboard shows is exactly the strategy you trade. Reply with one JSON object:
 - "brief": ~10-20 lines of plain text, the same pre-session brief as usual (current
   regime + evidence, key levels with prices, volatility vs ATR, what invalidates the
   read). Your faster per-bar analyses rely on it.
+- "coverage_audit": an ARRAY of strings — the one-line arm-or-explain decision per
+  coverage shape from the audit above. These lines are stamped into the playbook
+  header so the audit is visible on every study.
 """
 
 # Display caps for the agent-chosen names/summaries (the playbook prose uses strategies.max_chars).
@@ -491,13 +506,16 @@ class ClaudeAgentClient(AgentClient):
         if not isinstance(data, dict):
             return ""
         brief = (data.get("brief") or "").strip()
+        coverage = [str(x).strip() for x in (data.get("coverage_audit") or [])
+                    if str(x).strip()][:8]  # bounded: header comments, not prose
         # Setups are the single source of truth: the binding playbook the brain trades is
         # RENDERED from them, so the dashboard list and the strategy can't diverge. No
         # usable setups → author nothing → the system prompt instructs WAIT (never trades
         # a fabricated playbook).
         strategies = _normalize_strategies(data.get("strategies"))
         if strategies:
-            self._set_generated_strategy(render_playbook(strategies), strategies, preq)
+            self._set_generated_strategy(render_playbook(strategies), strategies, preq,
+                                          coverage_audit=coverage)
         return brief
 
     def generated_strategy(self) -> str | None:
@@ -524,12 +542,15 @@ class ClaudeAgentClient(AgentClient):
         self._generated_path = None
 
     def _set_generated_strategy(
-        self, playbook: str, strategies: list[dict], preq: PlanRequest
+        self, playbook: str, strategies: list[dict], preq: PlanRequest,
+        coverage_audit: list[str] | None = None,
     ) -> None:
         """Install the authored playbook (capped) + its named setups and persist them for
         review/audit: one timestamped file per session plus a stable ``latest.md`` the
         dashboard / ``GET /strategy`` read. Persistence failure is non-fatal (the in-memory
-        playbook still drives trading)."""
+        playbook still drives trading). ``coverage_audit`` (Package B) is the pre-session
+        audit's arm-or-explain lines, stamped as ``# Coverage:`` header comments so the
+        audit is visible on every study; defaulted so other callers are unaffected."""
         self._generated_strategy = playbook[: self.cfg.strategies.max_chars]
         self._generated_strategies = strategies
         # Authoring telemetry: a fresh playbook actually installed. `outcome` is the trigger
@@ -552,9 +573,15 @@ class ClaudeAgentClient(AgentClient):
                 + "\n"
                 for s in strategies
             )
+            # Package B: one "# Coverage: <line>" comment per pre-session audit decision,
+            # same accumulator idiom as setup_lines above.
+            coverage_lines = "".join(
+                f"# Coverage: {line}\n" for line in (coverage_audit or [])
+            )
             header = (
                 f"# Agent-authored strategy — {inst} {preq.account.timeframe}\n"
                 + setup_lines
+                + coverage_lines
                 + f"# Generated {stamp} UTC from the pre-session history study. "
                 f"Auto-generated; safe to delete.\n\n"
             )

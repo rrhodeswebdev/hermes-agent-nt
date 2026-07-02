@@ -14,6 +14,8 @@ from hermes_bridge.agent_client import (
     load_playbook_files,
 )
 from hermes_bridge.claude_agent import (
+    AUTHOR_STRATEGY_INSTRUCTION,
+    AUTHOR_STRATEGY_JSON_SCHEMA,
     PLAN_INSTRUCTION,
     ClaudeAgentClient,
     render_playbook,
@@ -204,13 +206,17 @@ def test_strategy_endpoint_agent_mode(cfg):
 
 
 # ---- agent-authored strategies: list capture, normalization, persistence -----
-def _author_response(strategies, brief="brief"):
+def _author_response(strategies, brief="brief", coverage_audit=None):
     """`strategies`: a list of {name, regime, summary, detail} dicts, or None to omit the key.
     Setups are the single source of truth now — the binding playbook is rendered from them,
-    so there is no separate top-level `playbook` field."""
+    so there is no separate top-level `playbook` field. `coverage_audit`: optional list of
+    strings (Package B pre-session audit lines); omitted from the body when None so existing
+    callers that don't pass it produce the old envelope unchanged."""
     body = {"brief": brief}
     if strategies is not None:
         body["strategies"] = strategies
+    if coverage_audit is not None:
+        body["coverage_audit"] = coverage_audit
     return json.dumps({"is_error": False, "structured_output": body})
 
 
@@ -228,6 +234,31 @@ def test_author_session_captures_strategy_list(tmp_path, fake_claude):
     latest = (tmp_path / "generated" / "latest.md").read_text(encoding="utf-8")
     assert "Setup: Trend Pullback [trending]" in latest
     assert "Setup: Range Fade [ranging]" in latest
+
+
+def test_author_schema_allows_coverage_audit():
+    schema = json.loads(AUTHOR_STRATEGY_JSON_SCHEMA)
+    assert "coverage_audit" in schema["properties"]
+    assert "coverage_audit" not in schema.get("required", [])
+
+
+def test_author_instruction_contains_audit_step():
+    assert "Coverage shapes" in AUTHOR_STRATEGY_INSTRUCTION
+    assert "coverage_audit" in AUTHOR_STRATEGY_INSTRUCTION
+
+
+def test_generated_playbook_renders_coverage_lines(tmp_path, fake_claude):
+    fake_claude(stdout=_author_response(
+        [{"name": "Grind Long 30310", "regime": "trending", "summary": "ride the grind",
+          "detail": "ENTRY on the grind; STOP under swing low; TARGET measured move"}],
+        coverage_audit=["break-and-go: not applicable — no cleared overnight high",
+                         "sign_persist: armed on Grind Long 30310"],
+    ))
+    c = _client_with_ctx(tmp_path, "agent")
+    c.analyze_session(_preq(c.cfg), synthetic_bars(120))
+    text = (tmp_path / "generated" / "latest.md").read_text(encoding="utf-8")
+    assert "# Coverage: break-and-go: not applicable — no cleared overnight high" in text
+    assert "# Coverage: sign_persist: armed on Grind Long 30310" in text
 
 
 def test_author_session_no_setups_authors_nothing(tmp_path, fake_claude):
