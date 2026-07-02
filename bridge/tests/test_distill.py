@@ -141,3 +141,31 @@ def test_distill_input_includes_day_review_footers(tmp_path, monkeypatch):
     assert r.distill()["distilled"] == 1
     assert "DAY-REVIEW THEMES" in captured["user"]
     assert "_theme: whipsaw_range · observation: flat day wins._" in captured["user"]
+
+
+def test_distill_survives_day_review_read_failure(tmp_path, monkeypatch):
+    import hermes_bridge.reflect as reflect_mod
+    from hermes_bridge.config import BridgeConfig
+    from hermes_bridge.journal import JournalStore
+    from hermes_bridge.memory import LearnedStore
+
+    cfg = BridgeConfig()
+    cfg.learning.learned_dir = str(tmp_path / "learned")
+    learned = LearnedStore(cfg.learning.learned_dir)
+    journal = JournalStore(str(tmp_path / "journal.jsonl"))
+    r = reflect_mod.Reflector(cfg, learned, journal)
+
+    captured = {}
+
+    def fake_oneshot(claude_cfg, system, user, **kw):
+        captured["user"] = user
+        return "stubbed"
+
+    def boom(n):
+        raise OSError("corrupt day-reviews")
+
+    monkeypatch.setattr(learned, "day_reviews", boom)
+    monkeypatch.setattr(reflect_mod, "run_claude_oneshot", fake_oneshot)
+    monkeypatch.setattr(reflect_mod, "extract_structured", lambda reply: {"distilled": "- ok"})
+    assert r.distill()["distilled"] == 1
+    assert "DAY-REVIEW THEMES" not in captured["user"]
