@@ -71,6 +71,10 @@ _TRIGGER_SCHEMA = {
         # against the roster and derives the dashboard's active setup from the trigger that
         # actually fires — so "what's highlighted" == "what's traded".
         "setup": {"type": ["string", "null"]},
+        # Package B: optional confirmation-mode tag ("sign_persist" only). Set it on
+        # grind-trend arms per the coverage-shapes doctrine; the hard delta floor still
+        # gates firing — the tag exists so suppressed fires are measured, not lost.
+        "confirm_mode": {"type": ["string", "null"], "enum": ["sign_persist", None]},
         "rationale": {"type": "string"},
     },
     "required": ["direction"],
@@ -112,6 +116,8 @@ Reply with one JSON object:
   Set each trigger's "setup" to the EXACT name of the authored setup it implements (from
   "Your setups" in the ACTIVE STRATEGY block above), so the dashboard highlights the setup
   that actually fires. Use null only if the trigger maps to no named setup.
+  If a trigger implements a sign-persistence grind arm (see "Coverage shapes" in the
+  strategy framework), set "confirm_mode": "sign_persist" on it; otherwise omit/null.
 - "exit": invalidation thresholds (manage_position plans): exit if the close is at/
   beyond exit_below or exit_above. null = hold, the resting bracket protects. Tag its
   "setup" the same way (the setup the open position is being managed under).

@@ -468,3 +468,29 @@ def test_build_agent_client_rejects_unknown_client(cfg):
     cfg.agent.client = "hermes"
     with pytest.raises(ValueError, match="hermes"):
         build_agent_client(cfg)
+
+
+def test_entry_trigger_confirm_mode_default_none():
+    from hermes_bridge.plan import EntryTrigger
+    t = EntryTrigger(direction="long", min_close=100.0)
+    assert t.confirm_mode is None
+
+
+def test_entry_trigger_confirm_mode_sign_persist_roundtrip():
+    from hermes_bridge.plan import EntryTrigger
+    t = EntryTrigger(direction="long", min_close=100.0, confirm_mode="sign_persist")
+    assert t.confirm_mode == "sign_persist"
+
+
+def test_entry_trigger_confirm_mode_unknown_normalizes_to_none():
+    from hermes_bridge.plan import EntryTrigger
+    t = EntryTrigger(direction="long", min_close=100.0, confirm_mode="magic_beans")
+    assert t.confirm_mode is None
+
+
+def test_entry_trigger_confirm_mode_inert_for_matches():
+    from hermes_bridge.plan import EntryTrigger
+    tagged = EntryTrigger(direction="long", min_close=100.0, confirm_mode="sign_persist")
+    plain = EntryTrigger(direction="long", min_close=100.0)
+    for close in (99.0, 100.0, 101.0):
+        assert tagged.matches(close) == plain.matches(close)

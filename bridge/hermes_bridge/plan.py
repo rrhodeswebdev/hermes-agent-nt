@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .agent_client import AgentRequest
 from .models import Action, Bar, BrainTimeout, Decision, FrozenModel, Level, Mode
@@ -49,6 +49,12 @@ class EntryTrigger(FrozenModel):
     # against the roster and derives the plan's active_strategy from the trigger that fires,
     # so the dashboard highlights the setup actually traded. Display only — never gates firing.
     setup: str | None = None
+    # Optional confirmation-mode tag from the authored setup (Package B). Recognized
+    # value: "sign_persist" — a grind-trend arm whose delta MAGNITUDE may run sub-floor
+    # while the delta SIGN persists. The tag NEVER changes firing or gating: the delta
+    # floor suppresses exactly as always; the tag only flows onto the decline record
+    # (shape=...) so the suppressed cohort is measurable (CAP-COST pattern).
+    confirm_mode: str | None = None
     rationale: str = ""
     # Plan-time risk-cap feasibility (set by the Planner when risk.shadow_infeasible_triggers
     # is on). False = the stop would bust the RiskGate's single-contract cap, so the trigger is
@@ -56,6 +62,11 @@ class EntryTrigger(FrozenModel):
     # matches()). Default True so behavior is unchanged when the feature is off.
     feasible: bool = True
     infeasible_reason: str | None = None
+
+    @field_validator("confirm_mode", mode="before")
+    @classmethod
+    def _known_confirm_mode(cls, v: object) -> str | None:
+        return "sign_persist" if v == "sign_persist" else None
 
     def matches(self, close: float) -> bool:
         if not self.feasible:
