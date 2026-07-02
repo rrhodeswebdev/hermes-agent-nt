@@ -54,6 +54,31 @@ a trend day and watching it run is the costliest miss there is.
   whose edges have each held ≥ twice, per market-regime.md). When unsure whether it's a
   "trend pausing" or a "range," assume continuation and WAIT for the fade to prove itself.
 
+## Coverage shapes (pre-session audit)
+
+Recurring, evidenced miss shapes the pre-session study must AUDIT every session: for
+each shape, either author the arm (when the session's structure could plausibly
+produce its preconditions) or state in one line why it does not apply. Report each
+decision in the study's `coverage_audit` output — the lines are stamped into the
+playbook header.
+
+- **Break-and-go into open air** — price trending into open air just beyond a freshly
+  cleared overnight/session extreme, NO overhead structure (clearance to the next
+  level ≥ ~1×ATR by construction), and sustained multi-bar directional delta (not a
+  single spike). Author an explicit break-and-go continuation arm anchored AT/just
+  beyond the cleared level (`min_close`/`max_close` at the level), stop back inside
+  the level, target the next measured objective. This is the narrow, NAMED exception
+  to "don't enter on the breakout bar," which continues to govern every other
+  breakout context (Trend-first above already endorses break-and-go off a named
+  level; open air + sustained flow is the variant that keeps getting missed).
+- **Delta-sign persistence grind** — a trend leg with textbook shallow-pullback/hold
+  structure where per-bar delta magnitude runs weak but the delta SIGN is uniform
+  across many consecutive bars (a grinding one-sided tape). Author the normal
+  continuation arm and tag its trigger `"confirm_mode": "sign_persist"`. The hard
+  delta floor STILL gates firing — the tag exists so the suppressed fires are
+  measured as their own counterfactual cohort, not lost. Do not loosen any floor on
+  the basis of this shape; the measurement decides its future.
+
 ## Definitions (provided to you each bar in `context`)
 
 - `regime` — `trending` / `ranging` / `transitional`, read from swing **structure**
