@@ -20,6 +20,24 @@ from .journal import ClosedTrade, JournalStore
 from .market_calendar import _et_date
 from .memory import LearnedStore, truncate_at_boundary
 
+# Tag-shaped fragments a model reply can leak into review text (observed 2026-06-30:
+# "</narrative>", '<parameter name="observation">'). Conservative allowlist — normal
+# prose, including "<"/">" comparisons, passes through untouched.
+_TAG_LEAK_RE = re.compile(
+    r"</?(?:narrative|parameter|observation|theme|invoke|function[\w-]*)\b[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_review_text(s: str) -> str:
+    """Best-effort strip of leaked tool-call/XML fragments from review text."""
+    try:
+        out = _TAG_LEAK_RE.sub("", s)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out.strip()
+    except Exception:  # noqa: BLE001 — losing a review to the cleaner is worse
+        return s
+
 
 def _rth_window(now: float) -> tuple[float, float]:
     """(start_ts, end_ts) of the RTH session (09:30-16:00 ET) on now's ET date.
@@ -270,9 +288,14 @@ class Reflector:
         if not isinstance(proposals, dict) or not str(proposals.get("narrative", "")).strip():
             out["error"] = "no_narrative"
             return out
-        body = str(proposals["narrative"]).strip()
-        theme = str(proposals.get("theme") or "").strip() or None
-        obs = str(proposals.get("observation") or "").strip()
+        body = _sanitize_review_text(str(proposals["narrative"]).strip())
+        if not body:
+            out["error"] = "no_narrative"
+            return out
+        theme = _sanitize_review_text(str(proposals.get("theme") or "").strip()) or None
+        if theme and not re.fullmatch(r"[a-z0-9_]+", theme):
+            theme = None  # the promote-gate regex only matches snake_case anyway
+        obs = _sanitize_review_text(str(proposals.get("observation") or "").strip())
         if obs:
             body += f"\n\n_theme: {theme or '?'} · observation: {obs}_"
         elif theme:

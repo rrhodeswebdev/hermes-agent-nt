@@ -282,3 +282,41 @@ def test_promote_theme_no_substring_collision(tmp_path, cfg):
     assert "trend_day_pullback" not in user_text, (
         "trend_day_pullback reviews leaked into trend_day promotion prompt"
     )
+
+
+def test_sanitize_review_text_strips_leaked_tags():
+    from hermes_bridge.reflect import _sanitize_review_text
+    dirty = ('Net: sitting out was correct.</narrative>\n'
+             '<parameter name="observation">On confirmed trend-up days, chasing loses.')
+    clean = _sanitize_review_text(dirty)
+    assert "</narrative>" not in clean
+    assert "<parameter" not in clean
+    assert "sitting out was correct." in clean
+    assert "On confirmed trend-up days, chasing loses." in clean
+
+
+def test_sanitize_review_text_preserves_normal_prose():
+    from hermes_bridge.reflect import _sanitize_review_text
+    s = "Price closed < 30100 and delta > -0.05; the 2m close confirmed."
+    assert _sanitize_review_text(s) == s
+
+
+def test_reflect_on_day_drops_malformed_theme(tmp_path, monkeypatch, cfg):
+    import hermes_bridge.reflect as reflect_mod
+
+    learned = LearnedStore(str(tmp_path / "learned"))
+    journal = JournalStore(str(tmp_path / "journal.jsonl"))
+    r = reflect_mod.Reflector(cfg, learned, journal)
+
+    monkeypatch.setattr(reflect_mod, "run_claude_oneshot", lambda *a, **k: "stubbed")
+    monkeypatch.setattr(reflect_mod, "extract_structured", lambda reply: {
+        "narrative": "A clean day.</narrative>",
+        "theme": "Bad Theme With Spaces!",
+        "observation": "obs<parameter name=\"x\">tail",
+    })
+    out = r.reflect_on_day({"date": "2026-07-01"})
+    assert out["written"] == 1
+    assert out["theme"] is None  # malformed theme dropped
+    body = (tmp_path / "learned" / "day-reviews.md").read_text(encoding="utf-8")
+    assert "</narrative>" not in body and "<parameter" not in body
+    assert "obstail" in body  # observation kept, tag removed
