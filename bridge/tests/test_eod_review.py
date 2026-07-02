@@ -320,3 +320,26 @@ def test_reflect_on_day_drops_malformed_theme(tmp_path, monkeypatch, cfg):
     body = (tmp_path / "learned" / "day-reviews.md").read_text(encoding="utf-8")
     assert "</narrative>" not in body and "<parameter" not in body
     assert "obstail" in body  # observation kept, tag removed
+
+
+def test_multiline_observation_flattens_to_single_footer_line(tmp_path, monkeypatch, cfg):
+    import hermes_bridge.reflect as reflect_mod
+
+    learned = LearnedStore(str(tmp_path / "learned"))
+    journal = JournalStore(str(tmp_path / "journal.jsonl"))
+    r = reflect_mod.Reflector(cfg, learned, journal)
+
+    monkeypatch.setattr(reflect_mod, "run_claude_oneshot", lambda *a, **k: "stubbed")
+    monkeypatch.setattr(reflect_mod, "extract_structured", lambda reply: {
+        "narrative": "A clean day.",
+        "theme": "clean_theme",
+        "observation": "first line\nsecond line\n## not a heading",
+    })
+    out = r.reflect_on_day({"date": "2026-07-02"})
+    assert out["written"] == 1
+    revs = LearnedStore(str(tmp_path / "learned")).day_reviews(10)
+    assert len(revs) == 1  # the embedded "## " did NOT split a fake section
+    body_lines = [ln for ln in revs[0][1].splitlines() if ln.strip()]
+    footer = body_lines[-1]
+    assert footer.startswith("_theme: clean_theme")
+    assert "first line second line ## not a heading" in footer  # flattened to one line

@@ -298,6 +298,7 @@ class Reflector:
         if theme and not re.fullmatch(r"[a-z0-9_]+", theme):
             theme = None  # the promote-gate regex only matches snake_case anyway
         obs = _sanitize_review_text(str(proposals.get("observation") or "").strip())
+        obs = " ".join(obs.split())  # single-line footer: multi-line obs breaks parsers
         if obs:
             body += f"\n\n_theme: {theme or '?'} · observation: {obs}_"
         elif theme:
