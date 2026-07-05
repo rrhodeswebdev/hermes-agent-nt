@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -107,6 +108,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         // the AllowLive account guard) is identical either way.
         [NinjaScriptProperty]
         public bool UseAgentStrategies { get; set; } = true;
+
+        // Opt-in Level 2 (market depth) capture. FALSE by default: no OnMarketDepth
+        // book maintenance and no "depth" key on the realtime bar payload — behavior
+        // is byte-identical to before this flag existed. TRUE: maintains a bid/ask
+        // price->size ladder from OnMarketDepth and appends it to each closed bar.
+        [NinjaScriptProperty]
+        [Display(Name = "Use Level 2 (market depth)", GroupName = "Order flow", Order = 1)]
+        public bool UseLevel2 { get; set; } = false;
 
         // Windows timezone id of the CHART's "Time zone" setting (what Time[0] is
         // expressed in). "Eastern Standard Time" = US ET incl. DST. If the bridge logs
@@ -350,6 +359,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                     else if (!double.IsNaN(_bestBid) && e.Price <= _bestBid) _bidVol += e.Volume;
                     break;
             }
+        }
+
+        // ---- Level 2 order book (realtime only; gated by UseLevel2) ----
+        private readonly SortedDictionary<double, double> _bidBook =
+            new SortedDictionary<double, double>();   // price -> size
+        private readonly SortedDictionary<double, double> _askBook =
+            new SortedDictionary<double, double>();
+
+        protected override void OnMarketDepth(MarketDepthEventArgs e)
+        {
+            if (!UseLevel2) return;
+            var book = e.MarketDataType == MarketDataType.Bid ? _bidBook : _askBook;
+            if (e.Operation == Operation.Remove) book.Remove(e.Price);
+            else book[e.Price] = e.Volume;   // Add or Update
         }
 
         // ---- trading: networking / execution -------------------------------
@@ -643,15 +666,49 @@ namespace NinjaTrader.NinjaScript.Strategies
         // (the bridge prefers it over its close-location proxy). When either is null
         // (the first partial bar, or the history path) the core 6-field bar is sent
         // unchanged and the bridge proxies the delta.
-        private static string BarJson(double ts, double o, double h, double l, double c,
+        private string BarJson(double ts, double o, double h, double l, double c,
             double v, double? askVol, double? bidVol)
         {
             string core = BarJson(ts, o, h, l, c, v);
-            if (!askVol.HasValue || !bidVol.HasValue) return core;
             var ci = CultureInfo.InvariantCulture;
-            return core.Substring(0, core.Length - 1) + string.Format(ci,
-                ",\"ask_volume\":{0},\"bid_volume\":{1}}}",
-                askVol.Value.ToString(ci), bidVol.Value.ToString(ci));
+            if (askVol.HasValue && bidVol.HasValue)
+                core = core.Substring(0, core.Length - 1) + string.Format(ci,
+                    ",\"ask_volume\":{0},\"bid_volume\":{1}}}",
+                    askVol.Value.ToString(ci), bidVol.Value.ToString(ci));
+
+            // Depth is appended as a sibling key inside the same JSON object, only when
+            // UseLevel2 is on and the book has entries — off / no-L2-feed emits nothing
+            // new, so the payload stays byte-identical to before this feature existed.
+            if (UseLevel2 && (_bidBook.Count > 0 || _askBook.Count > 0))
+            {
+                const int N = 10;
+                var sb = new StringBuilder();
+                sb.Append(",\"depth\":{\"bids\":[");
+                int i = 0;
+                // SortedDictionary is ascending by price; bids want best (highest) first.
+                foreach (var kv in _bidBook.Reverse())
+                {
+                    if (i >= N) break;
+                    if (i > 0) sb.Append(',');
+                    sb.AppendFormat(ci, "{{\"price\":{0},\"size\":{1}}}",
+                        kv.Key.ToString(ci), kv.Value.ToString(ci));
+                    i++;
+                }
+                sb.Append("],\"asks\":[");
+                i = 0;
+                foreach (var kv in _askBook)   // ascending price = best ask first
+                {
+                    if (i >= N) break;
+                    if (i > 0) sb.Append(',');
+                    sb.AppendFormat(ci, "{{\"price\":{0},\"size\":{1}}}",
+                        kv.Key.ToString(ci), kv.Value.ToString(ci));
+                    i++;
+                }
+                sb.Append("]}");
+                core = core.Insert(core.Length - 1, sb.ToString());  // before the closing brace
+            }
+
+            return core;
         }
 
         private static string Escape(string s)
