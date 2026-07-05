@@ -1,3 +1,8 @@
+from hermes_bridge.indicators import (
+    depth_imbalance,
+    liquidity_walls,
+    spread_and_top,
+)
 from hermes_bridge.models import Bar, DepthLevel, DepthSnapshot
 
 
@@ -29,3 +34,38 @@ def test_bar_parses_with_depth_wire_shape():
 def test_depth_snapshot_defaults_empty():
     s = DepthSnapshot()
     assert s.bids == [] and s.asks == []
+
+
+def _snap(bids, asks):
+    return DepthSnapshot(
+        bids=[DepthLevel(price=p, size=s) for p, s in bids],
+        asks=[DepthLevel(price=p, size=s) for p, s in asks],
+    )
+
+
+def test_depth_imbalance_bid_heavy():
+    s = _snap([(100, 30), (99.75, 20)], [(100.25, 5), (100.5, 5)])
+    # (50 - 10) / (50 + 10) = 0.666...
+    assert round(depth_imbalance(s, levels=5), 3) == 0.667
+
+
+def test_depth_imbalance_empty_book_is_zero():
+    assert depth_imbalance(DepthSnapshot(), levels=5) == 0.0
+
+
+def test_liquidity_walls_flags_outsized_level():
+    # Mean size = (2+2+2+18)/4 = 6; wall threshold 3x = 18 -> only the 18 qualifies.
+    s = _snap([(100, 2), (99.75, 2)], [(100.25, 2), (100.5, 18)])
+    walls = liquidity_walls(s, wall_multiple=3.0)
+    assert walls == [(100.5, 18, "ask")]
+
+
+def test_spread_and_top():
+    s = _snap([(100, 7)], [(100.25, 4)])
+    spread, tb, ta = spread_and_top(s)
+    assert round(spread, 2) == 0.25 and tb == 7 and ta == 4
+
+
+def test_spread_and_top_one_sided():
+    spread, tb, ta = spread_and_top(_snap([(100, 7)], []))
+    assert spread is None and tb == 7 and ta is None

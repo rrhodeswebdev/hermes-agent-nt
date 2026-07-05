@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from .models import Bar
+from .models import Bar, DepthSnapshot
 
 
 def true_range(prev_close: float, high: float, low: float) -> float:
@@ -125,6 +125,56 @@ def bar_delta(bar: Bar) -> float:
     # close-location value in [-1, 1]: +1 close at high, -1 close at low
     clv = ((bar.close - bar.low) - (bar.high - bar.close)) / rng
     return clv * (bar.volume or 0.0)
+
+
+def depth_imbalance(snap: DepthSnapshot, levels: int = 5) -> float:
+    """Resting-liquidity imbalance over the top ``levels`` per side, ~[-1, 1].
+
+    (Σ bid size − Σ ask size) / (Σ bid size + Σ ask size). Positive => bid-heavy
+    (support); negative => ask-heavy (resistance). 0.0 on an empty book.
+    """
+    bid = sum(lvl.size for lvl in snap.bids[:levels])
+    ask = sum(lvl.size for lvl in snap.asks[:levels])
+    total = bid + ask
+    if total <= 0:
+        return 0.0
+    return (bid - ask) / total
+
+
+def liquidity_walls(
+    snap: DepthSnapshot, wall_multiple: float = 3.0
+) -> list[tuple[float, float, str]]:
+    """Levels whose size >= ``wall_multiple`` × mean level size, as (price, size, side).
+
+    side is "bid" (support) or "ask" (resistance). Empty if nothing stands out.
+    """
+    levels = [(lvl.price, lvl.size, "bid") for lvl in snap.bids]
+    levels += [(lvl.price, lvl.size, "ask") for lvl in snap.asks]
+    sizes = [s for _, s, _ in levels]
+    if not sizes:
+        return []
+    mean = sum(sizes) / len(sizes)
+    if mean <= 0:
+        return []
+    thresh = wall_multiple * mean
+    return [(p, s, side) for p, s, side in levels if s >= thresh]
+
+
+def spread_and_top(
+    snap: DepthSnapshot,
+) -> tuple[float | None, float | None, float | None]:
+    """(spread, top_bid_size, top_ask_size). spread = best_ask − best_bid.
+
+    Any element is None if that side of the book is empty.
+    """
+    top_bid = snap.bids[0] if snap.bids else None
+    top_ask = snap.asks[0] if snap.asks else None
+    spread = (top_ask.price - top_bid.price) if (top_bid and top_ask) else None
+    return (
+        spread,
+        top_bid.size if top_bid else None,
+        top_ask.size if top_ask else None,
+    )
 
 
 def cumulative_delta(bars: list[Bar]) -> float:
