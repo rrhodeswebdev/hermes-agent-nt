@@ -411,6 +411,14 @@ class MarketContext:
     clock_et: str = ""           # "HH:MM" US Eastern — time-of-day for the agent/journal
     # Multi-day reference prices (None until enough stored history) — see daily_levels().
     levels: dict | None = None
+    # Level 2 (market depth) features — None/empty unless the latest bar carried a
+    # depth snapshot. Advisory to the brain; never a gate.
+    depth_imbalance: float | None = None
+    depth_walls: list[tuple[float, float, str]] = field(default_factory=list)
+    absorption: str | None = None
+    spread: float | None = None
+    top_bid_size: float | None = None
+    top_ask_size: float | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -428,6 +436,15 @@ class MarketContext:
             "clock_et": self.clock_et,
             "bars_count": self.bars_count,
         }
+        if self.depth_imbalance is not None:  # a depth snapshot was present this bar
+            d["depth_imbalance"] = round(self.depth_imbalance, 3)
+            d["spread"] = _r(self.spread)
+            d["top_bid_size"] = self.top_bid_size
+            d["top_ask_size"] = self.top_ask_size
+            if self.depth_walls:
+                d["depth_walls"] = [[round(p, 4), s, side] for p, s, side in self.depth_walls]
+            if self.absorption:
+                d["absorption"] = self.absorption
         if self.levels:
             d["levels"] = {k: _r(v) for k, v in self.levels.items()}
         return d
@@ -444,6 +461,8 @@ def build_context(
     swing_lookback: int = 3,
     delta_window: int = 20,
     level_bars: list[Bar] | None = None,
+    imbalance_levels: int = 5,
+    wall_multiple: float = 3.0,
 ) -> MarketContext:
     closes = [b.close for b in bars]
     last_close = closes[-1] if closes else 0.0
@@ -454,6 +473,18 @@ def build_context(
     rd = cumulative_delta(window)
     vol = sum((b.volume or 0.0) for b in window)
     wd, clock = et_weekday_clock(bars[-1].ts) if bars else ("", "")
+    depth_fields: dict = {}
+    last_depth = bars[-1].depth if bars else None
+    if last_depth is not None:
+        spread, tbs, tas = spread_and_top(last_depth)
+        depth_fields = dict(
+            depth_imbalance=depth_imbalance(last_depth, imbalance_levels),
+            depth_walls=liquidity_walls(last_depth, wall_multiple),
+            absorption=absorption(window, wall_multiple),
+            spread=spread,
+            top_bid_size=tbs,
+            top_ask_size=tas,
+        )
     return MarketContext(
         last_close=last_close,
         atr=a,
@@ -469,4 +500,5 @@ def build_context(
         weekday=wd,
         clock_et=clock,
         levels=daily_levels(level_bars) if level_bars else None,
+        **depth_fields,
     )

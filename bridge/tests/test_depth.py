@@ -1,6 +1,7 @@
 from hermes_bridge.config import StrategyParams
 from hermes_bridge.indicators import (
     absorption,
+    build_context,
     depth_imbalance,
     liquidity_walls,
     spread_and_top,
@@ -106,3 +107,27 @@ def test_depth_knobs_default():
 def test_depth_knobs_override():
     sp = StrategyParams(depth_imbalance_levels=8, depth_wall_multiple=4.0)
     assert sp.depth_imbalance_levels == 8 and sp.depth_wall_multiple == 4.0
+
+
+def test_to_dict_unchanged_when_depth_absent():
+    # Regression guard: an L1 context emits no depth keys.
+    bars = [
+        Bar(ts=float(i), open=100, high=101, low=99, close=100.5, volume=10)
+        for i in range(30)
+    ]
+    d = build_context(bars, atr_period=14).to_dict()
+    assert "depth_imbalance" not in d
+    assert "spread" not in d and "depth_walls" not in d
+
+
+def test_build_context_populates_depth_when_present():
+    snap = _snap([(100.0, 30), (99.75, 20)], [(100.25, 5), (100.5, 5)])
+    bars = [
+        Bar(ts=float(i), open=100, high=101, low=99, close=100.5, volume=10)
+        for i in range(29)
+    ]
+    bars.append(Bar(ts=29.0, open=100, high=101, low=99, close=100.5, volume=10, depth=snap))
+    d = build_context(bars, atr_period=14, imbalance_levels=5, wall_multiple=3.0).to_dict()
+    assert round(d["depth_imbalance"], 3) == 0.667
+    assert round(d["spread"], 2) == 0.25
+    assert d["top_bid_size"] == 30 and d["top_ask_size"] == 5
