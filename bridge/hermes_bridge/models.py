@@ -65,6 +65,24 @@ class Bar(FrozenModel):
     # Optional order-flow inputs if the data feed provides them.
     bid_volume: float | None = None
     ask_volume: float | None = None
+    # Optional Level 2 (order-book) snapshot — present only on realtime bars when the
+    # strategy's UseLevel2 is on and an L2 feed is streaming. Absent otherwise.
+    depth: DepthSnapshot | None = None
+
+
+class DepthLevel(FrozenModel):
+    """One resting order-book level."""
+
+    price: float
+    size: float
+
+
+class DepthSnapshot(FrozenModel):
+    """A top-N order-book snapshot. ``bids`` are best-first (highest price first),
+    ``asks`` best-first (lowest price first)."""
+
+    bids: list[DepthLevel] = Field(default_factory=list)
+    asks: list[DepthLevel] = Field(default_factory=list)
 
 
 class BarBatch(BaseModel):
