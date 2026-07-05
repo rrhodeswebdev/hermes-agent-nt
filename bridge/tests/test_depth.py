@@ -2,6 +2,7 @@ from pathlib import Path
 
 from hermes_bridge.agent_client import _CONTEXT_ORDER, load_context_files
 from hermes_bridge.config import StrategyParams
+from hermes_bridge.dashboard import render_text
 from hermes_bridge.indicators import (
     absorption,
     build_context,
@@ -146,3 +147,33 @@ def test_market_depth_in_context_order_after_order_flow():
 def test_market_depth_loaded_into_prompt():
     text = load_context_files(_CONTEXT_DIR)
     assert "depth_imbalance" in text  # the guidance references the feature the brain receives
+
+
+def _text_payload(depth: dict | None) -> dict:
+    # render_text indexes several other top-level/session/goal keys directly (not .get), so
+    # a bare {"depth": ...} payload KeyErrors before it ever reaches the ladder. Shape a
+    # minimal-but-complete payload, matching the pattern in test_dashboard_news.py's _payload.
+    return {
+        "agent": "mock", "brain": "rules", "instrument": "MNQ", "timeframe": "1m",
+        "session": {"position": 0, "avg_price": 0.0, "realized_pnl": 0.0,
+                    "unrealized_pnl": 0.0, "trades_today": 0, "halted": False,
+                    "halt_reason": None},
+        "goal": {"profit_target": 500.0, "max_daily_loss": 400.0},
+        "depth": depth,
+    }
+
+
+def test_render_text_shows_ladder_when_depth_present():
+    payload = _text_payload({
+        "bids": [[100.0, 30], [99.75, 20]],
+        "asks": [[100.25, 5], [100.5, 5]],
+        "imbalance": 0.667, "spread": 0.25, "walls": [], "absorption": None,
+    })
+    out = render_text(payload)
+    assert "DOM" in out or "book" in out.lower()
+    assert "100.25" in out  # an ask price is rendered
+
+
+def test_render_text_no_ladder_when_depth_absent():
+    out = render_text(_text_payload(None))
+    assert "100.25" not in out

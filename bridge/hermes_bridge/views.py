@@ -152,6 +152,24 @@ def dashboard_levels(st: AppState) -> dict | None:
     return out
 
 
+def depth_view(st: AppState) -> dict | None:
+    """Latest order-book snapshot + computed depth features for the dashboard DOM
+    ladder, or None when Level 2 is off / unavailable. Display only."""
+    last = st.store.last()
+    snap = last.depth if last else None
+    if snap is None:
+        return None
+    ctx = st.engine.last_context
+    return {
+        "bids": [[lvl.price, lvl.size] for lvl in snap.bids],
+        "asks": [[lvl.price, lvl.size] for lvl in snap.asks],
+        "imbalance": getattr(ctx, "depth_imbalance", None),
+        "spread": getattr(ctx, "spread", None),
+        "walls": [[p, s, side] for p, s, side in getattr(ctx, "depth_walls", [])],
+        "absorption": getattr(ctx, "absorption", None),
+    }
+
+
 def agent_model(cfg: BridgeConfig) -> str:
     """Model label for the dashboard header (e.g. claude · sonnet)."""
     if cfg.agent.client == "claude":
@@ -218,6 +236,7 @@ def build_dashboard_payload(st: AppState) -> dict:
         "recent_decisions": list(reversed(recent)),
         "planner": st.planner.snapshot() if st.planner else None,
         "levels": dashboard_levels(st),
+        "depth": depth_view(st),
         "news": news_status,
         # Learning-consolidation health: liveness heartbeat (check_age_s) + how old the
         # compressed corpus is (distilled_age_s). Display only — the monitor alarms on a

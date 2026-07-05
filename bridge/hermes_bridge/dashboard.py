@@ -39,6 +39,25 @@ def _strategy_view(d: dict) -> tuple[str, list[dict]]:
     return source, []
 
 
+def _depth_lines(depth: dict | None) -> list[str]:
+    """A compact DOM ladder for the text panel: asks (high->low) above bids (high->low)."""
+    if not depth:
+        return []
+    lines = ["DOM (Level 2)"]
+    for price, size in reversed(depth.get("asks", [])):
+        lines.append(f"  ASK {price:>10.2f}  {size:>8.0f}")
+    imb, spr = depth.get("imbalance"), depth.get("spread")
+    mid = f"  ---- imbalance {imb:+.2f}" if imb is not None else "  ----"
+    if spr is not None:
+        mid += f"  spread {spr:.2f}"
+    lines.append(mid)
+    for price, size in depth.get("bids", []):
+        lines.append(f"  BID {price:>10.2f}  {size:>8.0f}")
+    if depth.get("absorption"):
+        lines.append(f"  absorption: {depth['absorption']}")
+    return lines
+
+
 def render_text(d: dict | None) -> str:
     """Pre-formatted monospace panel. The NinjaScript indicator draws this verbatim."""
     if not d:
@@ -113,6 +132,7 @@ def render_text(d: dict | None) -> str:
         lines.append(
             f"  {_hhmmss(r['ts'])}  {r['action']:<11} {r['confidence']:.2f}  @{r['close']:.10g}"
         )
+    lines.extend(_depth_lines(d.get("depth")))
     return "\n".join(lines)
 
 
@@ -281,6 +301,7 @@ DASHBOARD_HTML = """<!doctype html>
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
   .card .label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
   .card .val{font-size:20px;font-weight:600;margin-top:4px}
+  #dom{font-size:12px;font-weight:400;white-space:pre-line;line-height:1.4}
   .last{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:16px}
   .last .act{font-size:22px;font-weight:700}
   .last .rat{color:var(--dim);margin-top:6px;line-height:1.4}
@@ -362,6 +383,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card"><div class="label">Realized P&L</div><div class="val" id="rpnl">—</div></div>
     <div class="card"><div class="label">Trades / Goal</div><div class="val" id="trades">—</div></div>
     <div class="card"><div class="label">Data age</div><div class="val" id="age">—</div></div>
+    <div class="card" id="domcard" style="display:none"><div class="label">DOM (L2)</div><div class="val" id="dom">—</div></div>
   </div>
   <div class="news" id="news" style="display:none">
     <span class="nlabel">News</span><span id="nstatus" class="dim"></span>
@@ -430,6 +452,16 @@ async function tick(){
     document.getElementById('trades').textContent=s.trades_today+' · +'+d.goal.profit_target+'/-'+d.goal.max_daily_loss;
     const age=d.data_age_seconds; const ae=document.getElementById('age');
     ae.textContent=(age==null?'?':Math.round(age)+'s'); ae.className='val '+(age==null?'dim':age>120?'red':'grn');
+    // DOM ladder (Level 2): card is hidden entirely when depth is off/unavailable.
+    const dv=d.depth; const domCard=document.getElementById('domcard');
+    if(dv){
+      domCard.style.display='';
+      let rows=dv.asks.slice().reverse().map(a=>'ASK '+a[0].toFixed(2)+'  '+a[1]);
+      rows.push('— imb '+(dv.imbalance==null?'–':dv.imbalance.toFixed(2))+'  spr '+(dv.spread==null?'–':dv.spread.toFixed(2)));
+      rows=rows.concat(dv.bids.map(b=>'BID '+b[0].toFixed(2)+'  '+b[1]));
+      if(dv.absorption) rows.push(dv.absorption);
+      document.getElementById('dom').textContent=rows.join('\n');
+    }else{ domCard.style.display='none'; }
     // Major-news blackout. textContent only (feed titles are third-party) → no HTML injection.
     const nw=d.news; const ne=document.getElementById('news'); const ns=document.getElementById('nstatus');
     if(nw&&nw.enabled){
