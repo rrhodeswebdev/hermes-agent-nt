@@ -193,7 +193,8 @@ def absorption(
     for a level holding, not a verified persist-through-time signal.
 
     Returns "bid_absorption@<price>" (support) / "ask_absorption@<price>"
-    (resistance), else None. Heuristic, bar-cadence.
+    (resistance), else None. Heuristic, bar-cadence. When walls hold on both sides in the
+    same window, the bid side is reported (bid takes precedence).
     """
     # ponytail: single-snapshot touch-count on the bar-cadence book — good enough for a
     # per-bar read; upgrade to tick-level book tracking (true persistence across snapshots)

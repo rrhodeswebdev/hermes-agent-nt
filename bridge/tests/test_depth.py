@@ -11,6 +11,7 @@ from hermes_bridge.indicators import (
     spread_and_top,
 )
 from hermes_bridge.models import Bar, DepthLevel, DepthSnapshot
+from hermes_bridge.resample import aggregate_bars
 
 _CONTEXT_DIR = str(Path(__file__).resolve().parents[2] / "hermes" / "context")
 
@@ -122,8 +123,15 @@ def test_to_dict_unchanged_when_depth_absent():
         for i in range(30)
     ]
     d = build_context(bars, atr_period=14).to_dict()
-    assert "depth_imbalance" not in d
-    assert "spread" not in d and "depth_walls" not in d
+    for k in (
+        "depth_imbalance",
+        "spread",
+        "depth_walls",
+        "top_bid_size",
+        "top_ask_size",
+        "absorption",
+    ):
+        assert k not in d
 
 
 def test_build_context_populates_depth_when_present():
@@ -184,3 +192,20 @@ def test_dashboard_js_dom_join_uses_escaped_newline():
     # JS must use '\\n' (backslash-n survives to the browser) — a bare '\n' collapses
     # to a raw line terminator and is a JS SyntaxError that breaks the whole <script>.
     assert r"rows.join('\n')" in DASHBOARD_HTML
+
+
+def test_aggregate_carries_last_feed_bars_depth():
+    snap1 = _snap([(100.0, 5)], [(100.25, 3)])
+    snap2 = _snap([(100.0, 30), (99.75, 20)], [(100.25, 5)])
+    b1 = Bar(ts=60.0, open=100, high=101, low=99, close=100.5, volume=5, depth=snap1)
+    b2 = Bar(ts=120.0, open=100.5, high=101.5, low=100, close=101, volume=7, depth=snap2)
+    agg = aggregate_bars([b1, b2])
+    # The decision bar closes on b2, so it carries b2's book (mirrors close=bars[-1].close).
+    assert agg.depth == snap2
+    assert agg.close == 101  # sanity: aggregation still closes on the last bar
+
+
+def test_aggregate_depth_none_when_feed_bars_have_none():
+    b1 = Bar(ts=60.0, open=100, high=101, low=99, close=100.5, volume=5)
+    b2 = Bar(ts=120.0, open=100.5, high=101.5, low=100, close=101, volume=7)
+    assert aggregate_bars([b1, b2]).depth is None
