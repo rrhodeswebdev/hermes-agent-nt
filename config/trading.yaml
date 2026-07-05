@@ -61,6 +61,10 @@ strategy:
   #     in the journal). Set breakeven_r: 0 to revert to a static bracket.
   breakeven_r: 1.0      # pull the stop to breakeven once favorable excursion reaches 1.0 * stop
   trail_enabled: true   # then trail behind the higher-low (long) / lower-high (short)
+  # Level 2 (market depth) feature knobs — inert unless UseLevel2 is on in NinjaTrader and
+  # the data feed streams depth. Depth is advisory to the brain; it never gates an order.
+  depth_imbalance_levels: 5
+  depth_wall_multiple: 3.0
 
 # Hard risk limits — enforced server-side by the RiskGate.
 # MNQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. MNQ is a micro ($2/point),

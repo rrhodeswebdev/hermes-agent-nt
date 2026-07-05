@@ -1,3 +1,4 @@
+from hermes_bridge.config import StrategyParams
 from hermes_bridge.indicators import (
     absorption,
     depth_imbalance,
@@ -94,3 +95,14 @@ def test_absorption_none_when_no_wall():
 
 def test_absorption_none_without_depth():
     assert absorption([Bar(ts=1.0, open=1, high=2, low=0.5, close=1.5, volume=1)]) is None
+
+
+def test_depth_knobs_default():
+    sp = StrategyParams()
+    assert sp.depth_imbalance_levels == 5
+    assert sp.depth_wall_multiple == 3.0
+
+
+def test_depth_knobs_override():
+    sp = StrategyParams(depth_imbalance_levels=8, depth_wall_multiple=4.0)
+    assert sp.depth_imbalance_levels == 8 and sp.depth_wall_multiple == 4.0

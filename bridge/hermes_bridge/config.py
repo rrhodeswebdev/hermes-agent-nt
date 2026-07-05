@@ -137,6 +137,11 @@ class StrategyParams(BaseModel):
     # stops.managed_stop_price.
     breakeven_r: float = Field(default=0.0, ge=0.0)
     trail_enabled: bool = False
+    # Level 2 (market depth) feature knobs. Only consulted when a bar carries a depth
+    # snapshot (UseLevel2 on in NinjaScript + an L2 data feed); inert otherwise. Depth is
+    # brain-advisory only — it never gates an order (see hermes/context/market-depth.md).
+    depth_imbalance_levels: int = Field(default=5, ge=1)   # top-N levels summed for imbalance
+    depth_wall_multiple: float = Field(default=3.0, gt=0)  # size >= this × mean level = a wall
 
     @model_validator(mode="after")
     def _check_stop_band(self) -> StrategyParams:
