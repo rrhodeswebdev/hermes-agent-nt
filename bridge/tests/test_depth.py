@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from hermes_bridge.agent_client import _CONTEXT_ORDER, load_context_files
 from hermes_bridge.config import StrategyParams
 from hermes_bridge.indicators import (
     absorption,
@@ -7,6 +10,8 @@ from hermes_bridge.indicators import (
     spread_and_top,
 )
 from hermes_bridge.models import Bar, DepthLevel, DepthSnapshot
+
+_CONTEXT_DIR = str(Path(__file__).resolve().parents[2] / "hermes" / "context")
 
 
 def test_bar_parses_without_depth():
@@ -131,3 +136,13 @@ def test_build_context_populates_depth_when_present():
     assert round(d["depth_imbalance"], 3) == 0.667
     assert round(d["spread"], 2) == 0.25
     assert d["top_bid_size"] == 30 and d["top_ask_size"] == 5
+
+
+def test_market_depth_in_context_order_after_order_flow():
+    assert "market-depth.md" in _CONTEXT_ORDER
+    assert _CONTEXT_ORDER.index("market-depth.md") == _CONTEXT_ORDER.index("order-flow.md") + 1
+
+
+def test_market_depth_loaded_into_prompt():
+    text = load_context_files(_CONTEXT_DIR)
+    assert "depth_imbalance" in text  # the guidance references the feature the brain receives
