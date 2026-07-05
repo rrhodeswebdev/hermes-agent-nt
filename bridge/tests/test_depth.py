@@ -2,7 +2,7 @@ from pathlib import Path
 
 from hermes_bridge.agent_client import _CONTEXT_ORDER, load_context_files
 from hermes_bridge.config import StrategyParams
-from hermes_bridge.dashboard import render_text
+from hermes_bridge.dashboard import DASHBOARD_HTML, render_text
 from hermes_bridge.indicators import (
     absorption,
     build_context,
@@ -177,3 +177,10 @@ def test_render_text_shows_ladder_when_depth_present():
 def test_render_text_no_ladder_when_depth_absent():
     out = render_text(_text_payload(None))
     assert "100.25" not in out
+
+
+def test_dashboard_js_dom_join_uses_escaped_newline():
+    # Regression: DASHBOARD_HTML is a non-raw triple-quoted string, so the embedded
+    # JS must use '\\n' (backslash-n survives to the browser) — a bare '\n' collapses
+    # to a raw line terminator and is a JS SyntaxError that breaks the whole <script>.
+    assert r"rows.join('\n')" in DASHBOARD_HTML

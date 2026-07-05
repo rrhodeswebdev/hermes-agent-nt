@@ -460,7 +460,7 @@ async function tick(){
       rows.push('— imb '+(dv.imbalance==null?'–':dv.imbalance.toFixed(2))+'  spr '+(dv.spread==null?'–':dv.spread.toFixed(2)));
       rows=rows.concat(dv.bids.map(b=>'BID '+b[0].toFixed(2)+'  '+b[1]));
       if(dv.absorption) rows.push(dv.absorption);
-      document.getElementById('dom').textContent=rows.join('\n');
+      document.getElementById('dom').textContent=rows.join('\\n');
     }else{ domCard.style.display='none'; }
     // Major-news blackout. textContent only (feed titles are third-party) → no HTML injection.
     const nw=d.news; const ne=document.getElementById('news'); const ns=document.getElementById('nstatus');
