@@ -185,14 +185,19 @@ def absorption(
     Reads each bar's depth snapshot (bars without one are skipped). A price level that
     carries a wall (size >= wall_multiple × mean) in the LATEST snapshot, and that price
     was reached on at least ``min_tests`` of the recent bars (bar low <= a bid-wall price,
-    or bar high >= an ask-wall price) while the wall persisted rather than breaking, is
-    reported as absorption.
+    or bar high >= an ask-wall price), is reported as absorption.
 
-    Returns "bid_absorption@<price>" (support holding) / "ask_absorption@<price>"
-    (resistance holding), else None. Heuristic, bar-cadence.
+    Single-snapshot read: the wall is taken from the latest bar only; earlier bars are
+    checked for price touches of that level, not for the wall still resting at the time —
+    so this flags "price repeatedly reached a level that is walled now," a coarse proxy
+    for a level holding, not a verified persist-through-time signal.
+
+    Returns "bid_absorption@<price>" (support) / "ask_absorption@<price>"
+    (resistance), else None. Heuristic, bar-cadence.
     """
-    # ponytail: snapshot-diff heuristic on the bar-cadence book — good enough for a per-bar
-    # read; upgrade to tick-level book tracking only if the per-bar signal proves too coarse.
+    # ponytail: single-snapshot touch-count on the bar-cadence book — good enough for a
+    # per-bar read; upgrade to tick-level book tracking (true persistence across snapshots)
+    # only if the per-bar signal proves too coarse.
     snaps = [b for b in bars if b.depth is not None]
     if not snaps:
         return None
