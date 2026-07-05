@@ -1,4 +1,5 @@
 from hermes_bridge.indicators import (
+    absorption,
     depth_imbalance,
     liquidity_walls,
     spread_and_top,
@@ -69,3 +70,27 @@ def test_spread_and_top():
 def test_spread_and_top_one_sided():
     spread, tb, ta = spread_and_top(_snap([(100, 7)], []))
     assert spread is None and tb == 7 and ta is None
+
+
+def _bar(low, high, snap):
+    return Bar(ts=1.0, open=low, high=high, low=low, close=high, volume=1, depth=snap)
+
+
+def test_absorption_detects_held_bid_wall():
+    # A 30-lot bid wall at 100.0 that price dips to on 2 of the recent bars -> support absorbed.
+    wall = _snap([(100.0, 30), (99.75, 2)], [(100.25, 2), (100.5, 2)])
+    bars = [
+        _bar(low=100.0, high=101.0, snap=wall),
+        _bar(low=100.5, high=101.5, snap=wall),
+        _bar(low=100.0, high=100.9, snap=wall),
+    ]
+    assert absorption(bars, wall_multiple=3.0, min_tests=2) == "bid_absorption@100"
+
+
+def test_absorption_none_when_no_wall():
+    flat = _snap([(100.0, 2)], [(100.25, 2)])
+    assert absorption([_bar(100.0, 101.0, flat)]) is None
+
+
+def test_absorption_none_without_depth():
+    assert absorption([Bar(ts=1.0, open=1, high=2, low=0.5, close=1.5, volume=1)]) is None

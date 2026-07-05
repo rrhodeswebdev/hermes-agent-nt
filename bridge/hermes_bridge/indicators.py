@@ -177,6 +177,42 @@ def spread_and_top(
     )
 
 
+def absorption(
+    bars: list[Bar], wall_multiple: float = 3.0, min_tests: int = 2
+) -> str | None:
+    """Detect resting-liquidity absorption over a recent bar window.
+
+    Reads each bar's depth snapshot (bars without one are skipped). A price level that
+    carries a wall (size >= wall_multiple × mean) in the LATEST snapshot, and that price
+    was reached on at least ``min_tests`` of the recent bars (bar low <= a bid-wall price,
+    or bar high >= an ask-wall price) while the wall persisted rather than breaking, is
+    reported as absorption.
+
+    Returns "bid_absorption@<price>" (support holding) / "ask_absorption@<price>"
+    (resistance holding), else None. Heuristic, bar-cadence.
+    """
+    # ponytail: snapshot-diff heuristic on the bar-cadence book — good enough for a per-bar
+    # read; upgrade to tick-level book tracking only if the per-bar signal proves too coarse.
+    snaps = [b for b in bars if b.depth is not None]
+    if not snaps:
+        return None
+    walls = liquidity_walls(snaps[-1].depth, wall_multiple)
+    if not walls:
+        return None
+    for side in ("bid", "ask"):
+        side_walls = [(p, s) for p, s, sd in walls if sd == side]
+        if not side_walls:
+            continue
+        price, _ = max(side_walls, key=lambda ps: ps[1])  # the largest wall this side
+        if side == "bid":
+            tests = sum(1 for b in snaps if b.low <= price)
+        else:
+            tests = sum(1 for b in snaps if b.high >= price)
+        if tests >= min_tests:
+            return f"{side}_absorption@{price:g}"
+    return None
+
+
 def cumulative_delta(bars: list[Bar]) -> float:
     return sum(bar_delta(b) for b in bars)
 
