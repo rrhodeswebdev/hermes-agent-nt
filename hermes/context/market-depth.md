@@ -17,9 +17,11 @@ instead of it. Depth is context, delta is proof.
   is potential support; an `ask` wall potential resistance. Walls attract price (liquidity)
   and can either hold (absorption) or get swept — do not treat a wall as a guaranteed floor
   or ceiling; watch whether delta is being absorbed at it.
-- **`absorption`** — e.g. `bid_absorption@5123.25`: price has repeatedly tested a resting
-  wall that keeps refreshing instead of breaking. Support/resistance holding under pressure.
-  A classic reversal tell **when delta into the level is failing to extend** — pair the two.
+- **`absorption`** — e.g. `bid_absorption@5123.25`: price has repeatedly traded into a level
+  that is carrying a large resting wall **right now**. It's a coarse read — the level is
+  walled at this moment and price keeps reaching it, not a verified hold-through-time — so
+  treat it as "a defended level worth watching," not a confirmed floor/ceiling. A reversal
+  tell **when delta into the level is failing to extend** — pair the two.
 - **`spread`**, **`top_bid_size`**, **`top_ask_size`** — the touch. A thin top of book means
   slippage risk and fast moves; a thick touch means the level is defended.
 

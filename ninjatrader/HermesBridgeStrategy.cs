@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
-using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -111,8 +110,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         // Opt-in Level 2 (market depth) capture. FALSE by default: no OnMarketDepth
         // book maintenance and no "depth" key on the realtime bar payload — behavior
-        // is byte-identical to before this flag existed. TRUE: maintains a bid/ask
-        // price->size ladder from OnMarketDepth and appends it to each closed bar.
+        // is byte-identical to before this flag existed. TRUE: maintains a position-indexed
+        // bid/ask ladder from OnMarketDepth and appends its top levels to each closed bar.
         [NinjaScriptProperty]
         [Display(Name = "Use Level 2 (market depth)", GroupName = "Order flow", Order = 1)]
         public bool UseLevel2 { get; set; } = false;
@@ -362,17 +361,73 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
 
         // ---- Level 2 order book (realtime only; gated by UseLevel2) ----
-        private readonly SortedDictionary<double, double> _bidBook =
-            new SortedDictionary<double, double>();   // price -> size
-        private readonly SortedDictionary<double, double> _askBook =
-            new SortedDictionary<double, double>();
+        // NT8 depth is POSITION-based: every event names a ladder row (e.Position) and an
+        // Operation (Add / Update / Remove) acting on THAT row. An Update can move the price
+        // at a row, so a price-keyed store strands the old price forever (no Remove ever
+        // names it) and the ladder rots. We mirror the ladder as a position-indexed list per
+        // side — the NT8-documented pattern. Position 0 is best-of-book on both sides.
+        private struct DepthRow { public double Price; public double Size; }
+        private readonly object _depthLock = new object();
+        private readonly List<DepthRow> _bids = new List<DepthRow>();
+        private readonly List<DepthRow> _asks = new List<DepthRow>();
+        private DateTime _lastDepthUtc = DateTime.MinValue;   // wall-clock of the last book change
 
+        // OnMarketDepth runs on its own async thread — NOT serialized with OnBarUpdate — so all
+        // book access (here and in BarJson) is guarded by _depthLock.
         protected override void OnMarketDepth(MarketDepthEventArgs e)
         {
             if (!UseLevel2) return;
-            var book = e.MarketDataType == MarketDataType.Bid ? _bidBook : _askBook;
-            if (e.Operation == Operation.Remove) book.Remove(e.Price);
-            else book[e.Price] = e.Volume;   // Add or Update
+            lock (_depthLock)
+            {
+                var book = e.MarketDataType == MarketDataType.Bid ? _bids : _asks;
+                if (e.IsReset) { book.Clear(); _lastDepthUtc = DateTime.UtcNow; return; }
+
+                int pos = e.Position;
+                switch (e.Operation)
+                {
+                    case Operation.Add:
+                        if (pos < 0) return;
+                        if (pos >= book.Count) book.Add(new DepthRow { Price = e.Price, Size = e.Volume });
+                        else book.Insert(pos, new DepthRow { Price = e.Price, Size = e.Volume });
+                        break;
+                    case Operation.Update:   // price AND size may change at this row
+                        if (pos < 0 || pos >= book.Count) return;
+                        book[pos] = new DepthRow { Price = e.Price, Size = e.Volume };
+                        break;
+                    case Operation.Remove:
+                        if (pos >= 0 && pos < book.Count) book.RemoveAt(pos);
+                        break;
+                }
+                _lastDepthUtc = DateTime.UtcNow;
+            }
+        }
+
+        // A dropped/severed price feed can make us miss the Removes that fired during the gap,
+        // leaving a stale phantom ladder that would ship as live depth. Flush both books on any
+        // non-Connected price status so absence — which the bridge already degrades on — is the
+        // failure mode instead of staleness. A fresh subscription rebuilds from the next reset.
+        protected override void OnConnectionStatusUpdate(ConnectionStatusEventArgs e)
+        {
+            if (!UseLevel2) return;
+            if (e.PriceStatus != ConnectionStatus.Connected)
+                lock (_depthLock) { _bids.Clear(); _asks.Clear(); _lastDepthUtc = DateTime.MinValue; }
+        }
+
+        // Emit up to n non-empty levels, best-first. Zero-size rows are skipped: an Update to
+        // Volume 0 rests a dead row in the ladder that would otherwise occupy a slot and dilute
+        // the wall mean on the Python side. Caller holds _depthLock.
+        private static void AppendLevels(StringBuilder sb, List<DepthRow> book, int n, CultureInfo ci)
+        {
+            int i = 0;
+            foreach (var row in book)
+            {
+                if (i >= n) break;
+                if (row.Size <= 0) continue;
+                if (i > 0) sb.Append(',');
+                sb.AppendFormat(ci, "{{\"price\":{0},\"size\":{1}}}",
+                    row.Price.ToString(ci), row.Size.ToString(ci));
+                i++;
+            }
         }
 
         // ---- trading: networking / execution -------------------------------
@@ -677,35 +732,36 @@ namespace NinjaTrader.NinjaScript.Strategies
                     askVol.Value.ToString(ci), bidVol.Value.ToString(ci));
 
             // Depth is appended as a sibling key inside the same JSON object, only when
-            // UseLevel2 is on and the book has entries — off / no-L2-feed emits nothing
-            // new, so the payload stays byte-identical to before this feature existed.
-            if (UseLevel2 && (_bidBook.Count > 0 || _askBook.Count > 0))
+            // UseLevel2 is on and the book is live — off / no-L2-feed emits nothing new, so
+            // the payload stays byte-identical to before this feature existed. Snapshot the
+            // ladders under _depthLock (OnMarketDepth mutates them on a separate thread; an
+            // unguarded enumeration here can throw InvalidOperationException mid-BarJson,
+            // which escapes OnBarUpdate and skips both the bar POST and the command poll).
+            if (UseLevel2)
             {
                 const int N = 10;
-                var sb = new StringBuilder();
-                sb.Append(",\"depth\":{\"bids\":[");
-                int i = 0;
-                // SortedDictionary is ascending by price; bids want best (highest) first.
-                foreach (var kv in _bidBook.Reverse())
+                string depthJson = null;
+                lock (_depthLock)
                 {
-                    if (i >= N) break;
-                    if (i > 0) sb.Append(',');
-                    sb.AppendFormat(ci, "{{\"price\":{0},\"size\":{1}}}",
-                        kv.Key.ToString(ci), kv.Value.ToString(ci));
-                    i++;
+                    // Omit depth when the feed has gone quiet: a stale book read as live
+                    // liquidity is worse than no book. 30s is generous for thin overnight
+                    // sessions yet tight enough to catch a feed/entitlement stall while trades
+                    // keep printing. Widen if it false-drops legitimately static books.
+                    bool fresh = _lastDepthUtc != DateTime.MinValue
+                        && (DateTime.UtcNow - _lastDepthUtc).TotalSeconds <= 30;
+                    if (fresh && (_bids.Count > 0 || _asks.Count > 0))
+                    {
+                        var sb = new StringBuilder();
+                        sb.Append(",\"depth\":{\"bids\":[");
+                        AppendLevels(sb, _bids, N, ci);   // position 0 = best bid
+                        sb.Append("],\"asks\":[");
+                        AppendLevels(sb, _asks, N, ci);   // position 0 = best ask
+                        sb.Append("]}");
+                        depthJson = sb.ToString();
+                    }
                 }
-                sb.Append("],\"asks\":[");
-                i = 0;
-                foreach (var kv in _askBook)   // ascending price = best ask first
-                {
-                    if (i >= N) break;
-                    if (i > 0) sb.Append(',');
-                    sb.AppendFormat(ci, "{{\"price\":{0},\"size\":{1}}}",
-                        kv.Key.ToString(ci), kv.Value.ToString(ci));
-                    i++;
-                }
-                sb.Append("]}");
-                core = core.Insert(core.Length - 1, sb.ToString());  // before the closing brace
+                if (depthJson != null)
+                    core = core.Insert(core.Length - 1, depthJson);  // before the closing brace
             }
 
             return core;

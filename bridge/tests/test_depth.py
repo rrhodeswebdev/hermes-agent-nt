@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from hermes_bridge.agent_client import _CONTEXT_ORDER, load_context_files
 from hermes_bridge.config import StrategyParams
@@ -12,6 +13,8 @@ from hermes_bridge.indicators import (
 )
 from hermes_bridge.models import Bar, DepthLevel, DepthSnapshot
 from hermes_bridge.resample import aggregate_bars
+from hermes_bridge.store import BarStore
+from hermes_bridge.views import depth_view
 
 _CONTEXT_DIR = str(Path(__file__).resolve().parents[2] / "hermes" / "context")
 
@@ -209,3 +212,38 @@ def test_aggregate_depth_none_when_feed_bars_have_none():
     b1 = Bar(ts=60.0, open=100, high=101, low=99, close=100.5, volume=5)
     b2 = Bar(ts=120.0, open=100.5, high=101.5, low=100, close=101, volume=7)
     assert aggregate_bars([b1, b2]).depth is None
+
+
+def _state_with_depth(snap):
+    # depth_view only reads st.store.last() and st.engine.last_context, so a real BarStore +
+    # real MarketContext behind a tiny namespace exercises the real path without the full
+    # server AppState (which drags in an engine, resampler, etc.).
+    store = BarStore("MNQ", "1m")
+    bars = [
+        Bar(ts=float(i), open=100, high=101, low=99, close=100.5, volume=10)
+        for i in range(29)
+    ]
+    bars.append(Bar(ts=29.0, open=100, high=101, low=99, close=100.5, volume=10, depth=snap))
+    for b in bars:
+        store.append(b)
+    ctx = build_context(bars, atr_period=14, imbalance_levels=5, wall_multiple=3.0)
+    return SimpleNamespace(store=store, engine=SimpleNamespace(last_context=ctx))
+
+
+def test_depth_view_derives_from_state():
+    snap = _snap([(100.0, 30), (99.75, 20)], [(100.25, 5), (100.5, 5)])
+    dv = depth_view(_state_with_depth(snap))
+    assert dv is not None
+    assert dv["bids"] == [[100.0, 30], [99.75, 20]]
+    assert dv["asks"][0] == [100.25, 5]
+    assert round(dv["imbalance"], 3) == 0.667
+    assert round(dv["spread"], 2) == 0.25
+    assert dv["absorption"] is None
+    assert "walls" not in dv  # dead key removed — nothing consumes it
+
+
+def test_depth_view_none_when_depth_absent():
+    store = BarStore("MNQ", "1m")
+    store.append(Bar(ts=1.0, open=100, high=101, low=99, close=100.5, volume=10))
+    st = SimpleNamespace(store=store, engine=SimpleNamespace(last_context=None))
+    assert depth_view(st) is None

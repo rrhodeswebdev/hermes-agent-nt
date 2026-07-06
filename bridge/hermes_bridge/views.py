@@ -165,7 +165,6 @@ def depth_view(st: AppState) -> dict | None:
         "asks": [[lvl.price, lvl.size] for lvl in snap.asks],
         "imbalance": getattr(ctx, "depth_imbalance", None),
         "spread": getattr(ctx, "spread", None),
-        "walls": [[p, s, side] for p, s, side in getattr(ctx, "depth_walls", [])],
         "absorption": getattr(ctx, "absorption", None),
     }
 

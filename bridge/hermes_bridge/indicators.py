@@ -196,9 +196,9 @@ def absorption(
     (resistance), else None. Heuristic, bar-cadence. When walls hold on both sides in the
     same window, the bid side is reported (bid takes precedence).
     """
-    # ponytail: single-snapshot touch-count on the bar-cadence book — good enough for a
-    # per-bar read; upgrade to tick-level book tracking (true persistence across snapshots)
-    # only if the per-bar signal proves too coarse.
+    # Single-snapshot touch-count on the bar-cadence book — good enough for a per-bar read;
+    # upgrade to tick-level book tracking (true persistence across snapshots) only if the
+    # per-bar signal proves too coarse.
     snaps = [b for b in bars if b.depth is not None]
     if not snaps:
         return None
