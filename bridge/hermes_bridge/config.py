@@ -137,6 +137,14 @@ class StrategyParams(BaseModel):
     # stops.managed_stop_price.
     breakeven_r: float = Field(default=0.0, ge=0.0)
     trail_enabled: bool = False
+    # SHADOW breakeven-tuning (evidence-only — NO live order change). When > 0, every CLOSED
+    # trade whose entry regime is "transitional" is scored against a tighter breakeven arming at
+    # this many R (vs the live +1R manager): a kind="shadow_breakeven" record lands in the decline
+    # log tallying whether an earlier breakeven would SAVE the give-back losers without SCRATCHING
+    # too many winners. The live manager (managed_stop_price) is untouched. 0.0 = off (neutral
+    # default); set ~0.5 in trading.local.yaml to accumulate the evidence that gates a regime-aware
+    # breakeven_r. See shadow_be.shadow_breakeven_outcome + docs/superpowers/specs 2026-07-06.
+    shadow_breakeven_r_transitional: float = Field(default=0.0, ge=0.0)
 
     @model_validator(mode="after")
     def _check_stop_band(self) -> StrategyParams:

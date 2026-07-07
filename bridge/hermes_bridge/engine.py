@@ -39,6 +39,7 @@ from .plan import Planner, PlanRequest, TradePlan, evaluate_plan
 from .reauthor import ReauthorState, record_authored, step
 from .risk import RiskGate
 from .session import SessionState
+from .shadow_be import shadow_breakeven_outcome
 from .stops import managed_stop_price, risk_scale_for_atr
 from .store import BarStore
 
@@ -798,6 +799,22 @@ class TradingEngine:
             filled=True, entry_price=trade.exit_price, fill_ts=trade.exit_ts,
         ))
 
+    def _record_breakeven_shadow(self, trade: ClosedTrade) -> None:
+        """Shadow-only breakeven tuning (evidence, NEVER an order): score a tighter,
+        transitional-gated breakeven arming against the live +1R manager and log the
+        counterfactual to the decline bucket. Gates a future regime-aware breakeven_r; the
+        live manager (managed_stop_price) is untouched. Guarded — a shadow must never break
+        the bar loop."""
+        if self.declines is None or self.cfg.strategy.shadow_breakeven_r_transitional <= 0:
+            return
+        try:
+            bars = [b for b in self.store.all() if trade.entry_ts <= b.ts <= trade.exit_ts]
+            rec = shadow_breakeven_outcome(trade, bars, self.cfg)
+            if rec is not None:
+                self.declines.append(rec)
+        except Exception as e:  # evidence-only; a shadow can't be allowed to break the loop
+            print(f"[shadow_be] eval failed: {e}", flush=True)
+
     # ---- fill handling ------------------------------------------------------
     def on_fill(self, fill: Fill) -> OrderCommand | None:
         """Apply a fill, journal a completed trade on close, and flatten if the daily
@@ -852,6 +869,7 @@ class TradingEngine:
                 if self.journal is not None:
                     self.journal.append(trade)
                 self._record_exit_replay(trade)
+                self._record_breakeven_shadow(trade)
                 if self.on_close is not None:
                     self.on_close(trade)
         # else: a partial REDUCE toward flat (position still open) — keep tracking; the
