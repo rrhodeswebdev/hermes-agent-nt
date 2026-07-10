@@ -124,16 +124,25 @@ class SessionState:
                     self.halt_reason = self._pending_restore.get("halt_reason", "") or ""
                     self.daily_goal_hit = bool(
                         self._pending_restore.get("daily_goal_hit", False))
+                else:
+                    # A PRIOR trading day's accounting survived on disk because the bridge was
+                    # down across that day's roll (e.g. the Fri->Sun weekend), so the live fold
+                    # in the roll branch below never ran. Bank that day's realized net into the
+                    # account ledger now — same effect as the live roll — so cumulative + the MLL
+                    # high-water-mark reflect the banked profit instead of restoring to zero.
+                    self._fold_gap_day(self._pending_restore)
                 self._pending_restore = None
             self._persist()
             return False
         if key.value != self._day.value:
+            closing_day = self._day.value
             self._day = key
             # Bank the CLOSING day's realized net into the account ledger and ratchet its
             # end-of-day high-water-mark BEFORE the day's accounting resets. The ledger is
-            # account-lifetime, so it does not reset here.
+            # account-lifetime, so it does not reset here. Keyed by the closing day so a boot-time
+            # gap fold of the same day can't double-bank it.
             if self.ledger is not None:
-                self.ledger.fold_day(self.realized_net)
+                self.ledger.fold_day(self.realized_net, closing_day)
                 self._persist_ledger()
             self.realized_pnl = 0.0
             self.commission_total = 0.0
@@ -144,6 +153,23 @@ class SessionState:
             self._persist()
             return True
         return False
+
+    def _fold_gap_day(self, restore: dict) -> None:
+        """Bank a prior trading day's realized net into the account ledger on boot.
+
+        When the bridge is down across a day roll (a weekend), the persisted day-state belongs to
+        a CLOSED trading day that the live ``maybe_roll_day`` fold never banked. Fold it here so
+        the lifetime cumulative + the MLL high-water-mark match the true banked profit. The
+        ledger fold is idempotent per day (keyed on the closing day), so a raced/partial persist
+        can't double-count. No-op without a ledger. Best-effort persist, like the live roll."""
+        if self.ledger is None:
+            return
+        realized = float(restore.get("realized_pnl", 0.0))
+        commission = float(restore.get("commission_total", 0.0))
+        day = restore.get("day")
+        day_key = int(day) if day is not None else None
+        if self.ledger.fold_day(realized - commission, day_key):
+            self._persist_ledger()
 
     def _persist(self) -> None:
         """Write the day's accounting so a restart can restore it (best-effort; a write

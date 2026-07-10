@@ -28,8 +28,14 @@ def _ensure_table(conn: sqlite3.Connection) -> None:
         "initial_balance REAL NOT NULL, "
         "mll_amount REAL, "
         "cumulative_realized REAL NOT NULL, "
-        "eod_high_balance REAL NOT NULL)"
+        "eod_high_balance REAL NOT NULL, "
+        "last_folded_day INTEGER)"
     )
+    # Migrate a ledger table created before last_folded_day existed (added 2026-07-10 for the
+    # boot-time weekend-gap fold guard) so an existing deployment reads/writes without a reset.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(account_ledger)").fetchall()}
+    if "last_folded_day" not in cols:
+        conn.execute("ALTER TABLE account_ledger ADD COLUMN last_folded_day INTEGER")
 
 
 @dataclass
@@ -41,12 +47,16 @@ class AccountLedger:
     ``cumulative_realized`` — sum of ALL PRIOR trading days' realized P&L, net of commission.
     ``eod_high_balance`` — the highest end-of-day balance ever seen (defaults to
       ``initial_balance``); ratchets UP only, at the day roll.
+    ``last_folded_day`` — the CME trading day most recently folded into the totals; the fold
+      guard keys on it so a day banked by the live roll can't be re-banked by a boot-time gap
+      fold (or vice versa). ``None`` until the first keyed fold.
     """
 
     initial_balance: float
     mll_amount: float | None = None
     cumulative_realized: float = 0.0
     eod_high_balance: float | None = None
+    last_folded_day: int | None = None
 
     def __post_init__(self) -> None:
         self.initial_balance = float(self.initial_balance)
@@ -57,6 +67,8 @@ class AccountLedger:
             self.eod_high_balance = self.initial_balance
         else:
             self.eod_high_balance = float(self.eod_high_balance)
+        if self.last_folded_day is not None:
+            self.last_folded_day = int(self.last_folded_day)
 
     # ---- MLL math -----------------------------------------------------------
     def mll_floor(self) -> float | None:
@@ -83,13 +95,24 @@ class AccountLedger:
         return self.equity(today_realized_net, unrealized) - floor
 
     # ---- day roll -----------------------------------------------------------
-    def fold_day(self, day_realized_net: float) -> None:
+    def fold_day(self, day_realized_net: float, day_key: int | None = None) -> bool:
         """At the trading-day roll: bank the closing day's realized net into the lifetime total
-        and ratchet the end-of-day high-water-mark UP (never down)."""
+        and ratchet the end-of-day high-water-mark UP (never down).
+
+        A day can be closed by either the live roll or — when the bridge was down across the roll
+        (e.g. a weekend) — a boot-time gap fold. Pass ``day_key`` (the closing CME trading day) so
+        the two paths can't double-bank the same day: a repeat fold of ``last_folded_day`` is a
+        no-op. Returns ``True`` when the fold was applied, ``False`` when refused as a duplicate.
+        Omitting ``day_key`` keeps the old unconditional behavior (no guard, no record)."""
+        if day_key is not None and day_key == self.last_folded_day:
+            return False
         self.cumulative_realized += float(day_realized_net)
         eod_balance = self.initial_balance + self.cumulative_realized
         if eod_balance > self.eod_high_balance:
             self.eod_high_balance = eod_balance
+        if day_key is not None:
+            self.last_folded_day = int(day_key)
+        return True
 
     # ---- persistence --------------------------------------------------------
     def to_dict(self) -> dict:
@@ -98,6 +121,7 @@ class AccountLedger:
             "mll_amount": self.mll_amount,
             "cumulative_realized": self.cumulative_realized,
             "eod_high_balance": self.eod_high_balance,
+            "last_folded_day": self.last_folded_day,
         }
 
     def write(self, json_path: str | None = None, db_path: str | None = None) -> None:
@@ -118,14 +142,16 @@ class AccountLedger:
                 d = self.to_dict()
                 conn.execute(
                     "INSERT INTO account_ledger "
-                    "(id, initial_balance, mll_amount, cumulative_realized, eod_high_balance) "
-                    "VALUES (1, ?, ?, ?, ?) "
+                    "(id, initial_balance, mll_amount, cumulative_realized, eod_high_balance, "
+                    "last_folded_day) "
+                    "VALUES (1, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(id) DO UPDATE SET "
                     "initial_balance=excluded.initial_balance, mll_amount=excluded.mll_amount, "
                     "cumulative_realized=excluded.cumulative_realized, "
-                    "eod_high_balance=excluded.eod_high_balance",
+                    "eod_high_balance=excluded.eod_high_balance, "
+                    "last_folded_day=excluded.last_folded_day",
                     (d["initial_balance"], d["mll_amount"], d["cumulative_realized"],
-                     d["eod_high_balance"]),
+                     d["eod_high_balance"], d["last_folded_day"]),
                 )
                 conn.commit()
             except sqlite3.Error:
@@ -143,13 +169,14 @@ class AccountLedger:
                 conn = sqlite3.connect(db_path)
                 _ensure_table(conn)
                 row = conn.execute(
-                    "SELECT initial_balance, mll_amount, cumulative_realized, eod_high_balance "
-                    "FROM account_ledger WHERE id = 1"
+                    "SELECT initial_balance, mll_amount, cumulative_realized, eod_high_balance, "
+                    "last_folded_day FROM account_ledger WHERE id = 1"
                 ).fetchone()
                 if row is not None:
                     return {
                         "initial_balance": row[0], "mll_amount": row[1],
                         "cumulative_realized": row[2], "eod_high_balance": row[3],
+                        "last_folded_day": row[4],
                     }
             except sqlite3.Error:
                 pass
@@ -184,4 +211,6 @@ class AccountLedger:
             ledger.eod_high_balance = (
                 float(eh) if eh is not None else float(initial_balance)
             )
+            lfd = d.get("last_folded_day")
+            ledger.last_folded_day = int(lfd) if lfd is not None else None
         return ledger

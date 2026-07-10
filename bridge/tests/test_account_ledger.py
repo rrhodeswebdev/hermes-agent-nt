@@ -6,6 +6,8 @@ restart and a trading-day roll (unlike SessionState's day accounting). See the 2
 """
 from __future__ import annotations
 
+import sqlite3
+
 from hermes_bridge.account_ledger import AccountLedger
 
 
@@ -109,3 +111,64 @@ def test_mll_amount_follows_current_config_not_persisted(tmp_path):
     R = AccountLedger.read(jp, None, initial_balance=50000, mll_amount=1800)
     assert R.cumulative_realized == 500        # same account -> history kept
     assert R.mll_amount == 1800                # config value wins
+
+
+def test_fold_day_idempotent_by_day_key():
+    # A trading day may be folded by EITHER the live roll OR (if the bridge was down across the
+    # roll) a boot-time gap fold. Keyed by the closing day, a second fold of the SAME day is a
+    # no-op, so a raced persist can never double-bank the profit (which would overstate MLL room).
+    L = AccountLedger(initial_balance=50000, mll_amount=2000)
+    assert L.fold_day(200.0, day_key=739807) is True
+    assert L.cumulative_realized == 200.0
+    assert L.eod_high_balance == 50200.0
+    assert L.last_folded_day == 739807
+    assert L.fold_day(200.0, day_key=739807) is False   # same day again -> refused
+    assert L.cumulative_realized == 200.0                # unchanged
+    assert L.eod_high_balance == 50200.0
+    assert L.fold_day(100.0, day_key=739808) is True     # a genuinely new day still folds
+    assert L.cumulative_realized == 300.0
+
+
+def test_fold_day_without_key_always_folds():
+    # Legacy call form (no day key) keeps the old unconditional behavior.
+    L = AccountLedger(initial_balance=50000, mll_amount=2000)
+    assert L.fold_day(100.0) is True
+    assert L.fold_day(100.0) is True
+    assert L.cumulative_realized == 200.0
+    assert L.last_folded_day is None
+
+
+def test_last_folded_day_persists_roundtrip(tmp_path):
+    jp = str(tmp_path / "acct.json")
+    dbp = str(tmp_path / "acct.db")
+    L = AccountLedger(initial_balance=50000, mll_amount=2000)
+    L.fold_day(500.0, day_key=739807)
+    L.write(json_path=jp, db_path=dbp)
+    # The guard survives a restart (both channels), so a post-restart re-fold is refused.
+    R = AccountLedger.read(jp, dbp, initial_balance=50000, mll_amount=2000)
+    assert R.last_folded_day == 739807
+    assert R.fold_day(500.0, day_key=739807) is False
+    assert R.cumulative_realized == 500.0
+
+
+def test_sqlite_migration_adds_last_folded_day_column(tmp_path):
+    # A ledger db created before last_folded_day existed must be read (and written back)
+    # transparently — the column is added on first open, defaulting to None.
+    dbp = str(tmp_path / "old.db")
+    conn = sqlite3.connect(dbp)
+    conn.execute(
+        "CREATE TABLE account_ledger (id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "initial_balance REAL NOT NULL, mll_amount REAL, cumulative_realized REAL NOT NULL, "
+        "eod_high_balance REAL NOT NULL)"
+    )
+    conn.execute("INSERT INTO account_ledger VALUES (1, 50000, 2000, 750, 50750)")
+    conn.commit()
+    conn.close()
+    R = AccountLedger.read(None, dbp, initial_balance=50000, mll_amount=2000)
+    assert R.cumulative_realized == 750
+    assert R.last_folded_day is None
+    R.fold_day(100.0, day_key=739810)
+    R.write(json_path=None, db_path=dbp)
+    R2 = AccountLedger.read(None, dbp, initial_balance=50000, mll_amount=2000)
+    assert R2.last_folded_day == 739810
+    assert R2.cumulative_realized == 850
