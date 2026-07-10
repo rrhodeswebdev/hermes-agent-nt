@@ -176,3 +176,8 @@ class AccountState(FrozenModel):
     last_bar_ts: float | None = None
     realized_net: float = 0.0        # realized P&L minus commissions paid
     commission: float = 0.0          # total commission paid this session
+    # Prop-firm trailing-drawdown (MLL) state — populated only when an account ledger is attached
+    # (enforce_trailing_drawdown / auto_scale / dynamic_contract_scaling); None otherwise.
+    account_equity: float | None = None   # start + lifetime realized + today's net + open P&L
+    mll_floor: float | None = None        # the trailing Max-Loss floor
+    mll_room: float | None = None         # equity above the floor (the remaining drawdown room)

@@ -84,6 +84,25 @@ risk:
   # entry sizes ~2 at the low end up to 5 near full conviction.)
   confidence_sizing: true
   full_size_confidence: 0.85   # confidence at/above which the full budget is taken
+  # ---- Prop-firm trailing-drawdown (MLL) + account-scaled risk (opt-in; see
+  #      docs/superpowers/specs/2026-07-09-trailing-drawdown-and-risk-scaling-design.md). All OFF
+  #      here (neutral template); enable in trading.local.yaml with a prop-firm account_profile. ----
+  # enforce_trailing_drawdown -> halt+flatten at the account's trailing Max-Loss floor (needs a
+  #   trailing_drawdown + size from the account_profile; the RiskGate gains a high-water-mark).
+  # auto_scale_per_trade -> per-trade $ budget scales with the REMAINING drawdown room
+  #   (per_trade_room_fraction x room), capped by the daily-loss allowance, per_trade_abs_ceiling_pct
+  #   x equity, and max_risk_per_trade (backstop). Shrinks near the floor (the danger band), ladders
+  #   up as banked profit ratchets it. Off => static max_risk_per_trade.
+  # dynamic_contract_scaling -> max_contracts ramps from contract_scale_base_pct x max up to max as
+  #   the end-of-day high balance grows past the eval target (VERIFY vs the firm's real table).
+  enforce_trailing_drawdown: false
+  mll_buffer_usd: 0.0
+  auto_scale_per_trade: false
+  per_trade_room_fraction: 0.15
+  per_trade_abs_ceiling_pct: 0.01
+  dynamic_contract_scaling: false
+  contract_scale_base_pct: 0.5
+  contract_scale_span_usd: 0.0
 
 # Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
 daily_goal:

@@ -21,6 +21,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .account_ledger import AccountLedger
 from .indicators import cme_trading_day
 from .models import AccountState, Fill, Side
 
@@ -50,6 +51,7 @@ class SessionState:
         max_daily_loss: float,
         state_path: str | None = None,
         commission_per_contract: float = 0.0,
+        ledger_db_path: str | None = None,
     ) -> None:
         self.instrument = instrument
         self.timeframe = timeframe
@@ -86,6 +88,21 @@ class SessionState:
             except (OSError, ValueError):
                 self._pending_restore = None
 
+        # Account-lifetime ledger for prop-firm trailing-drawdown (MLL) enforcement + risk
+        # scaling. None until attach_ledger() is called (by apply_account_profile when
+        # enforce_trailing_drawdown is on). Persisted to BOTH a JSON sidecar and the sqlite db,
+        # and — unlike the day accounting above — it survives the trading-day roll.
+        # The ledger's JSON sidecar sits next to the day-state file (account_ledger.json); the db
+        # is the shared bars_db. Either may be None (persistence simply off for that channel).
+        self._ledger_json_path = (
+            str(Path(self._state_path).with_name("account_ledger.json"))
+            if self._state_path else None
+        )
+        self._ledger_db_path = ledger_db_path or None
+        self.ledger: AccountLedger | None = None
+        # The account's eval profit target (set with the ledger); drives dynamic contract scaling.
+        self.eval_profit_target: float | None = None
+
     # ---- day handling -------------------------------------------------------
     def maybe_roll_day(self, ts: float) -> bool:
         """Reset counters if the bar belongs to a new trading day. Returns True on roll."""
@@ -110,6 +127,12 @@ class SessionState:
             return False
         if key.value != self._day.value:
             self._day = key
+            # Bank the CLOSING day's realized net into the account ledger and ratchet its
+            # end-of-day high-water-mark BEFORE the day's accounting resets. The ledger is
+            # account-lifetime, so it does not reset here.
+            if self.ledger is not None:
+                self.ledger.fold_day(self.realized_net)
+                self._persist_ledger()
             self.realized_pnl = 0.0
             self.commission_total = 0.0
             self.trades_today = 0
@@ -223,6 +246,54 @@ class SessionState:
         self.halt_reason = ""
         self._persist()
 
+    # ---- account ledger (trailing-drawdown / MLL) ---------------------------
+    def attach_ledger(
+        self, initial_balance: float, mll_amount: float | None,
+        eval_profit_target: float | None = None,
+    ) -> None:
+        """Build (or restore) the account ledger and persist it. Called by
+        ``apply_account_profile`` when ``enforce_trailing_drawdown`` is on."""
+        self.ledger = AccountLedger.read(
+            self._ledger_json_path, self._ledger_db_path,
+            initial_balance=initial_balance, mll_amount=mll_amount,
+        )
+        self.eval_profit_target = eval_profit_target
+        self._persist_ledger()
+
+    def _persist_ledger(self) -> None:
+        if self.ledger is not None:
+            self.ledger.write(self._ledger_json_path, self._ledger_db_path)
+
+    def mll_floor(self) -> float | None:
+        return self.ledger.mll_floor() if self.ledger is not None else None
+
+    def account_equity(self, mark_price: float | None = None) -> float | None:
+        """Live account equity: start + lifetime realized + today's realized net + open P&L."""
+        if self.ledger is None:
+            return None
+        unreal = self.unrealized_pnl(mark_price) if mark_price is not None else 0.0
+        return self.ledger.equity(self.realized_net, unreal)
+
+    def mll_room(self, mark_price: float | None = None) -> float | None:
+        """USD of live equity above the MLL floor (``None`` when no ledger)."""
+        if self.ledger is None:
+            return None
+        unreal = self.unrealized_pnl(mark_price) if mark_price is not None else 0.0
+        return self.ledger.mll_room(self.realized_net, unreal)
+
+    def check_mll(self, mark_price: float | None, buffer_usd: float = 0.0) -> str | None:
+        """Halt when live equity falls to the trailing MLL floor (+ buffer) — the caller's
+        flatten-on-halt path then closes the position. Parallel to ``check_daily_goal``: returns
+        the halt reason on a NEW breach, else ``None``. Idempotent once halted; no-op without a
+        ledger."""
+        if self.halted or self.ledger is None:
+            return None
+        room = self.mll_room(mark_price)
+        if room is not None and room <= buffer_usd:
+            self.halt("mll_breached")
+            return "mll_breached"
+        return None
+
     @property
     def side(self) -> Side:
         if self.position > 0:
@@ -232,6 +303,9 @@ class SessionState:
         return Side.FLAT
 
     def account_state(self, mark_price: float | None = None) -> AccountState:
+        eq = self.account_equity(mark_price)
+        floor = self.mll_floor()
+        room = self.mll_room(mark_price)
         return AccountState(
             instrument=self.instrument,
             timeframe=self.timeframe,
@@ -246,4 +320,7 @@ class SessionState:
             last_bar_ts=self.last_bar_ts,
             realized_net=round(self.realized_net, 2),
             commission=round(self.commission_total, 2),
+            account_equity=round(eq, 2) if eq is not None else None,
+            mll_floor=round(floor, 2) if floor is not None else None,
+            mll_room=round(room, 2) if room is not None else None,
         )

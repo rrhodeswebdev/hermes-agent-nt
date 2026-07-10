@@ -145,6 +145,19 @@ def apply_account_profile(
         cfg.daily_goal.profit_target = daily_profit_target
         if session is not None:
             session.profit_target = daily_profit_target
+    # Trailing-drawdown (MLL) enforcement: build the account ledger from the tier's size +
+    # trailing_drawdown so the RiskGate can enforce the Max Loss Limit and scale per-trade risk to
+    # the remaining room. Only when opted in AND the session is live (the pure-config path passes
+    # session=None). See account_ledger.AccountLedger + the 2026-07-09 spec.
+    if (cfg.risk.enforce_trailing_drawdown or cfg.risk.auto_scale_per_trade
+            or cfg.risk.dynamic_contract_scaling) and session is not None:
+        session.attach_ledger(
+            initial_balance=float(tier.size),
+            mll_amount=(None if tier.trailing_drawdown is None
+                        else float(tier.trailing_drawdown)),
+            eval_profit_target=(None if tier.profit_target is None
+                                else float(tier.profit_target)),
+        )
     return {
         "size": tier.size,
         "max_daily_loss": tier.max_daily_loss,   # enforced (when set)

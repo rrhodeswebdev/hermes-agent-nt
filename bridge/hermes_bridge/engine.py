@@ -877,6 +877,11 @@ class TradingEngine:
         # strategy flattens before reversing, so a direct long<->short flip never occurs.)
 
         reason = self.session.check_daily_goal()
+        if reason is None and self.cfg.risk.enforce_trailing_drawdown:
+            # Trailing-drawdown backstop: halt + flatten if realized losses (incl. stop slippage)
+            # dropped live equity to the MLL floor. Entries near the floor are already refused by
+            # the gate's would_breach_mll projection; this catches a realized breach after a fill.
+            reason = self.session.check_mll(fill.price, self.cfg.risk.mll_buffer_usd)
         if reason and self.session.position != 0:
             cmd = self.flatten_command(reason)
             rd = self.risk.evaluate(cmd, self.session)

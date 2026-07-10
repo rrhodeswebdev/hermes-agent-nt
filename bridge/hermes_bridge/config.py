@@ -186,6 +186,29 @@ class RiskParams(BaseModel):
     full_size_confidence: float = Field(  # confidence at/above which the full budget is used
         default=0.85, ge=0.0, le=1.0
     )
+    # ---- Prop-firm trailing-drawdown (MLL) + account-scaled risk (opt-in; 2026-07-09 spec).
+    #      All OFF by default so the base config / existing behavior is unchanged. ----
+    # Enforce the account's trailing Max Loss Limit (drawdown): halt + flatten when live equity
+    # falls to the trailing floor. Needs an account_profile carrying a trailing_drawdown + size
+    # (built into an AccountLedger). Off => the MLL stays guidance-only (dashboard/brain), as today.
+    enforce_trailing_drawdown: bool = False
+    # Halt this many USD ABOVE the exact floor (a cushion; 0 = halt at the floor).
+    mll_buffer_usd: float = Field(default=0.0, ge=0)
+    # Dynamic, room-aware per-trade risk. When True the per-trade dollar budget scales with the
+    # REMAINING drawdown room (per_trade_room_fraction x mll_room), capped by the remaining daily
+    # loss allowance, an equity % ceiling, and max_risk_per_trade (the absolute backstop). As room
+    # shrinks the budget shrinks and the gate WAITs when no viable trade fits (the danger band); as
+    # banked profit ratchets the floor, room grows and size ladders up. Off => static
+    # max_risk_per_trade (legacy). See risk.dynamic_risk_budget.
+    auto_scale_per_trade: bool = False
+    per_trade_room_fraction: float = Field(default=0.15, gt=0, le=1)  # share of mll_room per trade
+    per_trade_abs_ceiling_pct: float = Field(default=0.01, gt=0)      # cap risk at this % of equity
+    # Dynamic contract ceiling (LucidFlex EOD size growth): scale max_contracts from a base up to
+    # the account ceiling as the end-of-day high balance grows past the account's eval target.
+    # VERIFY the ramp against the firm's actual scaling table. Off => static max_contracts.
+    dynamic_contract_scaling: bool = False
+    contract_scale_base_pct: float = Field(default=0.5, gt=0, le=1)   # base = ceil(max x this)
+    contract_scale_span_usd: float = Field(default=0.0, ge=0)         # 0 => use eval profit target
     # Exchange holiday / early-close protection. On a full US market holiday (all day) or a
     # futures early-close half day (13:00 ET), flatten any open position once within this many
     # minutes of the close and take no new entries for the rest of that session — so a position
@@ -516,6 +539,9 @@ class AccountProfileConfig(BaseModel):
     prop_firm: str | None = None       # firm name; must match a catalog entry
     account_type: str | None = None    # account program name within the firm
     account_size: float | None = None  # account size within the program
+    # Eval vs funded. "eval" enforces BOTH the daily loss limit and the trailing MLL. "funded"
+    # (e.g. LucidFlex funded has no DLL) relies on the MLL alone — the daily-loss halt is skipped.
+    phase: str = "eval"
     # The committed catalog of firms/accounts and the directory of firm context *.md files.
     # context_dir is deliberately OUTSIDE hermes/context/ so the framework loader does not
     # concatenate every firm file into the prompt — only the selected one is loaded.

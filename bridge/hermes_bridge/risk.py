@@ -23,6 +23,7 @@ is a thin adapter that carries the config + news source so callers keep the fami
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -125,7 +126,7 @@ def evaluate_risk(
     # 5) Base/requested size and the position cap. Final sizing happens in step 8,
     # once the per-trade dollar budget (step 7) is known.
     requested = command.qty if command.qty > 0 else 1
-    cap = cfg.risk.max_contracts
+    cap = effective_max_contracts(cfg, session)
 
     # 6) Mandatory protective stop (inject default if missing), clamped to the band.
     stop_ticks = command.stop_ticks
@@ -159,7 +160,8 @@ def evaluate_risk(
     per_contract_risk = risk_ticks * cfg.instrument.tick_value
     if risk_scale < 1.0:
         reasons.append(f"risk_scaled:{risk_scale:g}")
-    max_qty_by_risk = max_qty_for_risk(cfg, per_contract_risk, risk_scale)
+    budget = per_trade_budget(cfg, session, mark_price=last_price)
+    max_qty_by_risk = max_qty_for_risk(cfg, per_contract_risk, risk_scale, budget=budget)
     if max_qty_by_risk < 1:
         return RiskDecision(
             False, None, [f"single_contract_risk_exceeds_max:{per_contract_risk:.2f}"]
@@ -204,6 +206,22 @@ def evaluate_risk(
              f",risk={trade_risk:.2f},limit={session.max_daily_loss:.2f}"],
         )
 
+    # 9b) Trailing-drawdown (MLL) projection: reject an entry whose worst-case stop-out would
+    # pierce the trailing floor (+ buffer). Mirrors the daily-loss projection; only when the MLL is
+    # enforced, a ledger is attached, and we have a mark. The account-lifetime backstop.
+    if (cfg.risk.enforce_trailing_drawdown and session.ledger is not None
+            and last_price is not None):
+        mll_floor = session.mll_floor()
+        equity = session.account_equity(last_price)
+        if mll_floor is not None and equity is not None:
+            if equity - trade_risk <= mll_floor + cfg.risk.mll_buffer_usd:
+                return RiskDecision(
+                    False,
+                    None,
+                    [f"would_breach_mll:equity={equity:.2f},risk={trade_risk:.2f}"
+                     f",floor={mll_floor:.2f}"],
+                )
+
     # Preserve the intended reward:risk. When the stop was widened to the vol floor, a
     # brain that paired it with a tight target would be left with a WIDE stop and a TINY
     # target — an inverted R:R (small wins, big losses). Widen the target to keep at least
@@ -233,16 +251,62 @@ def evaluate_risk(
 
 
 # ---- shared cap math (gate + plan-time filter use the SAME rule) ------------
-def max_qty_for_risk(cfg: BridgeConfig, per_contract_risk: float, risk_scale: float = 1.0) -> int:
+def max_qty_for_risk(
+    cfg: BridgeConfig, per_contract_risk: float, risk_scale: float = 1.0,
+    budget: float | None = None,
+) -> int:
     """The most contracts the per-trade dollar budget admits for a given per-contract risk.
-    The budget shrinks by ``risk_scale`` in a volatility shock. Returns 0 when even ONE
-    contract's risk exceeds the (scaled) cap — the ``single_contract_risk_exceeds_max``
-    condition. Shared by ``evaluate_risk`` (step 7) and ``trigger_feasible`` so the gate and
-    the plan-time filter can never drift apart."""
+    The budget shrinks by ``risk_scale`` in a volatility shock. ``budget`` overrides the static
+    ``max_risk_per_trade`` (used by the room-scaled dynamic budget); ``None`` keeps the static cap.
+    Returns 0 when even ONE contract's risk exceeds the (scaled) budget — the
+    ``single_contract_risk_exceeds_max`` condition. Shared by ``evaluate_risk`` (step 7) and
+    ``trigger_feasible`` so the gate and the plan-time filter can never drift apart."""
     if per_contract_risk <= 0:
         return 0
-    eff = cfg.risk.max_risk_per_trade * max(0.0, risk_scale)
+    cap_usd = cfg.risk.max_risk_per_trade if budget is None else budget
+    eff = cap_usd * max(0.0, risk_scale)
     return int(eff // per_contract_risk)
+
+
+def per_trade_budget(cfg: BridgeConfig, session, *, mark_price: float | None = None) -> float:
+    """The per-trade dollar budget. Static ``max_risk_per_trade`` unless ``auto_scale_per_trade``
+    is on AND an account ledger is present, in which case it scales with the REMAINING drawdown
+    room: ``per_trade_room_fraction × mll_room``, capped by the remaining daily-loss allowance, an
+    equity-% ceiling, and ``max_risk_per_trade`` (the absolute backstop). It shrinks toward 0 as
+    room shrinks — so the gate WAITs (no viable contract) before the graveyard, the intelligent
+    danger band — and grows as banked profit ratchets the floor (laddering)."""
+    static = cfg.risk.max_risk_per_trade
+    if not cfg.risk.auto_scale_per_trade or session is None or session.ledger is None:
+        return static
+    room = session.mll_room(mark_price)
+    if room is None:
+        return static
+    equity = session.account_equity(mark_price) or 0.0
+    # Remaining daily-loss allowance on the SAME basis as the daily-loss gate (gross realized).
+    dll_room = max(0.0, cfg.daily_goal.max_daily_loss + session.realized_pnl)
+    return max(0.0, min(
+        cfg.risk.per_trade_room_fraction * max(0.0, room),
+        dll_room,
+        cfg.risk.per_trade_abs_ceiling_pct * max(0.0, equity),
+        static,
+    ))
+
+
+def effective_max_contracts(cfg: BridgeConfig, session) -> int:
+    """The contract ceiling. Static ``max_contracts`` unless ``dynamic_contract_scaling`` is on AND
+    a ledger is present, in which case it ramps from a base up to ``max_contracts`` as the
+    end-of-day high balance grows past the account's eval target (the LucidFlex EOD size-growth
+    plan). VERIFY the ramp against the firm's real scaling table."""
+    hard = cfg.risk.max_contracts
+    if not cfg.risk.dynamic_contract_scaling or session is None or session.ledger is None:
+        return hard
+    span = cfg.risk.contract_scale_span_usd or (session.eval_profit_target or 0.0)
+    if span <= 0:
+        return hard
+    base = max(1, min(math.ceil(hard * cfg.risk.contract_scale_base_pct), hard))
+    banked = session.ledger.eod_high_balance - session.ledger.initial_balance
+    progress = max(0.0, min(1.0, banked / span))
+    return int(round(base + (hard - base) * progress))
 
 
 def per_contract_risk_usd(
