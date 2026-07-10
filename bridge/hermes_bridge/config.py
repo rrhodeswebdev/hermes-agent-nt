@@ -203,12 +203,12 @@ class RiskParams(BaseModel):
     auto_scale_per_trade: bool = False
     per_trade_room_fraction: float = Field(default=0.15, gt=0, le=1)  # share of mll_room per trade
     per_trade_abs_ceiling_pct: float = Field(default=0.01, gt=0)      # cap risk at this % of equity
-    # Dynamic contract ceiling (LucidFlex EOD size growth): scale max_contracts from a base up to
-    # the account ceiling as the end-of-day high balance grows past the account's eval target.
-    # VERIFY the ramp against the firm's actual scaling table. Off => static max_contracts.
+    # Dynamic contract ceiling — the prop firm's FUNDED scaling plan: max_contracts is tiered on
+    # end-of-session simulated profit per the firm's published table (config/prop-firms.yaml
+    # `scaling_tiers`; fixed during the day, moves both ways). There is NO scaling in the eval
+    # phase — full size from the first trade — so this is inert unless account_profile.phase ==
+    # "funded". Off => static max_contracts.
     dynamic_contract_scaling: bool = False
-    contract_scale_base_pct: float = Field(default=0.5, gt=0, le=1)   # base = ceil(max x this)
-    contract_scale_span_usd: float = Field(default=0.0, ge=0)         # 0 => use eval profit target
     # Exchange holiday / early-close protection. On a full US market holiday (all day) or a
     # futures early-close half day (13:00 ET), flatten any open position once within this many
     # minutes of the close and take no new entries for the rest of that session — so a position

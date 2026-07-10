@@ -23,7 +23,6 @@ is a thin adapter that carries the config + news source so callers keep the fami
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -293,20 +292,22 @@ def per_trade_budget(cfg: BridgeConfig, session, *, mark_price: float | None = N
 
 
 def effective_max_contracts(cfg: BridgeConfig, session) -> int:
-    """The contract ceiling. Static ``max_contracts`` unless ``dynamic_contract_scaling`` is on AND
-    a ledger is present, in which case it ramps from a base up to ``max_contracts`` as the
-    end-of-day high balance grows past the account's eval target (the LucidFlex EOD size-growth
-    plan). VERIFY the ramp against the firm's real scaling table."""
+    """The contract ceiling. Static ``max_contracts`` EXCEPT in a FUNDED prop account with
+    ``dynamic_contract_scaling`` on, where it follows the firm's published scaling table:
+    max_contracts is tiered on END-OF-SESSION simulated profit (fixed during the day; moves both
+    ways as the balance changes). There is NO scaling in the evaluation phase — full size from the
+    first trade — so this returns the static ceiling unless the account is funded."""
     hard = cfg.risk.max_contracts
-    if not cfg.risk.dynamic_contract_scaling or session is None or session.ledger is None:
+    if (cfg.account_profile.phase != "funded" or not cfg.risk.dynamic_contract_scaling
+            or session is None or session.ledger is None or not session.scaling_tiers):
         return hard
-    span = cfg.risk.contract_scale_span_usd or (session.eval_profit_target or 0.0)
-    if span <= 0:
-        return hard
-    base = max(1, min(math.ceil(hard * cfg.risk.contract_scale_base_pct), hard))
-    banked = session.ledger.eod_high_balance - session.ledger.initial_balance
-    progress = max(0.0, min(1.0, banked / span))
-    return int(round(base + (hard - base) * progress))
+    profit = session.ledger.cumulative_realized   # EOD banked profit (updated at the day roll)
+    tiers = sorted(session.scaling_tiers)          # by min_profit ascending
+    limit = tiers[0][1]                            # below the first rung ⇒ the smallest tier
+    for min_profit, contracts in tiers:
+        if profit >= min_profit:
+            limit = contracts
+    return min(int(limit), hard)
 
 
 def per_contract_risk_usd(

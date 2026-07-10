@@ -100,8 +100,10 @@ class SessionState:
         )
         self._ledger_db_path = ledger_db_path or None
         self.ledger: AccountLedger | None = None
-        # The account's eval profit target (set with the ledger); drives dynamic contract scaling.
+        # The account's eval profit target (set with the ledger).
         self.eval_profit_target: float | None = None
+        # The funded scaling plan as (min_profit, max_contracts) rungs; None ⇒ no scaling table.
+        self.scaling_tiers: list[tuple[float, int]] | None = None
 
     # ---- day handling -------------------------------------------------------
     def maybe_roll_day(self, ts: float) -> bool:

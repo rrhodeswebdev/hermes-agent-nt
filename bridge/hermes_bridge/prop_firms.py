@@ -32,6 +32,15 @@ if TYPE_CHECKING:
     from .session import SessionState
 
 
+class ScalingTier(BaseModel):
+    """One rung of a funded account's scaling plan: at/above ``min_profit`` of simulated
+    (end-of-session) profit, ``max_contracts`` are tradable. Tiers apply ONLY in the funded phase
+    (the eval phase has no scaling — full size from trade one)."""
+
+    min_profit: float = Field(ge=0)
+    max_contracts: int = Field(ge=1)
+
+
 class AccountTier(BaseModel):
     """One selectable account size within a program, with the firm's documented numbers.
 
@@ -52,6 +61,9 @@ class AccountTier(BaseModel):
     profit_target: float | None = Field(default=None, gt=0)
     trailing_drawdown: float | None = Field(default=None, gt=0)
     consistency_pct: float | None = Field(default=None, gt=0, le=1)
+    # The firm's FUNDED scaling plan (contract limits by simulated-profit tier). None ⇒ the account
+    # has no scaling table (the RiskGate keeps the static max_contracts). Ignored in the eval phase.
+    scaling_tiers: list[ScalingTier] | None = None
 
 
 class AccountProgram(BaseModel):
@@ -157,6 +169,10 @@ def apply_account_profile(
                         else float(tier.trailing_drawdown)),
             eval_profit_target=(None if tier.profit_target is None
                                 else float(tier.profit_target)),
+        )
+        session.scaling_tiers = (
+            [(t.min_profit, t.max_contracts) for t in tier.scaling_tiers]
+            if tier.scaling_tiers else None
         )
     return {
         "size": tier.size,

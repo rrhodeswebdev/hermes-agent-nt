@@ -43,11 +43,52 @@ firms:
       # Funded LucidFlex has NO daily loss limit (see lucid.md); the eval DLL is shown here.
       # consistency_pct 0.50 governs the EVALUATION pass -> daily goal = 50% of the eval target.
       - name: LucidFlex
+        # scaling_tiers is the FUNDED contract scaling plan (micros): max size is tiered on
+        # end-of-session simulated profit, updated at the day roll, and moves both ways. There is
+        # NO scaling in the eval phase — full max_contracts from trade one (enforced by
+        # account_profile.phase). Micros = 10 x the mini count Lucid quotes.
         accounts:
-          - {size: 25000,  max_contracts: 20,  profit_target: 1250, trailing_drawdown: 1000, consistency_pct: 0.50}
-          - {size: 50000,  max_daily_loss: 1200, max_contracts: 40,  profit_target: 3000, trailing_drawdown: 2000, consistency_pct: 0.50}
-          - {size: 100000, max_daily_loss: 1800, max_contracts: 60,  profit_target: 6000, trailing_drawdown: 3000, consistency_pct: 0.50}
-          - {size: 150000, max_daily_loss: 2700, max_contracts: 100, profit_target: 9000, trailing_drawdown: 4500, consistency_pct: 0.50}
+          - size: 25000
+            max_contracts: 20
+            profit_target: 1250
+            trailing_drawdown: 1000
+            consistency_pct: 0.50
+            scaling_tiers:
+              - {min_profit: 0,    max_contracts: 10}
+              - {min_profit: 1000, max_contracts: 20}
+          - size: 50000
+            max_daily_loss: 1200
+            max_contracts: 40
+            profit_target: 3000
+            trailing_drawdown: 2000
+            consistency_pct: 0.50
+            scaling_tiers:
+              - {min_profit: 0,    max_contracts: 20}
+              - {min_profit: 1000, max_contracts: 30}
+              - {min_profit: 2000, max_contracts: 40}
+          - size: 100000
+            max_daily_loss: 1800
+            max_contracts: 60
+            profit_target: 6000
+            trailing_drawdown: 3000
+            consistency_pct: 0.50
+            scaling_tiers:
+              - {min_profit: 0,    max_contracts: 30}
+              - {min_profit: 1000, max_contracts: 40}
+              - {min_profit: 2000, max_contracts: 50}
+              - {min_profit: 3000, max_contracts: 60}
+          - size: 150000
+            max_daily_loss: 2700
+            max_contracts: 100
+            profit_target: 9000
+            trailing_drawdown: 4500
+            consistency_pct: 0.50
+            scaling_tiers:
+              - {min_profit: 0,    max_contracts: 40}
+              - {min_profit: 1000, max_contracts: 50}
+              - {min_profit: 2000, max_contracts: 60}
+              - {min_profit: 3000, max_contracts: 80}
+              - {min_profit: 4500, max_contracts: 100}
       # LucidDirect — direct-to-funded; daily loss limit + a 20% consistency rule (payout).
       - name: LucidDirect
         accounts:

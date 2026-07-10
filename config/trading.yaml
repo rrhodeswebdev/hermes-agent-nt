@@ -93,16 +93,15 @@ risk:
   #   (per_trade_room_fraction x room), capped by the daily-loss allowance, per_trade_abs_ceiling_pct
   #   x equity, and max_risk_per_trade (backstop). Shrinks near the floor (the danger band), ladders
   #   up as banked profit ratchets it. Off => static max_risk_per_trade.
-  # dynamic_contract_scaling -> max_contracts ramps from contract_scale_base_pct x max up to max as
-  #   the end-of-day high balance grows past the eval target (VERIFY vs the firm's real table).
+  # dynamic_contract_scaling -> FUNDED-only: max_contracts follows the firm's scaling table
+  #   (prop-firms.yaml scaling_tiers), tiered on end-of-session simulated profit. NO scaling in
+  #   eval (full size from trade one); inert unless account_profile.phase == funded.
   enforce_trailing_drawdown: false
   mll_buffer_usd: 0.0
   auto_scale_per_trade: false
   per_trade_room_fraction: 0.15
   per_trade_abs_ceiling_pct: 0.01
   dynamic_contract_scaling: false
-  contract_scale_base_pct: 0.5
-  contract_scale_span_usd: 0.0
 
 # Daily goal — the bridge halts (and flattens) when either is hit. (MNQ sim placeholders.)
 daily_goal:

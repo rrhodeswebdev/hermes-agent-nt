@@ -100,16 +100,41 @@ def test_contracts_static_when_scaling_off():
     assert effective_max_contracts(cfg, _sess(cfg)) == 40
 
 
-def test_contracts_ramp_from_base_to_max():
+def test_contracts_full_in_eval_phase():
+    # Lucid: NO scaling in the eval phase -> full size even with the flag on and tiers present.
     cfg = _base_cfg()
     cfg.risk.dynamic_contract_scaling = True
     cfg.risk.max_contracts = 40
-    cfg.risk.contract_scale_base_pct = 0.5       # base = ceil(40 * 0.5) = 20
-    s = _sess(cfg, eval_pt=3000)                 # span 3000
-    assert effective_max_contracts(cfg, s) == 20                 # banked 0 -> base
-    s.ledger.eod_high_balance = s.ledger.initial_balance + 1500  # progress 0.5
-    assert effective_max_contracts(cfg, s) == 30                 # 20 + 20*0.5
-    s.ledger.eod_high_balance = s.ledger.initial_balance + 5000  # past the span -> clamps
+    cfg.account_profile.phase = "eval"
+    s = _sess(cfg)
+    s.scaling_tiers = [(0, 20), (1000, 30), (2000, 40)]
+    assert effective_max_contracts(cfg, s) == 40
+
+
+def test_contracts_tiered_when_funded():
+    cfg = _base_cfg()
+    cfg.risk.dynamic_contract_scaling = True
+    cfg.risk.max_contracts = 40
+    cfg.account_profile.phase = "funded"
+    s = _sess(cfg)
+    s.scaling_tiers = [(0, 20), (1000, 30), (2000, 40)]   # real 50k LucidFlex funded tiers
+    s.ledger.cumulative_realized = 0.0
+    assert effective_max_contracts(cfg, s) == 20          # $0 profit -> lowest rung
+    s.ledger.cumulative_realized = 1200.0
+    assert effective_max_contracts(cfg, s) == 30          # $1,200 -> middle rung
+    s.ledger.cumulative_realized = 5000.0
+    assert effective_max_contracts(cfg, s) == 40          # past the top rung -> account max
+    s.ledger.cumulative_realized = -500.0
+    assert effective_max_contracts(cfg, s) == 20          # in drawdown -> smallest rung
+
+
+def test_contracts_funded_without_tiers_uses_static():
+    cfg = _base_cfg()
+    cfg.risk.dynamic_contract_scaling = True
+    cfg.risk.max_contracts = 40
+    cfg.account_profile.phase = "funded"
+    s = _sess(cfg)
+    s.scaling_tiers = None
     assert effective_max_contracts(cfg, s) == 40
 
 
