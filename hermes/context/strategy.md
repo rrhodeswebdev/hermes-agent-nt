@@ -86,6 +86,25 @@ playbook header.
   triggers). The hard delta floor STILL gates firing — the tag exists so the
   suppressed fires are measured as their own counterfactual cohort, not lost. Do not
   loosen any floor on the basis of this shape; the measurement decides its future.
+- **Post-flush reversal-bounce (confirmed capitulation reversal)** — a climactic flush
+  (down) or spike (up), a wide-range / high-volume capitulation bar, that then *reverses*:
+  price reclaims the level it just broke and holds a **higher-low** (after a down-flush) /
+  **lower-high** (after an up-spike) on the retest. This is the NAMED structure that
+  satisfies "a pullback is not a reversal" for the Trend-first counter-trend rule — the
+  LATE, confirmed version only. The reclaim + held pivot is also what resolves the
+  `transitional` read at the turn: arming here is a structure-gated entry at a genuine
+  reversal, NOT a license to trade transitional chop (an unresolved transitional tape is
+  still WAIT). Author a continuation-style arm anchored AT the reclaim level (`min_close`
+  = reclaimed level for the long, `max_close` for the short), require order flow to FLIP
+  and confirm at the trigger bar (`delta_ratio ≥ +floor` long / `≤ -floor` short — the
+  hard floor is NOT loosened for this shape), stop back beyond the capitulation extreme
+  (the reversal failing is the invalidation), target the reclaimed shelf / measured move
+  with ≥ ~1×ATR of room. GUARDRAIL — do not catch the knife: do NOT arm while the flush is
+  still extending (fresh lower-lows / higher-highs still printing) or on the FIRST bounce
+  bar; require the reclaim AND a confirmed higher-low / lower-high pivot, not one bar. A
+  bounce that cannot reclaim the level — or reclaims then loses it — is a WAIT, not a
+  re-try; repeated premature attempts at the same turn are how this setup bleeds. When in
+  doubt whether the low is in, it is not.
 
 ## Definitions (provided to you each bar in `context`)
 
