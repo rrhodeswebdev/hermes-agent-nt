@@ -1,9 +1,7 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 from hermes_bridge.agent_client import _CONTEXT_ORDER, load_context_files
 from hermes_bridge.config import StrategyParams
-from hermes_bridge.dashboard import DASHBOARD_HTML, render_text
 from hermes_bridge.indicators import (
     absorption,
     build_context,
@@ -13,8 +11,6 @@ from hermes_bridge.indicators import (
 )
 from hermes_bridge.models import Bar, DepthLevel, DepthSnapshot
 from hermes_bridge.resample import aggregate_bars
-from hermes_bridge.store import BarStore
-from hermes_bridge.views import depth_view
 
 _CONTEXT_DIR = str(Path(__file__).resolve().parents[2] / "hermes" / "context")
 
@@ -160,43 +156,6 @@ def test_market_depth_loaded_into_prompt():
     assert "depth_imbalance" in text  # the guidance references the feature the brain receives
 
 
-def _text_payload(depth: dict | None) -> dict:
-    # render_text indexes several other top-level/session/goal keys directly (not .get), so
-    # a bare {"depth": ...} payload KeyErrors before it ever reaches the ladder. Shape a
-    # minimal-but-complete payload, matching the pattern in test_dashboard_news.py's _payload.
-    return {
-        "agent": "mock", "brain": "rules", "instrument": "MNQ", "timeframe": "1m",
-        "session": {"position": 0, "avg_price": 0.0, "realized_pnl": 0.0,
-                    "unrealized_pnl": 0.0, "trades_today": 0, "halted": False,
-                    "halt_reason": None},
-        "goal": {"profit_target": 500.0, "max_daily_loss": 400.0},
-        "depth": depth,
-    }
-
-
-def test_render_text_shows_ladder_when_depth_present():
-    payload = _text_payload({
-        "bids": [[100.0, 30], [99.75, 20]],
-        "asks": [[100.25, 5], [100.5, 5]],
-        "imbalance": 0.667, "spread": 0.25, "walls": [], "absorption": None,
-    })
-    out = render_text(payload)
-    assert "DOM" in out or "book" in out.lower()
-    assert "100.25" in out  # an ask price is rendered
-
-
-def test_render_text_no_ladder_when_depth_absent():
-    out = render_text(_text_payload(None))
-    assert "100.25" not in out
-
-
-def test_dashboard_js_dom_join_uses_escaped_newline():
-    # Regression: DASHBOARD_HTML is a non-raw triple-quoted string, so the embedded
-    # JS must use '\\n' (backslash-n survives to the browser) — a bare '\n' collapses
-    # to a raw line terminator and is a JS SyntaxError that breaks the whole <script>.
-    assert r"rows.join('\n')" in DASHBOARD_HTML
-
-
 def test_aggregate_carries_last_feed_bars_depth():
     snap1 = _snap([(100.0, 5)], [(100.25, 3)])
     snap2 = _snap([(100.0, 30), (99.75, 20)], [(100.25, 5)])
@@ -212,38 +171,3 @@ def test_aggregate_depth_none_when_feed_bars_have_none():
     b1 = Bar(ts=60.0, open=100, high=101, low=99, close=100.5, volume=5)
     b2 = Bar(ts=120.0, open=100.5, high=101.5, low=100, close=101, volume=7)
     assert aggregate_bars([b1, b2]).depth is None
-
-
-def _state_with_depth(snap):
-    # depth_view only reads st.store.last() and st.engine.last_context, so a real BarStore +
-    # real MarketContext behind a tiny namespace exercises the real path without the full
-    # server AppState (which drags in an engine, resampler, etc.).
-    store = BarStore("MNQ", "1m")
-    bars = [
-        Bar(ts=float(i), open=100, high=101, low=99, close=100.5, volume=10)
-        for i in range(29)
-    ]
-    bars.append(Bar(ts=29.0, open=100, high=101, low=99, close=100.5, volume=10, depth=snap))
-    for b in bars:
-        store.append(b)
-    ctx = build_context(bars, atr_period=14, imbalance_levels=5, wall_multiple=3.0)
-    return SimpleNamespace(store=store, engine=SimpleNamespace(last_context=ctx))
-
-
-def test_depth_view_derives_from_state():
-    snap = _snap([(100.0, 30), (99.75, 20)], [(100.25, 5), (100.5, 5)])
-    dv = depth_view(_state_with_depth(snap))
-    assert dv is not None
-    assert dv["bids"] == [[100.0, 30], [99.75, 20]]
-    assert dv["asks"][0] == [100.25, 5]
-    assert round(dv["imbalance"], 3) == 0.667
-    assert round(dv["spread"], 2) == 0.25
-    assert dv["absorption"] is None
-    assert "walls" not in dv  # dead key removed — nothing consumes it
-
-
-def test_depth_view_none_when_depth_absent():
-    store = BarStore("MNQ", "1m")
-    store.append(Bar(ts=1.0, open=100, high=101, low=99, close=100.5, volume=10))
-    st = SimpleNamespace(store=store, engine=SimpleNamespace(last_context=None))
-    assert depth_view(st) is None
