@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from .models import Bar
+from .models import Bar, DepthSnapshot
 
 
 def true_range(prev_close: float, high: float, low: float) -> float:
@@ -125,6 +125,98 @@ def bar_delta(bar: Bar) -> float:
     # close-location value in [-1, 1]: +1 close at high, -1 close at low
     clv = ((bar.close - bar.low) - (bar.high - bar.close)) / rng
     return clv * (bar.volume or 0.0)
+
+
+def depth_imbalance(snap: DepthSnapshot, levels: int = 5) -> float:
+    """Resting-liquidity imbalance over the top ``levels`` per side, ~[-1, 1].
+
+    (Σ bid size − Σ ask size) / (Σ bid size + Σ ask size). Positive => bid-heavy
+    (support); negative => ask-heavy (resistance). 0.0 on an empty book.
+    """
+    bid = sum(lvl.size for lvl in snap.bids[:levels])
+    ask = sum(lvl.size for lvl in snap.asks[:levels])
+    total = bid + ask
+    if total <= 0:
+        return 0.0
+    return (bid - ask) / total
+
+
+def liquidity_walls(
+    snap: DepthSnapshot, wall_multiple: float = 3.0
+) -> list[tuple[float, float, str]]:
+    """Levels whose size >= ``wall_multiple`` × mean level size, as (price, size, side).
+
+    side is "bid" (support) or "ask" (resistance). Empty if nothing stands out.
+    """
+    levels = [(lvl.price, lvl.size, "bid") for lvl in snap.bids]
+    levels += [(lvl.price, lvl.size, "ask") for lvl in snap.asks]
+    sizes = [s for _, s, _ in levels]
+    if not sizes:
+        return []
+    mean = sum(sizes) / len(sizes)
+    if mean <= 0:
+        return []
+    thresh = wall_multiple * mean
+    return [(p, s, side) for p, s, side in levels if s >= thresh]
+
+
+def spread_and_top(
+    snap: DepthSnapshot,
+) -> tuple[float | None, float | None, float | None]:
+    """(spread, top_bid_size, top_ask_size). spread = best_ask − best_bid.
+
+    Any element is None if that side of the book is empty.
+    """
+    top_bid = snap.bids[0] if snap.bids else None
+    top_ask = snap.asks[0] if snap.asks else None
+    spread = (top_ask.price - top_bid.price) if (top_bid and top_ask) else None
+    return (
+        spread,
+        top_bid.size if top_bid else None,
+        top_ask.size if top_ask else None,
+    )
+
+
+def absorption(
+    bars: list[Bar], wall_multiple: float = 3.0, min_tests: int = 2
+) -> str | None:
+    """Detect resting-liquidity absorption over a recent bar window.
+
+    Reads each bar's depth snapshot (bars without one are skipped). A price level that
+    carries a wall (size >= wall_multiple × mean) in the LATEST snapshot, and that price
+    was reached on at least ``min_tests`` of the recent bars (bar low <= a bid-wall price,
+    or bar high >= an ask-wall price), is reported as absorption.
+
+    Single-snapshot read: the wall is taken from the latest bar only; earlier bars are
+    checked for price touches of that level, not for the wall still resting at the time —
+    so this flags "price repeatedly reached a level that is walled now," a coarse proxy
+    for a level holding, not a verified persist-through-time signal.
+
+    Returns "bid_absorption@<price>" (support) / "ask_absorption@<price>"
+    (resistance), else None. Heuristic, bar-cadence. When walls hold on both sides in the
+    same window, the bid side is reported (bid takes precedence).
+    """
+    # Single-snapshot touch-count on the bar-cadence book — good enough for a per-bar read;
+    # upgrade to tick-level book tracking (true persistence across snapshots) only if the
+    # per-bar signal proves too coarse.
+    snaps = [b for b in bars if b.depth is not None]
+    if not snaps:
+        return None
+    walls = liquidity_walls(snaps[-1].depth, wall_multiple)
+    if not walls:
+        return None
+    for side in ("bid", "ask"):
+        side_walls = [(p, s) for p, s, sd in walls if sd == side]
+        if not side_walls:
+            continue
+        price, _ = max(side_walls, key=lambda ps: ps[1])  # the largest wall this side
+        if side == "bid":
+            tests = sum(1 for b in snaps if b.low <= price)
+        else:
+            tests = sum(1 for b in snaps if b.high >= price)
+        if tests >= min_tests:
+            return f"{side}_absorption@{price:g}"
+    return None
 
 
 def cumulative_delta(bars: list[Bar]) -> float:
@@ -320,6 +412,14 @@ class MarketContext:
     clock_et: str = ""           # "HH:MM" US Eastern — time-of-day for the agent/journal
     # Multi-day reference prices (None until enough stored history) — see daily_levels().
     levels: dict | None = None
+    # Level 2 (market depth) features — None/empty unless the latest bar carried a
+    # depth snapshot. Advisory to the brain; never a gate.
+    depth_imbalance: float | None = None
+    depth_walls: list[tuple[float, float, str]] = field(default_factory=list)
+    absorption: str | None = None
+    spread: float | None = None
+    top_bid_size: float | None = None
+    top_ask_size: float | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -337,6 +437,15 @@ class MarketContext:
             "clock_et": self.clock_et,
             "bars_count": self.bars_count,
         }
+        if self.depth_imbalance is not None:  # a depth snapshot was present this bar
+            d["depth_imbalance"] = round(self.depth_imbalance, 3)
+            d["spread"] = _r(self.spread)
+            d["top_bid_size"] = self.top_bid_size
+            d["top_ask_size"] = self.top_ask_size
+            if self.depth_walls:
+                d["depth_walls"] = [[round(p, 4), s, side] for p, s, side in self.depth_walls]
+            if self.absorption:
+                d["absorption"] = self.absorption
         if self.levels:
             d["levels"] = {k: _r(v) for k, v in self.levels.items()}
         return d
@@ -353,6 +462,8 @@ def build_context(
     swing_lookback: int = 3,
     delta_window: int = 20,
     level_bars: list[Bar] | None = None,
+    imbalance_levels: int = 5,
+    wall_multiple: float = 3.0,
 ) -> MarketContext:
     closes = [b.close for b in bars]
     last_close = closes[-1] if closes else 0.0
@@ -363,6 +474,18 @@ def build_context(
     rd = cumulative_delta(window)
     vol = sum((b.volume or 0.0) for b in window)
     wd, clock = et_weekday_clock(bars[-1].ts) if bars else ("", "")
+    depth_fields: dict = {}
+    last_depth = bars[-1].depth if bars else None
+    if last_depth is not None:
+        spread, tbs, tas = spread_and_top(last_depth)
+        depth_fields = dict(
+            depth_imbalance=depth_imbalance(last_depth, imbalance_levels),
+            depth_walls=liquidity_walls(last_depth, wall_multiple),
+            absorption=absorption(window, wall_multiple),
+            spread=spread,
+            top_bid_size=tbs,
+            top_ask_size=tas,
+        )
     return MarketContext(
         last_close=last_close,
         atr=a,
@@ -378,4 +501,5 @@ def build_context(
         weekday=wd,
         clock_et=clock,
         levels=daily_levels(level_bars) if level_bars else None,
+        **depth_fields,
     )

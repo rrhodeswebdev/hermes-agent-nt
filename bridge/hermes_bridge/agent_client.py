@@ -310,7 +310,7 @@ re-checks every order against the hard risk limits and may clamp or reject it.
 
 # Context files concatenated into the system prompt, in priority order.
 _CONTEXT_ORDER = [
-    "HERMES.md", "strategy.md", "order-flow.md", "price-action.md",
+    "HERMES.md", "strategy.md", "order-flow.md", "market-depth.md", "price-action.md",
     "risk-management.md", "daily-goal.md",
 ]
 

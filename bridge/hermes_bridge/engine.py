@@ -264,6 +264,8 @@ class TradingEngine:
             atr_period=self.cfg.strategy.atr_period,
             swing_lookback=self.cfg.strategy.swing_lookback,
             level_bars=self.store.all(),  # multi-day reference levels need the full store
+            imbalance_levels=self.cfg.strategy.depth_imbalance_levels,
+            wall_multiple=self.cfg.strategy.depth_wall_multiple,
         )
         # Hysteresis: hold the committed regime/trend until a new read persists, so a one-bar
         # structural wiggle can't thrash re-authoring or flip directional bias (RegimeSmoother).
@@ -530,6 +532,8 @@ class TradingEngine:
             atr_period=self.cfg.strategy.atr_period,
             swing_lookback=self.cfg.strategy.swing_lookback,
             level_bars=bars,  # the full study history, for multi-day reference levels
+            imbalance_levels=self.cfg.strategy.depth_imbalance_levels,
+            wall_multiple=self.cfg.strategy.depth_wall_multiple,
         )
         account = self.session.account_state(mark_price=bars[-1].close)
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"

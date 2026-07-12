@@ -50,6 +50,7 @@ def aggregate_bars(bars: list[Bar]) -> Bar:
         volume=sum(b.volume for b in bars),
         bid_volume=_sum_opt([b.bid_volume for b in bars]),
         ask_volume=_sum_opt([b.ask_volume for b in bars]),
+        depth=bars[-1].depth,
     )
 
 
