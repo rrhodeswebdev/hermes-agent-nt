@@ -229,6 +229,25 @@ class TradingEngine:
         """The decision timeframe in force right now (resampler-driven, else the config value)."""
         return self._decision_tf_getter()
 
+    def _account_for_brain(self, mark_price: float) -> AccountState:
+        """The account snapshot the brain sees, enriched while a position is open with the open
+        trade's excursion in points: peak favorable (mfe), peak adverse (mae), and how much of
+        the peak has been handed back (giveback = mfe - current favorable excursion). This is what
+        lets the between-bars analysis SEE a winner round-tripping — a fixed bracket + breakeven
+        trail can't express it. Plain account when flat (the fields stay None)."""
+        account = self.session.account_state(mark_price=mark_price)
+        exc = self.tracker.open_excursion()
+        if exc is None or self.session.position == 0:
+            return account
+        mae_pts, mfe_pts = exc
+        avg = self.session.avg_price
+        cur_fav = (mark_price - avg) if self.session.position > 0 else (avg - mark_price)
+        return account.model_copy(update={
+            "mfe_points": round(mfe_pts, 4),
+            "mae_points": round(mae_pts, 4),
+            "giveback_points": round(max(0.0, mfe_pts - cur_fav), 4),
+        })
+
     # ---- bar handling -------------------------------------------------------
     def on_bar(self, bar: Bar) -> EngineResult:
         self.session.maybe_roll_day(bar.ts)
@@ -287,7 +306,7 @@ class TradingEngine:
         keep = max(64, self.cfg.strategy.delta_sustain_bars)
         del self._delta_signs[:-keep]
         self._maybe_reauthor(ctx)  # volatility-adaptive playbook refresh (agent mode)
-        account = self.session.account_state(mark_price=bar.close)
+        account = self._account_for_brain(bar.close)
         mode = "manage_position" if self.session.position != 0 else "seek_entry"
 
         if mode == "seek_entry" and self.session.halted:
@@ -539,7 +558,7 @@ class TradingEngine:
             swing_lookback=self.cfg.strategy.swing_lookback,
             level_bars=bars,  # the full study history, for multi-day reference levels
         )
-        account = self.session.account_state(mark_price=bars[-1].close)
+        account = self._account_for_brain(bars[-1].close)
         mode: Mode = "manage_position" if self.session.position != 0 else "seek_entry"
         # Anchor the structural staleness check to what this study authors from, so the next
         # re-author fires when the live market drifts off THIS read (not the previous one).

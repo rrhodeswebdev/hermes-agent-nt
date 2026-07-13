@@ -181,3 +181,11 @@ class AccountState(FrozenModel):
     account_equity: float | None = None   # start + lifetime realized + today's net + open P&L
     mll_floor: float | None = None        # the trailing Max-Loss floor
     mll_room: float | None = None         # equity above the floor (the remaining drawdown room)
+    # Open-position excursion in points, populated by the engine only while a position is open
+    # (None when flat). Surfaces to the brain how far the trade has run in our favor (mfe_points)
+    # and how much of that peak it has already handed back (giveback_points) — the give-back a
+    # fixed bracket + breakeven trail can't express, so the brain can choose to tighten/exit
+    # instead of round-tripping a winner. See TradingEngine._account_for_brain.
+    mfe_points: float | None = None       # peak favorable excursion since entry (points, >= 0)
+    mae_points: float | None = None       # peak adverse excursion since entry (points, <= 0)
+    giveback_points: float | None = None  # mfe minus current favorable excursion (peak given back)

@@ -122,6 +122,11 @@ Reply with one JSON object:
 - "exit": invalidation thresholds (manage_position plans): exit if the close is at/
   beyond exit_below or exit_above. null = hold, the resting bracket protects. Tag its
   "setup" the same way (the setup the open position is being managed under).
+  While you hold a position the "account" block carries this trade's excursion in points:
+  "mfe_points" (the furthest it has run in your favor since entry) and "giveback_points"
+  (how much of that peak it has already handed back). Read them before choosing to hold — a
+  large giveback on a trade that has stalled is a winner round-tripping; set an
+  exit_below/exit_above to bank it rather than ride it back to the resting bracket.
 - "bias" and "rationale": your read, for the dashboard.
 
 Arm a trigger only for a clean playbook setup; a no-trade plan is the correct output
