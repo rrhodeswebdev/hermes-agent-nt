@@ -146,6 +146,19 @@ Take a setup only when **ALL** of its conditions hold — regime, structure, tri
 - Order flow neutral or against the trade at the trigger bar → **WAIT** (not a discount).
 - Less than ~**1×ATR** of room to the nearest structural level (`swing_high`/`swing_low`)
   in the trade's direction → **WAIT** (the setup can't pay for its stop).
+- **Not *on top of* a fresh session extreme.** Entering within ~**0.25×ATR** of the
+  session's own fresh high/low, in the direction that trades INTO it — a short right at
+  `today_low` (into support), a long right at `today_high` (into resistance) — is a
+  low-probability location: the first touch of a fresh extreme bounces more often than it
+  breaks, so the entry is stopped on the bounce before any real move resumes. WAIT for a
+  shallow pullback (≥ ~0.3×ATR off the extreme) or the confirmed bounce-to-fail retest from
+  the other side (the **post-flush reversal-bounce** shape is the named, confirmed version).
+  A pullback entry is fine — it is entering *at* the fresh extreme that bleeds. This is a
+  *location* caveat, not a direction one: it applies even to a with-trend break (shorting
+  the fresh low of a down-day still gets bounced first). (Newer, journal-measured on a small
+  sample: entries ≤ 0.25×ATR from a fresh extreme ran 0/8 winners. Apply as a strong
+  de-prioritization / confidence penalty for now, not yet an absolute WAIT — the tape decides
+  its future, and no floor is loosened on its account.)
 - Regime unclear/**transitional**, structure absent, or the trigger bar not yet closed →
   **WAIT**.
 
