@@ -25,6 +25,12 @@ from pathlib import Path
 from .config import ClaudeClientConfig
 from .models import BrainTimeout
 
+# Windows only: the bridge serves console-less (pythonw.exe), so a child console app has
+# no console to inherit and Windows hands it its OWN visible window — one pop-up per
+# decision, i.e. every bar. CREATE_NO_WINDOW suppresses that; it does not exist on POSIX,
+# where 0 is the documented "no special flags" default.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 def _thinking_env(c: ClaudeClientConfig) -> dict[str, str] | None:
     """Subprocess env that caps extended thinking via MAX_THINKING_TOKENS.
@@ -75,6 +81,7 @@ def run_claude_oneshot(c: ClaudeClientConfig, system: str, user: str,
                 encoding="utf-8", errors="replace",
                 env=_thinking_env(c),
                 timeout=budget,
+                creationflags=_NO_WINDOW,
             )
         except subprocess.TimeoutExpired as exc:
             raise BrainTimeout(budget) from exc
@@ -139,6 +146,7 @@ class ClaudeSession:
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=err, text=True, encoding="utf-8",
             errors="replace", env=_thinking_env(c),
+            creationflags=_NO_WINDOW,
         )
         err.close()  # the child holds its own fd; ours is only for the path
         # stdout is drained by a thread so ask() can enforce a deadline.
