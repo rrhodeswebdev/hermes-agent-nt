@@ -11,7 +11,7 @@ from hermes_bridge.agent_client import build_agent_client
 from hermes_bridge.engine import TradingEngine
 from hermes_bridge.indicators import build_context
 from hermes_bridge.journal import JournalStore
-from hermes_bridge.models import Fill, Side
+from hermes_bridge.models import Action, Fill, OrderCommand, Side
 from hermes_bridge.risk import RiskGate
 from hermes_bridge.session import SessionState
 from hermes_bridge.store import BarStore
@@ -86,3 +86,61 @@ def test_stale_memo_is_not_attributed(cfg, tmp_path):
     recs = js.all()
     assert len(recs) == 1
     assert "unattributed" in recs[0]["rationale"]
+
+
+def _armed_memo(eng, bars, cmd, side=Side.LONG):
+    """A memo built the way the engine builds one at APPROVAL time: brackets/1R derived
+    around the just-closed bar, because the fill price does not exist yet."""
+    memo = _memo(eng, bars[-1].ts, side=side)
+    memo["command"] = cmd
+    memo["stop_ticks"] = eng._command_stop_ticks(cmd, bars[-1].close)
+    memo["brackets"] = eng._command_brackets(cmd, bars[-1].close)
+    return memo
+
+
+def test_tick_bracket_anchors_to_fill_not_bar_close(cfg, tmp_path):
+    """A TICK bracket must be journaled around the ACTUAL FILL, not the bar close.
+
+    NinjaTrader places a tick bracket with CalculationMode.Ticks, which it anchors to the
+    real entry fill. Journaling it around bar.close instead put the recorded stop/target a
+    fill-gap away from the bracket that was actually resting (seen live 2026-07-28: both
+    trades logged levels exactly 1.00 off NT8's). The learning loop reads these levels, so
+    the anchors have to agree.
+    """
+    eng, js, bars = _engine(cfg, tmp_path)
+    tick = cfg.instrument.tick_size or 0.25
+    cmd = OrderCommand(id="cmd-1", strategy_id=cfg.strategy_id, action=Action.ENTER_LONG,
+                       qty=1, stop_ticks=40, target_ticks=60)
+    eng._pending_entry = _armed_memo(eng, bars, cmd)
+
+    # Fill a clean 1.00 away from the close, as happened live. Snapped to the tick grid so
+    # the assertions compare exact prices rather than synthetic-bar float noise.
+    fill_price = round(bars[-1].close * 4) / 4 + 1.0
+    assert fill_price != bars[-1].close, "fill must differ from the close to prove the anchor"
+    ts = bars[-1].ts + 10
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=fill_price, ts=ts))
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=fill_price + 0.5, ts=ts + 60))
+
+    rec = js.all()[0]
+    assert rec["entry_price"] == fill_price
+    assert rec["stop_price"] == fill_price - 40 * tick
+    assert rec["target_price"] == fill_price + 60 * tick
+    # 1R for the trade manager must measure off the same anchor.
+    assert eng._command_stop_ticks(cmd, fill_price) == 40
+
+
+def test_explicit_price_bracket_is_journaled_verbatim(cfg, tmp_path):
+    """An ABSOLUTE bracket goes to NinjaTrader as CalculationMode.Price, so the fill price
+    is irrelevant — the journal must record exactly what was sent, not re-anchor it."""
+    eng, js, bars = _engine(cfg, tmp_path)
+    cmd = OrderCommand(id="cmd-1", strategy_id=cfg.strategy_id, action=Action.ENTER_LONG,
+                       qty=1, stop_price=90.0, target_price=115.0)
+    eng._pending_entry = _armed_memo(eng, bars, cmd)
+
+    ts = bars[-1].ts + 10
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=bars[-1].close + 1.0, ts=ts))
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=101.0, ts=ts + 60))
+
+    rec = js.all()[0]
+    assert rec["stop_price"] == 90.0
+    assert rec["target_price"] == 115.0

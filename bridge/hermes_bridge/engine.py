@@ -407,6 +407,10 @@ class TradingEngine:
                     "context": ctx,
                     "rationale": decision.rationale,
                     "confidence": decision.confidence,
+                    # The approved order itself, so the fill can re-anchor its bracket/1R to
+                    # the REAL fill price (see on_fill). The bar-close values below stay as a
+                    # fallback for a memo that carries no command (hand-built / legacy).
+                    "command": rd.command,
                     # 1R for the trade manager — promoted to _active_stop_ticks only if/when
                     # THIS order fills (see on_fill); a dropped order leaves nothing stale.
                     "stop_ticks": self._command_stop_ticks(rd.command, bar.close),
@@ -846,15 +850,30 @@ class TradingEngine:
         if before_pos == 0 and after_pos != 0:
             side = Side.LONG if after_pos > 0 else Side.SHORT
             p = self._matching_pending(side, fill.ts)
+            # Re-anchor the bracket and 1R to the ACTUAL FILL. At approval time the fill price
+            # does not exist yet, so the memo derives them around the bar close — but a TICK
+            # bracket reaches NinjaTrader as CalculationMode.Ticks, which IT anchors to the real
+            # entry fill. Journaling the close-anchored levels therefore recorded a bracket a
+            # fill-gap away from the one actually resting (live 2026-07-28: both trades logged
+            # stop/target exactly 1.00 off NT8's), corrupting the levels the learning loop reads.
+            # An explicit-price bracket goes out as CalculationMode.Price and these helpers
+            # return it verbatim, so re-anchoring is a no-op there.
+            cmd = p.get("command") if p is not None else None
             # Arm the trade manager's 1R from THIS fill's order; an unattributed fill (no
             # matching pending) leaves it None so breakeven/trail simply won't engage on a
             # trade whose real stop we don't know — the resting bracket still protects it.
-            self._active_stop_ticks = p.get("stop_ticks") if p is not None else None
+            if cmd is not None:
+                self._active_stop_ticks = self._command_stop_ticks(cmd, fill.price)
+            else:
+                self._active_stop_ticks = p.get("stop_ticks") if p is not None else None
             self._managed_level = None
             self._trade_open_pnl = before_pnl  # baseline for the whole-trade P&L at close
             ctx = p["context"] if p is not None else self.last_context
             if ctx is not None:  # no context at all (fill before any bar): nothing to journal
-                sp, tp = p.get("brackets", (0.0, 0.0)) if p is not None else (0.0, 0.0)
+                if cmd is not None:
+                    sp, tp = self._command_brackets(cmd, fill.price)
+                else:
+                    sp, tp = p.get("brackets", (0.0, 0.0)) if p is not None else (0.0, 0.0)
                 self.tracker.on_entry(
                     ts=fill.ts, side=side, qty=abs(after_pos), price=fill.price,
                     context=ctx,
