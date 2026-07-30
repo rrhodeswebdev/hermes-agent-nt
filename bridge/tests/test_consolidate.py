@@ -167,3 +167,63 @@ def test_daemon_not_started_when_disabled(tmp_path):
     cfg.learning.journal_path = str(tmp_path / "j.jsonl")
     c = TestClient(create_app(cfg))  # consolidate_enabled defaults False
     assert c.get("/dashboard").json()["consolidate"]["check_age_s"] is None
+
+
+# --- Resilience: a lesson file rotating into .history/ mid-pass must not stall the
+# heartbeat. Observed live 2026-07-29: `[consolidate] error: FileNotFoundError` left
+# check_age_s growing unbounded while the daemon thread was alive and retrying, so
+# "dormant" and "erroring" were indistinguishable from the outside.
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _boom(*_a, **_k):
+    raise FileNotFoundError("lesson rotated into .history/ mid-iteration")
+
+
+def test_heartbeat_advances_even_when_the_pass_raises(tmp_path, monkeypatch):
+    """The liveness stamp must survive a failing pass — otherwise an erroring
+    consolidator is indistinguishable from a dead one."""
+    cfg, learned, r = _reflector(tmp_path)
+    _touch(learned.dir / "lessons" / "x.md", 2000)
+    _touch(learned.dir / "distilled.md", 1500)
+    r._last_curate_ts = 1000
+    monkeypatch.setattr(r, "curate", _boom)
+    with pytest.raises(FileNotFoundError):
+        r.consolidate_once(now=3000.0)          # still propagates -> server logs it
+    assert r._last_check_ts == 3000.0           # ...but the heartbeat advanced
+
+
+def test_lessons_mtime_tolerates_a_file_vanishing(tmp_path, monkeypatch):
+    ls = LearnedStore(str(tmp_path / "learned"))
+    _touch(ls.dir / "lessons" / "real.md", 2000)
+    ghost = ls.dir / "lessons" / "ghost.md"     # globbed, then deleted before stat()
+    real = ls.dir / "lessons" / "real.md"
+    monkeypatch.setattr(Path, "glob", lambda self, pat: iter([ghost, real]))
+    assert ls.lessons_mtime() == 2000
+
+
+def test_lessons_tolerates_a_file_vanishing(tmp_path, monkeypatch):
+    ls = LearnedStore(str(tmp_path / "learned"))
+    (ls.dir / "lessons").mkdir(parents=True, exist_ok=True)
+    real = ls.dir / "lessons" / "real.md"
+    real.write_text("body text\n", encoding="utf-8")
+    ghost = ls.dir / "lessons" / "ghost.md"
+    monkeypatch.setattr(Path, "glob", lambda self, pat: iter([ghost, real]))
+    out = ls.lessons()
+    assert len(out) == 1                        # ghost skipped, not a FileNotFoundError
+
+
+def test_curate_survives_a_lessons_read_error(tmp_path, monkeypatch):
+    cfg, learned, r = _reflector(tmp_path)
+    monkeypatch.setattr(learned, "lessons", _boom)
+    assert r.curate() == {"lessons": 0, "notes": 0, "profile": 0}
+
+
+def test_distill_survives_a_corpus_read_error(tmp_path, monkeypatch):
+    cfg, learned, r = _reflector(tmp_path)
+    monkeypatch.setattr(learned, "lessons", _boom)
+    out = r.distill()                           # must not reach the CLI, must not raise
+    assert out["distilled"] == 0
+    assert out["error"] == "FileNotFoundError"

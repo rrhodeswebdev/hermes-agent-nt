@@ -361,13 +361,19 @@ class Reflector:
         config as an instruction). Best-effort — every failure is swallowed."""
         lc = self.cfg.learning
         applied = {"distilled": 0, "error": None}
-        lessons = "\n".join(f"- [{ls.name}] {ls.body}" for ls in self.learned.lessons())
-        user = (
-            "TRADER PROFILE:\n" + (self.learned.profile() or "(none)")
-            + "\n\nACTIVE LESSONS (full):\n" + (lessons or "(none)")
-            + "\n\nAGENT NOTES (live):\n" + (self.learned.notes() or "(none)")
-            + "\n\nARCHIVED NOTES (older):\n" + (self.learned.archived_notes() or "(none)")
-        )
+        # Reading the corpus is itself fallible (a lesson can rotate into .history/
+        # mid-scan), so it belongs INSIDE a guard like every other step here.
+        try:
+            lessons = "\n".join(f"- [{ls.name}] {ls.body}" for ls in self.learned.lessons())
+            user = (
+                "TRADER PROFILE:\n" + (self.learned.profile() or "(none)")
+                + "\n\nACTIVE LESSONS (full):\n" + (lessons or "(none)")
+                + "\n\nAGENT NOTES (live):\n" + (self.learned.notes() or "(none)")
+                + "\n\nARCHIVED NOTES (older):\n" + (self.learned.archived_notes() or "(none)")
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort; never disrupt trading
+            applied["error"] = type(e).__name__
+            return applied
         try:
             reviews = self.learned.day_reviews(lc.day_lesson_lookback_m)
             footers = []
@@ -404,8 +410,13 @@ class Reflector:
         return applied
 
     def curate(self) -> dict:
-        lessons = [{"name": ls.name, "regime_tags": ls.meta.get("regime_tags", []),
-                    "body": ls.body} for ls in self.learned.lessons()]
+        # Same guard as distill(): reading lessons off disk can fail on a rotation
+        # race, and a curate pass is never worth propagating that to the daemon.
+        try:
+            lessons = [{"name": ls.name, "regime_tags": ls.meta.get("regime_tags", []),
+                        "body": ls.body} for ls in self.learned.lessons()]
+        except Exception:  # noqa: BLE001 — best-effort; never disrupt trading
+            return {"lessons": 0, "notes": 0, "profile": 0}
         if not lessons:
             return {"lessons": 0, "notes": 0, "profile": 0}
         user = "CURRENT LESSONS:\n" + json.dumps(lessons, separators=(",", ":"))
@@ -420,27 +431,34 @@ class Reflector:
     def consolidate_once(self, now: float) -> dict:
         """One consolidation check. curate() when lessons changed since the last tidy;
         distill() when the corpus is newer than distilled.md. Material-gated — makes NO
-        model call when nothing changed, only advances the heartbeat. Best-effort:
-        curate()/distill() already swallow every exception, so this never disrupts trading."""
+        model call when nothing changed, only advances the heartbeat.
+
+        The heartbeat is stamped in a `finally`, so a pass that raises still proves the
+        daemon is alive. It used to be stamped only on the success path, which made an
+        ERRORING consolidator look identical to a DEAD one: check_age_s grew without
+        bound while the thread was healthily retrying every interval. Exceptions still
+        propagate — the server's cadence loop logs and survives them."""
         ls = self.learned
-        need_distill = ls.corpus_mtime() > ls.distilled_mtime()
-        need_curate = ls.lessons_mtime() > self._last_curate_ts
-        curated = distilled = 0
-        if need_curate:
-            self.curate()
-            # Watermark to the ACTUAL post-curate lessons mtime (not `now`): curate writes
-            # after `now` was captured, so keying off `now` could re-trigger every cycle.
-            self._last_curate_ts = ls.lessons_mtime()
-            curated = 1
-        if need_curate or need_distill:
-            applied = self.distill()
-            distilled = 1 if applied.get("distilled") else 0
-        self._last_check_ts = now
-        if curated or distilled:
-            self._last_summary = f"curated={curated} distilled={distilled}"
-            return {"curated": curated, "distilled": distilled, "skipped": None}
-        self._last_summary = "skip:no_new_material"
-        return {"curated": 0, "distilled": 0, "skipped": "no_new_material"}
+        try:
+            need_distill = ls.corpus_mtime() > ls.distilled_mtime()
+            need_curate = ls.lessons_mtime() > self._last_curate_ts
+            curated = distilled = 0
+            if need_curate:
+                self.curate()
+                # Watermark to the ACTUAL post-curate lessons mtime (not `now`): curate writes
+                # after `now` was captured, so keying off `now` could re-trigger every cycle.
+                self._last_curate_ts = ls.lessons_mtime()
+                curated = 1
+            if need_curate or need_distill:
+                applied = self.distill()
+                distilled = 1 if applied.get("distilled") else 0
+            if curated or distilled:
+                self._last_summary = f"curated={curated} distilled={distilled}"
+                return {"curated": curated, "distilled": distilled, "skipped": None}
+            self._last_summary = "skip:no_new_material"
+            return {"curated": 0, "distilled": 0, "skipped": "no_new_material"}
+        finally:
+            self._last_check_ts = now
 
     def consolidation_status(self, now: float) -> dict:
         """Read-only freshness + liveness for the dashboard/panel. check_age_s is None

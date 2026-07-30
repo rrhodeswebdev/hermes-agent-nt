@@ -162,7 +162,13 @@ class LearnedStore:
 
     @staticmethod
     def _mtime(path: Path) -> float:
-        return path.stat().st_mtime if path.is_file() else 0.0
+        """mtime, or 0.0 when absent. Tolerates the file vanishing between the
+        is_file() check and the stat(): lesson rotation into .history/ races every
+        mtime scan, and an unguarded stat() there stalls the consolidator."""
+        try:
+            return path.stat().st_mtime if path.is_file() else 0.0
+        except OSError:
+            return 0.0
 
     def distilled_mtime(self) -> float:
         return self._mtime(self.dir / "distilled.md")
@@ -171,7 +177,9 @@ class LearnedStore:
         d = self.dir / "lessons"
         if not d.is_dir():
             return 0.0
-        return max((f.stat().st_mtime for f in d.glob("*.md")), default=0.0)
+        # _mtime (not a raw stat) so a file rotated away mid-glob contributes 0.0
+        # instead of raising — the whole scan would otherwise be lost to one race.
+        return max((self._mtime(f) for f in d.glob("*.md")), default=0.0)
 
     def corpus_mtime(self) -> float:
         """Newest mtime across the full distillation input: live notes, lessons,
@@ -201,9 +209,13 @@ class LearnedStore:
         # Most recently created/updated first: when the prompt budget can't hold every
         # lesson, the freshest learning survives (alphabetical-slug order made the cut
         # arbitrary). Curation is the real fix for an over-budget lesson set.
-        files = sorted(d.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        files = sorted(d.glob("*.md"), key=self._mtime, reverse=True)
         for f in files:
-            meta, body = parse_frontmatter(f.read_text(encoding="utf-8"))
+            try:
+                raw = f.read_text(encoding="utf-8")
+            except OSError:
+                continue  # rotated into .history/ between the glob and the read
+            meta, body = parse_frontmatter(raw)
             status = str(meta.get("status", "active"))
             if status != "active":
                 continue
