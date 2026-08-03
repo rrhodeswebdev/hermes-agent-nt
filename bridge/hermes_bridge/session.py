@@ -64,6 +64,10 @@ class SessionState:
         self.commission_per_contract = commission_per_contract
 
         self.position: int = 0          # signed contracts
+        # Contracts of an APPROVED entry that NinjaTrader has not reported filled yet.
+        # `position` lags the fill, so without this the RiskGate would see a flat book
+        # twice and approve two entries whose sum busts the position cap.
+        self.pending_entry_qty: int = 0
         self.avg_price: float = 0.0
         self.realized_pnl: float = 0.0
         self.commission_total: float = 0.0

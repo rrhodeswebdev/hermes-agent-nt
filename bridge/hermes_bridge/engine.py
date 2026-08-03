@@ -253,6 +253,7 @@ class TradingEngine:
         self.session.maybe_roll_day(bar.ts)
         self.store.append(bar)
         self.session.mark_bar(bar.ts)
+        self._expire_pending_entry(bar.ts)
         if self.session.position != 0:
             self.tracker.on_bar(bar)
         # Advance any not-taken setups against this bar before the new decision (a setup
@@ -400,6 +401,9 @@ class TradingEngine:
             if rd.approved and rd.command is not None and decision.action in (
                 Action.ENTER_LONG, Action.ENTER_SHORT
             ):
+                # Exposure is in flight from the moment the order is approved, not from
+                # the fill — this is what stops a second entry slipping through the gap.
+                self.session.pending_entry_qty = rd.command.qty
                 self._pending_entry = {
                     "cmd_id": rd.command.id,
                     "ts": bar.ts,
@@ -619,12 +623,29 @@ class TradingEngine:
             max_levels=lc.max_levels,
         )
 
+    def _expire_pending_entry(self, now_ts: float) -> None:
+        """Release the in-flight entry guard once no fill could still belong to that order.
+
+        The guard fails CLOSED (it blocks new entries), so it must not be able to wedge the
+        engine if an approved order neither fills nor is explicitly dropped. Uses the same
+        freshness window as ``_matching_pending``, so the block lasts exactly as long as a
+        fill could legitimately be attributed to it — one or two bars, which is the race
+        window being closed, not longer."""
+        p = self._pending_entry
+        if p is None:
+            return
+        tf_s = timeframe_seconds(self._decision_tf())
+        if now_ts - float(p.get("ts", 0.0)) > effective_entry_freshness_s(self.cfg) + tf_s:
+            self._pending_entry = None
+            self.session.pending_entry_qty = 0
+
     def entry_dropped(self, cmd_id: str) -> None:
         """The server dropped this queued entry (stale): disarm the journal memo so the
         next fill — from any source — is not attributed to its context/rationale."""
         p = self._pending_entry
         if p is not None and p.get("cmd_id") == cmd_id:
             self._pending_entry = None
+            self.session.pending_entry_qty = 0  # never queued ⇒ no exposure in flight
 
     def _matching_pending(self, side: Side, fill_ts: float) -> dict | None:
         """The armed entry memo, only if it plausibly produced this fill: same side and
@@ -844,6 +865,9 @@ class TradingEngine:
         goal/limit tripped while still in a position."""
         before_pos = self.session.position
         before_pnl = self.session.realized_pnl
+        # The order is no longer in flight — `position` now carries the exposure, so the
+        # gate's flat-only check takes over from the in-flight guard.
+        self.session.pending_entry_qty = 0
         self.session.apply_fill(fill)
         after_pos = self.session.position
 

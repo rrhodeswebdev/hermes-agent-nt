@@ -31,6 +31,58 @@ from .models import BrainTimeout
 # where 0 is the documented "no special flags" default.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# How long to wait for the pipes to drain AFTER the tree has been killed. Bounded on
+# purpose: if a descendant still holds the write end we abandon it rather than block.
+_DRAIN_TIMEOUT_S = 5.0
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the child AND every descendant.
+
+    ``Popen.kill()`` reaches only the direct child, but the CLI spawns ``node.exe``
+    grandchildren that INHERIT the stdout/stderr pipes. Kill just the child and a
+    surviving grandchild keeps the write end open, so the pipe never reaches EOF."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=10, creationflags=_NO_WINDOW)
+            return
+        except Exception:  # noqa: BLE001 — fall through to the best-effort kill below
+            pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001 — already gone; nothing to clean up
+        pass
+
+
+def _run_capture(cmd: list[str], *, input: str | None,  # noqa: A002 — mirrors subprocess
+                 env: dict[str, str] | None,
+                 timeout: float | None) -> subprocess.CompletedProcess:
+    """``subprocess.run(capture_output=True, text=True)`` whose timeout path CANNOT hang.
+
+    ``subprocess.run`` kills only the direct child on timeout and then calls
+    ``communicate()`` with NO timeout to drain the pipes. When a grandchild survives
+    holding the write end, that second call blocks forever — the calling thread is stuck
+    inside the "timeout" handler, so no timeout is ever raised and no ``finally`` runs.
+    That is exactly how a hung ``claude.exe`` stalled the consolidation daemon for hours
+    (2026-08-02). Here the whole tree is killed and the drain is bounded, so a timeout
+    always surfaces as ``TimeoutExpired``."""
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", env=env,
+        creationflags=_NO_WINDOW,
+    )
+    try:
+        out, err = proc.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=_DRAIN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass  # a descendant still holds the pipe — abandon it rather than block
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout=out, stderr=err)
+
 
 def _thinking_env(c: ClaudeClientConfig) -> dict[str, str] | None:
     """Subprocess env that caps extended thinking via MAX_THINKING_TOKENS.
@@ -76,13 +128,7 @@ def run_claude_oneshot(c: ClaudeClientConfig, system: str, user: str,
         cmd.extend(c.extra_args)
         budget = timeout_s if timeout_s is not None else c.timeout_s
         try:
-            out = subprocess.run(
-                cmd, input=user, capture_output=True, text=True,
-                encoding="utf-8", errors="replace",
-                env=_thinking_env(c),
-                timeout=budget,
-                creationflags=_NO_WINDOW,
-            )
+            out = _run_capture(cmd, input=user, env=_thinking_env(c), timeout=budget)
         except subprocess.TimeoutExpired as exc:
             raise BrainTimeout(budget) from exc
         if out.returncode != 0:

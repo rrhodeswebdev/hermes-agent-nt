@@ -201,3 +201,35 @@ def test_suppress_transitional_session_scale():
     # Sustained run confirms a sub-floor transitional long.
     assert s(long_e, "transitional", False, 0.01, 0.07,
              recent_signs=[1, 1, 1], sustain_bars=3).action == Action.ENTER_LONG
+
+
+# --- In-flight entry guard. `session.position` only moves when NT reports a fill, so two
+# entries approved inside that window each pass the flat-only check and each fit the cap,
+# but their SUM does not (a 6-lot under max_contracts=5, day 739831). The guard closes
+# that window — and because it fails CLOSED, it must also release itself.
+
+
+def test_pending_entry_qty_is_cleared_by_a_fill(cfg):
+    eng = _engine(cfg)
+    eng.session.pending_entry_qty = 3            # an approved entry is working
+    eng.on_fill(Fill(ts=1000.0, side=Side.LONG, qty=3, price=5000.0))
+    assert eng.session.pending_entry_qty == 0    # position now carries the exposure
+    assert eng.session.position == 3
+
+
+def test_pending_entry_guard_expires_so_it_cannot_wedge_entries(cfg):
+    """An approved order that never fills and is never dropped must not block entries
+    forever — the guard fails closed, so it needs a release valve."""
+    eng = _engine(cfg)
+    bars = synthetic_bars(60)
+    for b in bars:
+        eng.store.append(b)
+    eng.session.pending_entry_qty = 2
+    eng._pending_entry = {"cmd_id": "x", "ts": bars[-1].ts, "side": Side.LONG}
+
+    eng._expire_pending_entry(bars[-1].ts + 1.0)            # still fresh
+    assert eng.session.pending_entry_qty == 2
+
+    eng._expire_pending_entry(bars[-1].ts + 86_400.0)       # long past any plausible fill
+    assert eng.session.pending_entry_qty == 0
+    assert eng._pending_entry is None

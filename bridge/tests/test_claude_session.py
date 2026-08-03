@@ -69,7 +69,7 @@ def test_persistent_decide_uses_session_not_oneshot(monkeypatch):
     def no_oneshot(*a, **k):
         raise AssertionError("one-shot path must not run while the session works")
 
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", no_oneshot)
+    monkeypatch.setattr("hermes_bridge.claude_cli._run_capture", no_oneshot)
     c = make_claude_client()
     c.cfg.agent.claude.persistent = True
     d = c.decide(make_agent_request(c.cfg))

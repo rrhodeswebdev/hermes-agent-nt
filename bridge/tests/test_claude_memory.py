@@ -53,7 +53,7 @@ def test_decision_prompt_includes_learned_and_past_trades(tmp_path, monkeypatch)
             stdout=json.dumps({"is_error": False, "structured_output": {"action": "WAIT"}}),
             stderr="", returncode=0)
 
-    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("hermes_bridge.claude_cli._run_capture", fake_run)
     d = ClaudeAgentClient(cfg).decide(req)
     assert d.action is Action.WAIT
     assert "PROFILE-MARKER" in captured["system"]

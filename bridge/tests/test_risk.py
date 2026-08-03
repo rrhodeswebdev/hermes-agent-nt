@@ -414,3 +414,43 @@ def test_news_guard_absent_is_inert(cfg):
     s = _session(cfg)
     rd = gate.evaluate(_cmd(Action.ENTER_LONG, stop_ticks=8), s, last_price=4000.0, now_ts=1000.0)
     assert rd.approved
+
+
+# --- The position cap is a POSITION invariant, not a per-ORDER one. Observed live
+# 2026-08-03 (day 739831): a SHORT 6 filled against max_contracts=5. The gate itself
+# clamps correctly (verified: it returns 3 for that trade even when asked for 99), so the
+# only way the aggregate exceeds the cap is a SECOND entry approved while the first is
+# still in flight — step 3's flat-only check reads session.position, which lags the fill.
+
+
+def test_second_entry_rejected_while_a_prior_entry_is_in_flight(cfg):
+    """An approved-but-unfilled entry must block the next one. Without this the gate sees
+    position==0 twice and approves two orders that each fit the cap but together bust it."""
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    s.position = 0                 # the fill has NOT been reported yet...
+    s.pending_entry_qty = 4        # ...but 4 contracts are already working
+    rd = gate.evaluate(_cmd(Action.ENTER_SHORT, qty=2, stop_ticks=40), s, last_price=28656.0)
+    assert not rd.approved
+    assert any("entry_in_flight" in r for r in rd.reasons), rd.reasons
+
+
+def test_entry_qty_clamped_to_remaining_cap_room(cfg):
+    """Even if a non-flat entry path is ever allowed, qty must fit the room left under the
+    cap — the aggregate position can never exceed effective_max_contracts."""
+    cfg.risk.max_contracts = 5
+    cfg.risk.confidence_sizing = False       # exercise the requested-qty path directly
+    from hermes_bridge.risk import max_qty_for_entry
+    assert max_qty_for_entry(cfg, position=0, cap=5) == 5
+    assert max_qty_for_entry(cfg, position=4, cap=5) == 1   # only 1 contract of room left
+    assert max_qty_for_entry(cfg, position=-5, cap=5) == 0  # full — no room
+
+
+def test_exit_still_allowed_while_an_entry_is_in_flight(cfg):
+    """Risk-reducing actions must never be blocked by the in-flight guard."""
+    gate = RiskGate(cfg)
+    s = _session(cfg)
+    s.position = 3
+    s.pending_entry_qty = 2
+    rd = gate.evaluate(_cmd(Action.EXIT, qty=0), s)
+    assert rd.approved and rd.command.qty == 3

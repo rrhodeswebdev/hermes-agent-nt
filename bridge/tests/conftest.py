@@ -114,7 +114,9 @@ def fake_claude(monkeypatch):
             return types.SimpleNamespace(stdout=stdout, stderr=stderr,
                                          returncode=returncode)
 
-        monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.run", fake_run)
+        # Patches the _run_capture seam (not subprocess.run): the timeout path is now
+        # hand-rolled so a killed CLI's surviving grandchildren can't block the drain.
+        monkeypatch.setattr("hermes_bridge.claude_cli._run_capture", fake_run)
         return captured
 
     return install

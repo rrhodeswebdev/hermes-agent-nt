@@ -87,3 +87,57 @@ def test_oneshot_omits_fallback_model_when_unset(fake_claude):
     captured = fake_claude()
     run_claude_oneshot(ClaudeClientConfig(), "SYS", "USR")
     assert "--fallback-model" not in captured["cmd"]
+
+
+# --- Timeout path must never hang. subprocess.run kills only the DIRECT child on timeout
+# and then calls communicate() with NO timeout; the CLI spawns node.exe grandchildren that
+# inherit the stdout pipe, so a survivor keeps the pipe from reaching EOF and that second
+# communicate() blocks forever. Observed live: a claude.exe child of the bridge idled 30h
+# (and again ~6h), stalling the consolidation thread behind it (2026-08-02).
+import subprocess  # noqa: E402
+
+from hermes_bridge.claude_cli import BrainTimeout, _run_capture  # noqa: E402
+
+
+class _HangingProc:
+    """First communicate() times out; the drain would block forever if unbounded."""
+
+    def __init__(self):
+        self.pid = 4242
+        self.returncode = None
+        self.calls = 0
+        self.drain_timeouts: list = []
+
+    def communicate(self, input=None, timeout=None):  # noqa: A002
+        self.calls += 1
+        if self.calls == 1:
+            raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+        self.drain_timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+
+    def kill(self):
+        pass
+
+
+def test_run_capture_timeout_kills_tree_and_bounds_the_drain(monkeypatch):
+    proc = _HangingProc()
+    killed: list = []
+    monkeypatch.setattr("hermes_bridge.claude_cli.subprocess.Popen", lambda *a, **k: proc)
+    monkeypatch.setattr("hermes_bridge.claude_cli._kill_tree", lambda p: killed.append(p.pid))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_capture(["claude"], input="x", env=None, timeout=1.0)
+
+    assert killed == [4242], "the whole process TREE must be killed, not just the child"
+    assert proc.calls == 2, "the pipe must still be drained after the kill"
+    assert proc.drain_timeouts and all(t is not None for t in proc.drain_timeouts), \
+        "the post-kill drain MUST be bounded — an unbounded one is the original hang"
+
+
+def test_oneshot_surfaces_timeout_as_braintimeout(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_bridge.claude_cli._run_capture",
+        lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("claude", 5.0)),
+    )
+    with pytest.raises(BrainTimeout):
+        run_claude_oneshot(ClaudeClientConfig(), "sys", "user", timeout_s=5.0)

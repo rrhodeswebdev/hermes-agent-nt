@@ -208,7 +208,7 @@ def test_plan_cycle_enter_manage_exit(cfg):
 
 def test_plan_mode_mismatch_self_corrects(cfg):
     engine, session, planner = _engine(cfg, _StubAgent(cfg))
-    bars = synthetic_bars(5)
+    bars = synthetic_bars(10)
     engine.on_bar(bars[0])                      # arms the entry plan
     r1 = engine.on_bar(bars[1])                 # entry command queued...
     assert r1.command is not None
@@ -218,8 +218,16 @@ def test_plan_mode_mismatch_self_corrects(cfg):
     assert r2.decision.action is Action.WAIT
     assert r2.decision.rationale.startswith("plan_mode_mismatch")
     assert planner.current_plan().mode == "seek_entry"
+    # The plan re-arms, but the ORDER is still in flight (never filled, never dropped), so
+    # the gate must not add a second entry: two approved entries inside the fill-report gap
+    # each fit the contract cap while their sum does not. Re-entry resumes only once no
+    # fill could still be attributed to that order (same window as _matching_pending).
     r3 = engine.on_bar(bars[3])
-    assert r3.command is not None and r3.command.action is Action.ENTER_LONG
+    assert r3.command is None
+    assert any("entry_in_flight" in r for r in r3.risk_reasons), r3.risk_reasons
+    # ...and once the guard releases, the re-armed seek_entry plan fires again.
+    later = [engine.on_bar(b).command for b in bars[4:]]
+    assert any(c is not None and c.action is Action.ENTER_LONG for c in later)
 
 
 def test_in_trade_close_waits_instantly_without_exit_condition(cfg):

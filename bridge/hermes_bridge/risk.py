@@ -114,9 +114,17 @@ def evaluate_risk(
         if ev is not None:
             return RiskDecision(False, None, [f"news_blackout:{ev.label()}"])
 
-    # 3) Flat-only entries.
+    # 3) Flat-only entries — and that means flat in FACT, not just in the last fill report.
+    # `session.position` only moves when NinjaTrader reports a fill, so between queueing an
+    # entry and its fill landing the gate still sees 0. Two entries evaluated inside that
+    # window each pass this check and each fit the cap, but their SUM does not: that is how
+    # a 6-contract position appeared under max_contracts=5 (day 739831, 2026-08-03). An
+    # approved-but-unfilled entry therefore counts as exposure.
     if session.position != 0:
         return RiskDecision(False, None, ["already_in_position"])
+    in_flight = int(getattr(session, "pending_entry_qty", 0) or 0)
+    if in_flight:
+        return RiskDecision(False, None, [f"entry_in_flight:{in_flight}"])
 
     # 4) Max trades/day.
     if session.trades_today >= cfg.risk.max_trades_per_day:
@@ -126,6 +134,12 @@ def evaluate_risk(
     # once the per-trade dollar budget (step 7) is known.
     requested = command.qty if command.qty > 0 else 1
     cap = effective_max_contracts(cfg, session)
+    # The cap is a POSITION invariant, not a per-order one: size to the room LEFT under it.
+    # Redundant while entries are flat-only (room == cap), deliberately so — it keeps the
+    # invariant true by construction if a non-flat entry path is ever added.
+    room = max_qty_for_entry(cfg, session.position, cap)
+    if room < 1:
+        return RiskDecision(False, None, [f"position_cap_reached:{cap}"])
 
     # 6) Mandatory protective stop (inject default if missing), clamped to the band.
     stop_ticks = command.stop_ticks
@@ -170,7 +184,7 @@ def evaluate_risk(
     # dollar budget allow. With confidence_sizing on, scale UP with the decision's
     # confidence (1 at min_confidence → full budget at full_size_confidence); otherwise
     # take the requested qty clamped DOWN to the budget (legacy behavior).
-    budget_max = min(cap, max_qty_by_risk)
+    budget_max = min(room, max_qty_by_risk)
     if cfg.risk.confidence_sizing:
         # Always confidence-size when enabled — a MISSING confidence must not fall through
         # to the legacy requested-qty path (that let a manual/no-confidence entry size up to
@@ -308,6 +322,14 @@ def effective_max_contracts(cfg: BridgeConfig, session) -> int:
         if profit >= min_profit:
             limit = contracts
     return min(int(limit), hard)
+
+
+def max_qty_for_entry(cfg: BridgeConfig, position: int, cap: int) -> int:
+    """Contracts an entry may still add without taking the AGGREGATE position past ``cap``.
+
+    The position cap has to hold for the resulting position, not merely for each order in
+    isolation — two separately-capped orders can still sum past it (see step 3)."""
+    return max(0, cap - abs(int(position)))
 
 
 def per_contract_risk_usd(
