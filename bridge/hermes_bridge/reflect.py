@@ -487,25 +487,30 @@ class Reflector:
                 proposals = {}
         except Exception:  # noqa: BLE001 — reflection is best-effort; never disrupt trading
             return applied
-        for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:
-            op, name = ls.get("op"), ls.get("name")
-            if op in ("create", "update", "retire") and name:
-                self.learned.apply_lesson(op, name, body=ls.get("body", "") or "",
-                                          regime_tags=ls.get("regime_tags"))
-                applied["lessons"] += 1
-        lc = self.cfg.learning
-        for note in (proposals.get("notes_append") or []):
-            if note:
-                self.learned.append_note(
-                    str(note), archive_over_chars=lc.notes_archive_over_chars,
-                    keep_chars=lc.notes_keep_chars)
-                applied["notes"] += 1
-        pr = proposals.get("profile_replace")
-        if pr:
-            # Never auto-applied: the live profile is user-authored and self-amplifying
-            # (it feeds every future prompt). Written as a proposal for human review.
-            self.learned.propose_profile(str(pr))
-            applied["profile"] = 1
+        # Same guard as _run_with_error: writing proposals to disk is fallible and must
+        # never propagate into the caller's thread.
+        try:
+            for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:
+                op, name = ls.get("op"), ls.get("name")
+                if op in ("create", "update", "retire") and name:
+                    self.learned.apply_lesson(op, name, body=ls.get("body", "") or "",
+                                              regime_tags=ls.get("regime_tags"))
+                    applied["lessons"] += 1
+            lc = self.cfg.learning
+            for note in (proposals.get("notes_append") or []):
+                if note:
+                    self.learned.append_note(
+                        str(note), archive_over_chars=lc.notes_archive_over_chars,
+                        keep_chars=lc.notes_keep_chars)
+                    applied["notes"] += 1
+            pr = proposals.get("profile_replace")
+            if pr:
+                # Never auto-applied: the live profile is user-authored and self-amplifying
+                # (it feeds every future prompt). Written as a proposal for human review.
+                self.learned.propose_profile(str(pr))
+                applied["profile"] = 1
+        except Exception:  # noqa: BLE001 — best-effort; never kill the caller's thread
+            pass
         return applied
 
     def _run_with_error(self, system: str, user: str, schema: str) -> dict:
@@ -525,21 +530,28 @@ class Reflector:
         if not isinstance(proposals, dict):
             applied["error"] = "no_structured_output"
             return applied
-        for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:
-            op, name = ls.get("op"), ls.get("name")
-            if op in ("create", "update", "retire") and name:
-                self.learned.apply_lesson(op, name, body=ls.get("body", "") or "",
-                                          regime_tags=ls.get("regime_tags"))
-                applied["lessons"] += 1
-        lc = self.cfg.learning
-        for note in (proposals.get("notes_append") or []):
-            if note:
-                self.learned.append_note(
-                    str(note), archive_over_chars=lc.notes_archive_over_chars,
-                    keep_chars=lc.notes_keep_chars)
-                applied["notes"] += 1
-        pr = proposals.get("profile_replace")
-        if pr:
-            self.learned.propose_profile(str(pr))
-            applied["profile"] = 1
+        # Applying proposals touches the filesystem, so it is fallible in its own right
+        # (an over-long lesson name once raised ENOENT here and killed the reflection
+        # THREAD — this loop used to sit outside any guard). Best-effort like every other
+        # step: record why, never propagate.
+        try:
+            for ls in (proposals.get("lessons") or [])[: self.cfg.learning.max_lessons]:
+                op, name = ls.get("op"), ls.get("name")
+                if op in ("create", "update", "retire") and name:
+                    self.learned.apply_lesson(op, name, body=ls.get("body", "") or "",
+                                              regime_tags=ls.get("regime_tags"))
+                    applied["lessons"] += 1
+            lc = self.cfg.learning
+            for note in (proposals.get("notes_append") or []):
+                if note:
+                    self.learned.append_note(
+                        str(note), archive_over_chars=lc.notes_archive_over_chars,
+                        keep_chars=lc.notes_keep_chars)
+                    applied["notes"] += 1
+            pr = proposals.get("profile_replace")
+            if pr:
+                self.learned.propose_profile(str(pr))
+                applied["profile"] = 1
+        except Exception as e:  # noqa: BLE001 — best-effort; never kill the caller's thread
+            applied["error"] = type(e).__name__
         return applied

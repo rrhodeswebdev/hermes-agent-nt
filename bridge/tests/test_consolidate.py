@@ -227,3 +227,65 @@ def test_distill_survives_a_corpus_read_error(tmp_path, monkeypatch):
     out = r.distill()                           # must not reach the CLI, must not raise
     assert out["distilled"] == 0
     assert out["error"] == "FileNotFoundError"
+
+
+# --- Lesson filenames must fit the filesystem. The brain emitted a 373-char lesson name
+# on 2026-08-03; slugged to "<373 chars>.md.tmp" that is 380 chars against the NTFS
+# 255-char per-component limit, and Windows reports an over-length path as ENOENT. The
+# write raised out of apply_lesson, through the UNGUARDED apply loop in _run_with_error,
+# and killed the reflection thread.
+
+from hermes_bridge.memory import _slug  # noqa: E402
+
+
+def test_slug_is_bounded_for_the_filesystem():
+    long_name = "sustained-delta-sign-persistence " * 20      # ~660 chars
+    s = _slug(long_name)
+    assert len(s) <= 120, f"slug must be bounded, got {len(s)}"
+    assert len(s) + len(".md.tmp") < 255
+
+
+def test_slug_stays_unique_after_truncation():
+    """Two long names sharing a prefix must not collide onto one file."""
+    base = "a-very-long-lesson-name-that-goes-on-and-on " * 6
+    assert _slug(base + "first-distinct-tail") != _slug(base + "second-distinct-tail")
+
+
+def test_slug_is_stable_for_the_same_name():
+    """update/retire must resolve to the same file as create."""
+    n = "some-quite-long-lesson-name " * 10
+    assert _slug(n) == _slug(n)
+
+
+def test_apply_lesson_writes_a_very_long_name(tmp_path):
+    ls = LearnedStore(str(tmp_path / "learned"))
+    name = ("sustained delta sign persistence 10-16 same-sign bars single bar as low as "
+            "0.023 0.038 may substitute for magnitude floor only on post-acceptance "
+            "continuation hold confirm rungs in trending regime holding a reclaimed shelf "
+            "never on first breaks counter-trend mixed-sign tape or zero-pullback "
+            "staircase grinds making fresh highs lows still subject to location "
+            "clearance veto")
+    assert len(name) > 300
+    ls.apply_lesson("create", name, body="BODY-MARKER")
+    got = ls.lessons()
+    assert len(got) == 1
+    assert got[0].body.strip() == "BODY-MARKER"
+    assert got[0].name == name          # the FULL name survives in frontmatter
+
+
+def test_reflection_survives_an_unwritable_lesson(tmp_path, monkeypatch):
+    """One bad lesson must not kill the reflection thread — the apply loop needs the same
+    guard curate()/distill() got."""
+    cfg, learned, r = _reflector(tmp_path)
+
+    def _boom_apply(*a, **k):
+        raise OSError("filename too long")
+
+    monkeypatch.setattr(learned, "apply_lesson", _boom_apply)
+    monkeypatch.setattr(
+        "hermes_bridge.reflect.run_claude_oneshot",
+        lambda *a, **k: '{"structured_output": {"lessons": [{"op": "create", "name": "x"}]}}',
+    )
+    out = r._run_with_error("sys", "user", "{}")   # must NOT raise
+    assert out["lessons"] == 0
+    assert out["error"]

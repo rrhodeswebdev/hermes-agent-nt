@@ -13,6 +13,7 @@ Excludes lessons whose frontmatter `status` is not "active".
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -37,9 +38,29 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, parts[2].lstrip("\n")
 
 
+# Filenames have to fit the filesystem: NTFS caps a single path COMPONENT at 255 chars,
+# and _atomic_write appends ".tmp" on top of ".md". The brain emits long descriptive
+# lesson names (one hit 373 chars on 2026-08-03) and Windows reports an over-length path
+# as ENOENT, so the write failed with a misleading "no such file or directory".
+_SLUG_MAX = 100
+_SLUG_HASH_LEN = 8
+
+
 def _slug(name: str) -> str:
+    """Filesystem-safe, length-bounded, stable, and collision-resistant.
+
+    Truncation alone would make two long names sharing a prefix collide onto one file, so
+    an over-long slug keeps a prefix plus a short digest of the FULL name. The digest is a
+    pure function of the name, so create/update/retire all resolve to the same file. The
+    untruncated name is preserved in the lesson's frontmatter `name:` field."""
     s = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
-    return s or "lesson"
+    if not s:
+        return "lesson"
+    if len(s) <= _SLUG_MAX:
+        return s
+    digest = hashlib.sha256(str(name).encode("utf-8")).hexdigest()[:_SLUG_HASH_LEN]
+    keep = _SLUG_MAX - _SLUG_HASH_LEN - 1
+    return f"{s[:keep].rstrip('-')}-{digest}"
 
 
 def _split_bullets(text: str) -> tuple[str, list[str]]:
