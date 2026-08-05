@@ -145,6 +145,16 @@ class StrategyParams(BaseModel):
     # default); set ~0.5 in trading.local.yaml to accumulate the evidence that gates a regime-aware
     # breakeven_r. See shadow_be.shadow_breakeven_outcome + docs/superpowers/specs 2026-07-06.
     shadow_breakeven_r_transitional: float = Field(default=0.0, ge=0.0)
+    # Rest the armed plan-exit level in NinjaTrader as a REAL stop, this many ticks BEYOND
+    # it. The ExitRule is a close-test ("get out if it CLOSES beyond X") and the bridge only
+    # sees completed bars, so between two closes nothing but the wide entry bracket is in
+    # the market and a fast bar can run arbitrarily far past X before the exit can fire
+    # (observed 2026-08-04: armed 29817, filled 29832 — 62 ticks). Resting the level bounds
+    # that overshoot at the buffer. The buffer is what preserves the rule's noise tolerance:
+    # price must trade past X PLUS the buffer for the resting order to take over, so a wick
+    # through X still doesn't scratch the trade. 0 = off (neutral default — the close-test
+    # behaves exactly as before). See stops.plan_exit_stop_price.
+    plan_exit_stop_buffer_ticks: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _check_stop_band(self) -> StrategyParams:

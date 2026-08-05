@@ -61,6 +61,18 @@ strategy:
   #     in the journal). Set breakeven_r: 0 to revert to a static bracket.
   breakeven_r: 1.0      # pull the stop to breakeven once favorable excursion reaches 1.0 * stop
   trail_enabled: true   # then trail behind the higher-low (long) / lower-high (short)
+  # --- Rest the armed exit level in NinjaTrader as a REAL stop, this many ticks BEYOND it.
+  #     Both discretionary exits (the plan's ExitRule and the breakeven/trail stop above) are
+  #     tested once per bar CLOSE, and the bridge only sees completed bars — so between two
+  #     closes nothing but the wide entry bracket is actually in the market. A fast bar can
+  #     therefore run arbitrarily far past the armed level before the exit can fire: on
+  #     2026-08-04 an exit armed at 29817 filled at 29832 (62 ticks of overshoot), while the
+  #     resting NT8 bracket stop the same night filled 0.75 ticks from its price.
+  #     The buffer preserves the close-test's noise tolerance: price must trade past the level
+  #     PLUS the buffer for the resting order to take over, so a wick through it still doesn't
+  #     scratch the trade. 0 = off (pure close-test, the pre-2026-08-05 behaviour).
+  #     Requires the AMEND_STOP case in HermesBridgeStrategy.cs (recompile in NinjaTrader).
+  plan_exit_stop_buffer_ticks: 0
 
 # Hard risk limits — enforced server-side by the RiskGate.
 # MNQ SIM-TEST PLACEHOLDERS — tune to your real tolerance. MNQ is a micro ($2/point),

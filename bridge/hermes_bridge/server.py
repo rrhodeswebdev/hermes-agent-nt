@@ -606,6 +606,11 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
                 cmd = None
             if cmd is not None:
                 st.queue.push(cmd)
+            # Risk-reducing companions (AMEND_STOP). Not subject to the staleness drop
+            # above: that guards ENTRIES, where a late fill is a new position at a stale
+            # price — tightening a stop late is still strictly better than not at all.
+            for extra in result.extra_commands:
+                st.queue.push(extra)
         if len(st.store) < HISTORY_MIN_BARS:
             d = d.model_copy(update={"need_history": True})
         queued = f"QUEUED:{cmd.action} qty={cmd.qty}" if cmd is not None else "no-order"

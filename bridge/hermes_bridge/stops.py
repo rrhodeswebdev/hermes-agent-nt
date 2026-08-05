@@ -116,6 +116,46 @@ def size_for_confidence(
     return int(1 + round(frac * (budget_max - 1)))
 
 
+def plan_exit_stop_price(
+    *,
+    side: Side | str,
+    exit_below: float | None,
+    exit_above: float | None,
+    buffer_ticks: int,
+    tick_size: float,
+) -> float | None:
+    """The price at which an armed plan exit should REST as a working stop in NinjaTrader.
+
+    The plan's ``ExitRule`` is a close-test ("get out if it CLOSES beyond X"), and the bridge
+    only ever sees completed bars — so a fast bar can run arbitrarily far past X before the
+    exit can fire. This rests a real stop ``buffer_ticks`` BEYOND X, which bounds that
+    overshoot at the buffer while leaving the normal close-test path untouched: price has to
+    trade past X *plus the buffer* intrabar for the resting order to take over.
+
+    The buffer is what preserves the rule's noise tolerance. At 0 the stop sits exactly on X
+    (a wick through the level exits); wider buffers only catch genuine runaway bars.
+
+    Returns None when there is no armed level on the side that would protect this position
+    (a long is invalidated by ``exit_below``, a short by ``exit_above``).
+    """
+    tick = tick_size or 0.25
+    offset = max(0, int(buffer_ticks)) * tick
+    if side == Side.LONG or side == "LONG":
+        return None if exit_below is None else exit_below - offset
+    return None if exit_above is None else exit_above + offset
+
+
+def tightest_stop(side: Side | str, levels: list[float | None]) -> float | None:
+    """The most protective of several candidate stop levels — the highest for a long, the
+    lowest for a short. None entries are ignored; None when nothing is armed."""
+    present = [x for x in levels if x is not None]
+    if not present:
+        return None
+    if side == Side.LONG or side == "LONG":
+        return max(present)
+    return min(present)
+
+
 def managed_stop_price(
     *,
     side: Side,

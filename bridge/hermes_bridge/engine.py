@@ -40,7 +40,12 @@ from .reauthor import ReauthorState, record_authored, step
 from .risk import RiskGate
 from .session import SessionState
 from .shadow_be import shadow_breakeven_outcome
-from .stops import managed_stop_price, risk_scale_for_atr
+from .stops import (
+    managed_stop_price,
+    plan_exit_stop_price,
+    risk_scale_for_atr,
+    tightest_stop,
+)
 from .store import BarStore
 
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
@@ -81,6 +86,10 @@ class EngineResult:
     command: OrderCommand | None = None
     mode: str = ""
     risk_reasons: list[str] = field(default_factory=list)
+    # Risk-reducing commands queued ALONGSIDE the decision (today: AMEND_STOP, which moves
+    # the working protective stop without opening or closing anything). Kept separate so the
+    # single-command contract — and everything that reads `command` — is unchanged.
+    extra_commands: list[OrderCommand] = field(default_factory=list)
 
 
 @dataclass
@@ -434,6 +443,15 @@ class TradingEngine:
         if self.planner is not None:
             self._record_missed_triggers(armed, bar, ctx, result, suppressed_by)
             self._schedule_followup(bar, ctx, bars, account, result)
+        # Rest the armed protective level in NinjaTrader so it protects BETWEEN closes too.
+        # Skipped when we're already leaving: an exit makes the book flat, so there is
+        # nothing left to protect.
+        if result.command is None or result.command.action not in (
+            Action.EXIT, Action.FLATTEN
+        ):
+            amend = self._stop_amendment(ctx, bar, armed)
+            if amend is not None:
+                result = replace(result, extra_commands=[*result.extra_commands, amend])
         return result
 
     @staticmethod
@@ -898,6 +916,10 @@ class TradingEngine:
                     sp, tp = self._command_brackets(cmd, fill.price)
                 else:
                     sp, tp = p.get("brackets", (0.0, 0.0)) if p is not None else (0.0, 0.0)
+                # The ratchet baseline for stop amendments: what NinjaTrader is actually
+                # resting for this trade right now. Left None when the bracket is unknown,
+                # which makes _stop_amendment fail closed rather than risk widening it.
+                self.session.working_stop = sp or None
                 self.tracker.on_entry(
                     ts=fill.ts, side=side, qty=abs(after_pos), price=fill.price,
                     context=ctx,
@@ -1026,6 +1048,60 @@ class TradingEngine:
             rationale=f"managed_stop({side.value.lower()} @{level:g}): "
                       f"breakeven/trail hit on close {close:g}",
         )
+
+    def _stop_amendment(
+        self, ctx: MarketContext, bar: Bar, armed: TradePlan | None
+    ) -> OrderCommand | None:
+        """A RiskGate-approved AMEND_STOP when the position's protective level has TIGHTENED.
+
+        Both discretionary exits — the plan's ExitRule and the managed breakeven/trail stop —
+        are tested once per bar CLOSE, and the bridge only ever sees completed bars. Between
+        two closes nothing but the wide entry bracket is actually in the market, so a fast bar
+        can run arbitrarily far past an armed level before the exit can fire. Resting the
+        tighter of the two levels as a REAL stop bounds that overshoot; the close-tests stay
+        exactly as they were and remain the normal path.
+
+        None when nothing is armed, the level is no tighter than what already rests, or the
+        gate refuses it — the gate is the authority, this only proposes.
+        """
+        pos = self.session.position
+        if pos == 0:
+            return None
+        if self.session.working_stop is None:
+            # We don't know where NinjaTrader's stop currently sits (an unattributed fill, or
+            # an entry whose bracket we never saw), so nothing here can PROVE an amendment
+            # tightens it — and a looser one would silently widen the trade's risk. Fail
+            # closed: the resting entry bracket keeps protecting it, as it did before.
+            return None
+        side = Side.LONG if pos > 0 else Side.SHORT
+        buf = self.cfg.strategy.plan_exit_stop_buffer_ticks
+        plan_level = None
+        if buf > 0 and armed is not None and armed.exit is not None:
+            plan_level = plan_exit_stop_price(
+                side=side, exit_below=armed.exit.exit_below,
+                exit_above=armed.exit.exit_above, buffer_ticks=buf,
+                tick_size=self.cfg.instrument.tick_size,
+            )
+        exc = self.tracker.open_excursion()
+        managed = managed_stop_price(
+            side=side, entry=self.session.avg_price,
+            initial_stop_ticks=self._active_stop_ticks,
+            mfe=exc[1] if exc is not None else 0.0,
+            swing_low=ctx.swing_low, swing_high=ctx.swing_high, cfg=self.cfg,
+        )
+        level = tightest_stop(side, [plan_level, managed])
+        if level is None:
+            return None
+        cmd = OrderCommand(
+            id=self._new_id(), strategy_id=self.cfg.strategy_id,
+            action=Action.AMEND_STOP, stop_price=level,
+            reason=f"resting_stop({side.value.lower()} @{level:g})",
+        )
+        rd = self.risk.evaluate(cmd, self.session, last_price=bar.close, now_ts=bar.ts)
+        if not rd.approved or rd.command is None:
+            return None
+        self.session.working_stop = level
+        return rd.command
 
     def _to_command(self, d: Decision) -> OrderCommand:
         return OrderCommand(

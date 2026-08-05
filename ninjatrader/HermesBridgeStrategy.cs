@@ -555,6 +555,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (Position.MarketPosition == MarketPosition.Long) ExitLong();
                     else if (Position.MarketPosition == MarketPosition.Short) ExitShort();
                     break;
+                // Move the working protective stop on the OPEN position. The bridge only
+                // sees completed bars, so its armed exit levels are close-tests and cannot
+                // protect between two closes; this rests the level as a real stop order.
+                // Risk-reducing only — the bridge's RiskGate approves it solely when it
+                // TIGHTENS, so this can never widen a stop or open/close anything.
+                case "AMEND_STOP":
+                    if (!cmd.StopPrice.HasValue) return;
+                    if (Position.MarketPosition == MarketPosition.Long)
+                        SetStopLoss(LongSignal, CalculationMode.Price, cmd.StopPrice.Value, false);
+                    else if (Position.MarketPosition == MarketPosition.Short)
+                        SetStopLoss(ShortSignal, CalculationMode.Price, cmd.StopPrice.Value, false);
+                    break;
             }
         }
 

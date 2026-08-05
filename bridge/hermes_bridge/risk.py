@@ -90,6 +90,9 @@ def evaluate_risk(
         qty = abs(session.position) if command.qty <= 0 else command.qty
         return RiskDecision(True, command.model_copy(update={"qty": qty}), ["risk_reducing"])
 
+    if command.action is Action.AMEND_STOP:
+        return _evaluate_amend_stop(command, session, last_price)
+
     if command.action not in _ENTRIES:
         return RiskDecision(False, None, [f"unsupported_action:{command.action}"])
 
@@ -358,6 +361,37 @@ def trigger_feasible(
 
 
 # ---- helpers (pure) ---------------------------------------------------------
+def _evaluate_amend_stop(
+    command: OrderCommand, session: SessionState, last_price: float | None
+) -> RiskDecision:
+    """Move the working protective stop on an open position.
+
+    Approved ONLY when it strictly reduces risk, so this can never become a way to widen a
+    stop or to sneak an order in: there must be a position, the level must sit on the
+    protective side of the last price, and it must be TIGHTER than whatever is already
+    resting. A level already through price would fill instantly at market — that is an EXIT
+    and has to go through the exit path, not arrive disguised as a stop amendment.
+    """
+    if session.position == 0:
+        return RiskDecision(False, None, ["no_position"])
+    price = command.stop_price
+    if price is None:
+        return RiskDecision(False, None, ["no_stop_price"])
+    long_side = session.position > 0
+    if last_price is not None:
+        through = price >= last_price if long_side else price <= last_price
+        if through:
+            return RiskDecision(False, None, [f"stop_through_price:{price:g}"])
+    cur = session.working_stop
+    if cur is not None:
+        tighter = price > cur if long_side else price < cur
+        if not tighter:
+            return RiskDecision(False, None, [f"stop_not_tighter:{price:g} vs {cur:g}"])
+    return RiskDecision(
+        True, command.model_copy(update={"qty": 0}), [f"stop_tightened:{price:g}"]
+    )
+
+
 def _band_clamp_price(
     cfg: BridgeConfig, stop_price: float, action: Action, last_price: float,
     reasons: list[str], floor_ticks: int | None = None,

@@ -44,6 +44,9 @@ class Action(StrEnum):
     EXIT = "EXIT"          # close the current position (any side)
     FLATTEN = "FLATTEN"    # hard close everything (kill switch / goal hit)
     WAIT = "WAIT"          # do nothing this bar
+    # Move the working protective stop on an OPEN position; never opens or closes anything.
+    # Risk-reducing by construction — the RiskGate approves it only when it TIGHTENS.
+    AMEND_STOP = "AMEND_STOP"
 
 
 class Side(StrEnum):

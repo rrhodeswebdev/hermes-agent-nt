@@ -69,6 +69,10 @@ class SessionState:
         # twice and approve two entries whose sum busts the position cap.
         self.pending_entry_qty: int = 0
         self.avg_price: float = 0.0
+        # Price of the protective stop currently RESTING in NinjaTrader for the open
+        # position, as last approved by the RiskGate (None = only the entry bracket).
+        # The gate ratchets against this so a stop can never be moved wider.
+        self.working_stop: float | None = None
         self.realized_pnl: float = 0.0
         self.commission_total: float = 0.0
         self.trades_today: int = 0
@@ -231,6 +235,7 @@ class SessionState:
             self.position = new_pos
             if self.position == 0:
                 self.avg_price = 0.0
+                self.working_stop = None   # nothing rests once the book is flat
             elif (new_pos > 0) == (signed > 0):
                 # Remaining position is in the fill's direction → we flipped past
                 # flat; the leftover contracts open at the fill price.
