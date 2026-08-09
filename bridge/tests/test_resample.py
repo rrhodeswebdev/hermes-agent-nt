@@ -275,16 +275,61 @@ def test_ingest_unchanged_when_not_engaged(cfg):
 
 
 # ---- warm-restart pre-session study kick --------------------------------
-def test_warm_store_kicks_session_study_at_startup(cfg, tmp_path, monkeypatch):
-    # Pre-seed the bars.db so a fresh AppState loads a WARM decision store (a restart).
+def _warm_app(cfg, tmp_path, monkeypatch, n: int = 60):
+    """A fresh AppState over a pre-seeded bars.db = a bridge restart with a WARM store.
+    Returns (app, calls) where `calls` records the bar count of each on_history study."""
     db = str(tmp_path / "bars.db")
-    BarStore("ES", "5m", db_path=db).replace_history(synthetic_bars(60))  # >= HISTORY_MIN_BARS
+    BarStore("ES", "5m", db_path=db).replace_history(synthetic_bars(n))  # >= HISTORY_MIN_BARS
     cfg.storage.bars_db = db
     calls: list[int] = []
     monkeypatch.setattr(
         TradingEngine, "on_history", lambda self, bars: calls.append(len(bars)))
-    create_app(cfg)
-    assert calls == [60]                   # study kicked once at construction, off the NT8 push
+    return create_app(cfg), calls
+
+
+def _es_bar(client, bar):
+    return client.post("/ingest/bar",
+                       json={"instrument": "ES", "timeframe": "5m", "bar": bar.model_dump()})
+
+
+def test_warm_store_defers_session_study_to_first_live_bar(cfg, tmp_path, monkeypatch):
+    """The study must NOT run at construction. At that moment the newest stored bar is only as
+    fresh as the last shutdown, and when the bridge boots AFTER NinjaTrader the strategy's
+    one-shot history push has already hit a dead port — so studying then anchors the playbook to
+    a stale price and the brain sits in no-trade until the re-author ceiling (2026-08-06/07:
+    ~200pts off spot, cost a full RTH session). Defer to the first realtime bar."""
+    app, calls = _warm_app(cfg, tmp_path, monkeypatch)
+    assert calls == []                     # nothing authored off the stale store
+
+    client = TestClient(app)
+    last = synthetic_bars(60)[-1]
+    _es_bar(client, _bar(last.ts + 300, 100, 101, 99, 100))
+    assert calls == [61]                   # studied WITH the fresh bar in the store
+
+
+def test_warm_study_fires_only_once(cfg, tmp_path, monkeypatch):
+    """The deferral is a one-shot latch: later bars must not re-study (the reauthor governor
+    owns refreshes from then on)."""
+    app, calls = _warm_app(cfg, tmp_path, monkeypatch)
+    client = TestClient(app)
+    last_ts = synthetic_bars(60)[-1].ts
+    for i in range(1, 4):
+        _es_bar(client, _bar(last_ts + 300 * i, 100, 101, 99, 100))
+    assert calls == [61]
+
+
+def test_history_push_cancels_deferred_warm_study(cfg, tmp_path, monkeypatch):
+    """Normal boot order (bridge first, then the NT8 enable): NT8's /ingest/history push owns
+    the study. The deferred kick must not fire a duplicate on the next bar."""
+    app, calls = _warm_app(cfg, tmp_path, monkeypatch)
+    client = TestClient(app)
+    hist = synthetic_bars(60)
+    client.post("/ingest/history", json={"instrument": "ES", "timeframe": "5m",
+                                         "bars": [b.model_dump() for b in hist]})
+    assert calls == [60]                   # the push studied
+
+    _es_bar(client, _bar(hist[-1].ts + 300, 100, 101, 99, 100))
+    assert calls == [60]                   # and the deferral was cancelled, not doubled
 
 
 def test_cold_store_does_not_kick_session_study(cfg, monkeypatch):

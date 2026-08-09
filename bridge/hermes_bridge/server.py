@@ -181,11 +181,22 @@ class AppState:
             declines=self.declines,
             decision_tf=(lambda: self.resampler.current_tf) if self.resampler else None)
         # Warm restart: the decision store was rebuilt from bars.db (resampler) or loaded from
-        # the persisted store, so NT8's need_history handshake won't fire and /ingest/history
-        # won't kick the pre-session study. Kick it here so the brain authors a playbook without
-        # a manual /control/reauthor. A cold start (thin store) still relies on the NT8 push.
-        if self.planner is not None and len(self.store) >= HISTORY_MIN_BARS:
-            self.engine.on_history(self.store.all())
+        # the persisted store, so NT8's need_history handshake won't fire (the store is far past
+        # HISTORY_MIN_BARS) and /ingest/history won't kick the pre-session study. Arm the kick
+        # here so the brain authors a playbook without a manual /control/reauthor — but DEFER it
+        # to the first realtime bar rather than running it now.
+        #
+        # Why deferred: at construction the newest stored bar is only as fresh as the last
+        # shutdown. When the bridge boots AFTER NinjaTrader, the strategy's one-shot per-ENABLE
+        # history push has already hit a dead port and will never be retried, so studying here
+        # anchors the playbook to a stale price and the brain sits in no-trade until the
+        # reauthor ceiling (strategies.reauthor.max_interval_bars). Seen twice: 2026-08-06 and
+        # -07, ~200pts off spot, and the first one cost a full RTH session. The first realtime
+        # bar is the earliest moment the store is guaranteed current, so study there.
+        # /ingest/history cancels the deferral — on the normal boot order NT8's push owns it.
+        # A cold start (thin store) still relies on the NT8 push, exactly as before.
+        self.pending_warm_study = (
+            self.planner is not None and len(self.store) >= HISTORY_MIN_BARS)
         self.queue = CommandQueue()
         self.lock = threading.Lock()  # serialize engine.on_bar / on_fill mutations
         self.decisions: deque[dict] = deque(maxlen=60)  # recent decisions for the dashboard
@@ -548,6 +559,9 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
     @app.post("/ingest/history")
     def ingest_history(request: Request, batch: BarBatch) -> dict:
         st = _state(request)
+        # NT8's push owns the study on this boot, so stand the deferred warm kick down —
+        # otherwise the next bar fires a duplicate study over the same history.
+        st.pending_warm_study = False
         # With the resampler, NinjaTrader's history is the FEED series; rebuild the decision
         # series from it before the engine's one-time session study runs.
         if st.resampler is not None:
@@ -594,6 +608,14 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
             else:
                 bar = payload.bar
             result = st.engine.on_bar(bar)
+            # Deferred warm-restart study (see AppState.__init__). The store now holds a CURRENT
+            # bar, so the playbook is authored against live price instead of whatever the last
+            # shutdown left behind. One-shot: the reauthor governor owns refreshes from here.
+            # Runs after on_bar so the study sees this bar; the study is async either way, so
+            # THIS bar's decision is unaffected.
+            if st.pending_warm_study:
+                st.pending_warm_study = False
+                st.engine.on_history(st.store.all())
             d = result.decision
             cmd = result.command
             elapsed = time.time() - t0
