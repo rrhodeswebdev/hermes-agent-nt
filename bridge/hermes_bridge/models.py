@@ -122,7 +122,10 @@ class Fill(FrozenModel):
     qty: int
     price: float
     ts: float
-    position_after: int = 0           # signed: + long, - short, 0 flat
+    # NinjaTrader's OWN signed position after this fill (strategy: SignedPosition()) — the
+    # authoritative book. None = the poster didn't report it (a hand-posted resync fill, or an
+    # older strategy build); it must NOT be read as a reported 0, which would flatten the book.
+    position_after: int | None = None  # signed: + long, - short, 0 flat
     realized_pnl_delta: float = 0.0   # realized P&L produced by this fill
 
 

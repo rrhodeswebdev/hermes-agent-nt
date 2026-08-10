@@ -76,9 +76,71 @@ def test_unrealized_pnl():
     assert s.unrealized_pnl(3999.0) == -50.0
 
 
+def test_open_position_survives_a_same_day_restart(tmp_path):
+    """A restart while HOLDING a position must come back holding it.
+
+    Live 2026-08-09: the bridge restarted 22s after a 4-lot long filled. position/avg_price were
+    in-memory only, so it came back reading flat while NinjaTrader held the contracts — and the
+    eventual exit fill was then applied as an OPENING fill, inverting the bridge into a phantom
+    SHORT 4 it would have marked, managed and journaled."""
+    sp = str(tmp_path / "session.json")
+    ts = 1_781_500_000.0
+    s1 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s1.maybe_roll_day(ts)
+    s1.apply_fill(Fill(side=Side.LONG, qty=4, price=4000.0, ts=ts))
+    assert s1.position == 4 and s1.avg_price == 4000.0
+
+    s2 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s2.maybe_roll_day(ts + 300)
+    assert s2.position == 4                      # exposure restored, not silently flat
+    assert s2.avg_price == 4000.0
+
+    # And the exit now nets to flat with the right P&L instead of opening a phantom short.
+    s2.apply_fill(Fill(side=Side.SHORT, qty=4, price=4002.0, ts=ts + 600))
+    assert s2.position == 0
+    assert round(s2.realized_pnl, 2) == 400.0    # 2 pts * $50 * 4
+
+
+def test_open_position_is_not_restored_across_a_day_roll(tmp_path):
+    """A position from a PRIOR trading day is stale by definition — never carry it forward."""
+    sp = str(tmp_path / "session.json")
+    ts = 1_781_500_000.0
+    s1 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s1.maybe_roll_day(ts)
+    s1.apply_fill(Fill(side=Side.LONG, qty=2, price=4000.0, ts=ts))
+    assert s1.position == 2
+
+    s2 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)
+    s2.maybe_roll_day(ts + 86_400 * 2)
+    assert s2.position == 0 and s2.avg_price == 0.0
+
+
+def test_fill_reconciles_position_to_ninjatrader_truth():
+    """NinjaTrader stamps every fill with its own signed position (`SignedPosition()`), which is
+    authoritative. When the bridge's derived position disagrees — a missed fill, or a restart
+    across an exit that filled while it was down — trust NT8 and snap to it."""
+    s = _session()
+    s.apply_fill(Fill(side=Side.LONG, qty=2, price=4000.0, ts=0, position_after=2))
+    assert s.position == 2
+
+    # NT8 says the book is FLAT after this fill (e.g. a bracket leg the bridge never saw
+    # closed the rest). The bridge would derive +1; NT8 wins.
+    s.apply_fill(Fill(side=Side.SHORT, qty=1, price=4004.0, ts=1, position_after=0))
+    assert s.position == 0
+    assert s.avg_price == 0.0
+
+
+def test_fill_without_position_after_is_not_reconciled():
+    """`position_after` is optional on the wire. An unreported value must NOT be read as a
+    reported 0 — that would flatten the book on every hand-posted resync fill."""
+    s = _session()
+    s.apply_fill(Fill(side=Side.LONG, qty=2, price=4000.0, ts=0))   # no position_after
+    assert s.position == 2                                          # derived, not snapped to 0
+
+
 def test_session_state_persists_and_restores_same_day(tmp_path):
     """A mid-day restart restores realized P&L + trade count from disk; a new day starts
-    clean. Position is never persisted (a clean restart is flat)."""
+    clean."""
     sp = str(tmp_path / "session.json")
     ts = 1_781_500_000.0  # some trading day D
     s1 = SessionState("ES", "5m", 0.25, 12.5, 500, 400, state_path=sp)

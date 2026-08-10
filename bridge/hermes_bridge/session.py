@@ -120,8 +120,7 @@ class SessionState:
         if self._day is None:
             self._day = key
             # Restore a mid-day restart's accounting — but ONLY for the same trading day
-            # (never carry yesterday's P&L into today). Position is not restored: a clean
-            # restart is flat and NinjaTrader's fills re-derive it.
+            # (never carry yesterday's P&L into today).
             if self._pending_restore is not None:
                 if self._pending_restore.get("day") == key.value:
                     self.realized_pnl = float(self._pending_restore.get("realized_pnl", 0.0))
@@ -132,6 +131,17 @@ class SessionState:
                     self.halt_reason = self._pending_restore.get("halt_reason", "") or ""
                     self.daily_goal_hit = bool(
                         self._pending_restore.get("daily_goal_hit", False))
+                    # Open exposure too. A restart while holding used to come back reading FLAT
+                    # while NinjaTrader still held the contracts, so the exit fill was applied as
+                    # an OPENING fill and inverted the book into a phantom opposite position
+                    # (live 2026-08-09, 4-lot long). Restoring is also the CONSERVATIVE error:
+                    # if NT8 actually flattened while we were down, a restored phantom only
+                    # BLOCKS new entries (the gate's flat-only check) instead of hiding real
+                    # exposure — and the next fill's position_after snaps it straight (apply_fill).
+                    self.position = int(self._pending_restore.get("position", 0))
+                    self.avg_price = float(self._pending_restore.get("avg_price", 0.0))
+                    ws = self._pending_restore.get("working_stop")
+                    self.working_stop = float(ws) if ws is not None else None
                 else:
                     # A PRIOR trading day's accounting survived on disk because the bridge was
                     # down across that day's roll (e.g. the Fri->Sun weekend), so the live fold
@@ -195,6 +205,12 @@ class SessionState:
                 "halted": self.halted,
                 "halt_reason": self.halt_reason,
                 "daily_goal_hit": self.daily_goal_hit,
+                # Open exposure, so a restart while HOLDING comes back holding (see
+                # maybe_roll_day). working_stop rides along because the RiskGate ratchets
+                # against it — restoring it keeps a stop from being widened after a restart.
+                "position": self.position,
+                "avg_price": self.avg_price,
+                "working_stop": self.working_stop,
             }), encoding="utf-8")
         except OSError:
             pass
@@ -243,7 +259,34 @@ class SessionState:
 
         if opening_from_flat and self.position != 0:
             self.trades_today += 1
+        self._reconcile_position(fill)
         self._persist()
+
+    def _reconcile_position(self, fill: Fill) -> None:
+        """Snap the book to NinjaTrader's own signed position when it disagrees with ours.
+
+        NT8 stamps every fill with `SignedPosition()` — the real book. Our value is DERIVED by
+        summing fills, so it drifts whenever one goes missing: a fill posted while the bridge was
+        down, a restart across an exit, a hand-posted resync. Trusting NT8 here makes every such
+        drift self-healing on the very next fill instead of compounding silently.
+
+        `position_after=None` means nobody reported it — leave the derived value alone."""
+        truth = fill.position_after
+        if truth is None or truth == self.position:
+            return
+        print(f"[session] position reconciled to NinjaTrader: {self.position} -> {truth} "
+              f"(fill {fill.side.value} {fill.qty} @ {fill.price})", flush=True)
+        if truth == 0:
+            self.position = 0
+            self.avg_price = 0.0
+            self.working_stop = None   # nothing rests once the book is flat
+            return
+        # Snapping onto real exposure we had not derived (a fill we never saw): this fill's
+        # price is the best cost basis available. An existing basis is kept — it came from
+        # fills we did see.
+        if self.position == 0 or (self.position > 0) != (truth > 0):
+            self.avg_price = fill.price
+        self.position = truth
 
     # ---- marks / goal -------------------------------------------------------
     def mark_bar(self, ts: float) -> None:
