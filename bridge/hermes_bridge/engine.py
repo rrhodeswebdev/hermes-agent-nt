@@ -51,6 +51,34 @@ from .store import BarStore
 _CONTEXT_WINDOW = 200  # bars handed to indicator/context building
 
 
+def setup_regime_mismatch(
+    setup: str | None,
+    roster: list[dict] | None,
+    live_regime: str | None,
+) -> str | None:
+    """The setup's DECLARED regime when it contradicts ``live_regime``, else None.
+
+    Every authored setup ships the regime it is for ({name, regime}); the armed trigger is
+    bound to one of them by name against that same roster, so this compares two FIELDS and
+    never reads a rationale. That is the whole point: the hard rule was already written down
+    and in the prompt, and the narrative talked past it anyway (see config.enforce_setup_regime).
+
+    Fails OPEN — an unknown setup, an untagged roster entry, or a missing live regime all
+    return None. A roster or plumbing gap must degrade to the previous behavior, never to a
+    silent trading halt."""
+    if not setup or not roster or not live_regime:
+        return None
+    want = setup.strip().lower()
+    for s in roster:
+        name = (s.get("name") or "").strip().lower()
+        if name and name == want:
+            declared = (s.get("regime") or "").strip().lower()
+            if not declared:
+                return None                      # untagged setup: nothing to contradict
+            return declared if declared != live_regime.strip().lower() else None
+    return None                                  # setup not on the roster: cannot judge
+
+
 def _delta_confirms(
     action: Action,
     delta_ratio: float,
@@ -389,6 +417,22 @@ class TradingEngine:
         if not suppressed_by and before in (Action.ENTER_LONG, Action.ENTER_SHORT) and (
                 decision.action == Action.WAIT):
             suppressed_by = "delta_floor"
+        # Setup/regime coherence: the armed setup declares the regime it is FOR; refuse to
+        # fire it into a regime its own roster entry contradicts. Fields only, never the
+        # rationale — the rule was already in the prompt and got narrated past six times.
+        if sp.enforce_setup_regime and decision.action in (
+                Action.ENTER_LONG, Action.ENTER_SHORT):
+            plan = self.planner.current_plan() if self.planner is not None else None
+            declared = setup_regime_mismatch(
+                getattr(plan, "active_strategy", None),
+                self.agent.generated_strategies(),
+                ctx.regime,
+            )
+            if declared is not None:
+                decision = Decision(action=Action.WAIT, rationale=(
+                    f"setup_regime_mismatch:{declared}!={ctx.regime}"))
+                if not suppressed_by:
+                    suppressed_by = "setup_regime"
 
         if decision.action == Action.WAIT:
             self._remember_decline(candidate, bar)

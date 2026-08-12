@@ -70,6 +70,19 @@ class RiskGate:
         )
 
 
+def sizing_confidence(cfg: BridgeConfig, confidence: float | None) -> float | None:
+    """The confidence the SIZING ladder may use — the real one, clamped to
+    ``risk.sizing_confidence_cap``.
+
+    Only ever lowers. The decision keeps its true confidence for gating, the journal and the
+    learning loop; this is purely about how many contracts conviction is allowed to buy.
+    See the config comment for the audit that motivated the cap."""
+    cap = cfg.risk.sizing_confidence_cap
+    if confidence is None or cap is None:
+        return confidence
+    return min(confidence, cap)
+
+
 def evaluate_risk(
     cfg: BridgeConfig,
     command: OrderCommand,
@@ -194,13 +207,18 @@ def evaluate_risk(
         # the full budget, bypassing the gate). size_for_confidence() returns the 1-contract
         # minimum when confidence is None, so that conservative floor is enforced server-side
         # for every entry path (engine, manual API, agent).
+        # The ladder reads the CAPPED confidence (risk.sizing_confidence_cap): conviction
+        # above the cap buys no extra size, because above it conviction stopped predicting.
+        sized_conf = sizing_confidence(cfg, confidence)
         qty = size_for_confidence(
-            confidence, budget_max,
+            sized_conf, budget_max,
             cfg.strategy.min_confidence, cfg.risk.full_size_confidence,
         )
         if qty >= 1:
             conf_str = f"{confidence:g}" if confidence is not None else "none"
             reasons.append(f"confidence_sized:{conf_str}->{qty}")
+            if sized_conf is not None and confidence is not None and sized_conf < confidence:
+                reasons.append(f"sizing_conf_capped:{confidence:g}->{sized_conf:g}")
     else:
         qty = min(requested, budget_max)
         if requested > cap:

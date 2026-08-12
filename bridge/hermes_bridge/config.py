@@ -85,6 +85,21 @@ class StrategyParams(BaseModel):
     # backtests that carry no order-flow data). Only enable where real bid/ask delta is
     # streamed (live NT8). Exits and position management are never gated.
     delta_floor: float = Field(default=0.0, ge=0.0)
+    # Setup/regime coherence. Every authored setup declares the regime it is FOR
+    # ({name, regime} on the roster), and the armed trigger is bound to one of them
+    # (plan.active_strategy). When this is on, an ENTRY whose setup's DECLARED regime
+    # contradicts the LIVE mechanical regime is suppressed (suppressed_by="setup_regime").
+    #
+    # This reads FIELDS ONLY — never the rationale. The 209-trade audit (2026-08-11) found
+    # the hard rule "continuation needs regime=trending" already written in distilled.md and
+    # in the prompt on every decision, yet talked past by the rationale narrative six times
+    # in one ETH cluster (29578.25, 29879.5, 28940.5, 29683.875, 29853.07, 29849.5). The
+    # brain grading its own coherence is the thing that failed; this grades it mechanically.
+    #
+    # Fails OPEN by design: an unknown setup, an untagged roster entry, or a missing live
+    # regime never vetoes, so a roster/plumbing gap degrades to today's behavior rather than
+    # halting all trading. False = neutral default. Exits are never gated.
+    enforce_setup_regime: bool = False
     # Stricter, delta-CONDITIONAL transitional gate (only consulted when wait_in_transitional
     # is False). When > 0 and the regime read is "transitional", an ENTRY fires only if
     # delta_ratio confirms direction at THIS floor (long >= +floor, short <= -floor) — a higher
@@ -196,6 +211,15 @@ class RiskParams(BaseModel):
     full_size_confidence: float = Field(  # confidence at/above which the full budget is used
         default=0.85, ge=0.0, le=1.0
     )
+    # Ceiling on the confidence used for SIZING (the decision's own confidence is untouched,
+    # so gating/journalling/learning still see the real number). The 209-trade audit
+    # (2026-08-11) found reported confidence ANTI-predictive at the top: conf >= 0.65 ran a
+    # 21.2% win rate for -$1,175.75 net over 33 trades — worse than the entire net loss —
+    # while <0.55, 0.55-0.59 and 0.60-0.64 were all positive. With confidence_sizing on, that
+    # means conviction was BUYING SIZE precisely where conviction is worthless. Capping here
+    # keeps the sizing ladder over the bands that earn it and flattens it above.
+    # None = neutral (no cap). Set it at/above strategy.min_confidence.
+    sizing_confidence_cap: float | None = Field(default=None, ge=0.0, le=1.0)
     # ---- Prop-firm trailing-drawdown (MLL) + account-scaled risk (opt-in; 2026-07-09 spec).
     #      All OFF by default so the base config / existing behavior is unchanged. ----
     # Enforce the account's trailing Max Loss Limit (drawdown): halt + flatten when live equity
