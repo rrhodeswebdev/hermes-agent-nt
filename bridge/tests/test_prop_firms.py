@@ -83,9 +83,11 @@ def test_apply_account_profile_sets_enforced_numbers(tmp_path, cfg):
     _, _, tier = find_account(cat, "Topstep", "Trading Combine", 50000)
     session = make_session(cfg)
     applied = apply_account_profile(cfg, session, tier)
-    assert cfg.risk.max_contracts == 5
-    assert cfg.daily_goal.max_daily_loss == 1000.0
-    assert session.max_daily_loss == 1000.0          # the running session sees it immediately
+    # The tier is a CEILING, never a floor: the fixture already configures a TIGHTER
+    # 2 contracts / $400 daily loss, and a user tightening must survive the profile.
+    assert cfg.risk.max_contracts == 2
+    assert cfg.daily_goal.max_daily_loss == 400.0
+    assert session.max_daily_loss == 400.0           # the running session sees it immediately
     # The informational numbers are returned for the UI but NOT enforced.
     assert applied["profit_target"] == 3000 and applied["trailing_drawdown"] == 2000
 
@@ -99,7 +101,7 @@ def test_apply_account_profile_null_daily_loss_left_untouched(tmp_path, cfg):
     apply_account_profile(cfg, session, tier)
     assert cfg.daily_goal.max_daily_loss == before   # unchanged (no firm daily limit)
     assert session.max_daily_loss == before
-    assert cfg.risk.max_contracts == 10              # but the contract ceiling still applies
+    assert cfg.risk.max_contracts == 2               # the tighter configured ceiling wins
 
 
 def test_apply_sets_daily_profit_target_from_consistency(tmp_path, cfg):
@@ -257,7 +259,7 @@ def test_post_account_profile_applies_persists_and_surfaces(tmp_path):
     health = c.get("/health").json()["account_profile"]
     assert health["prop_firm"] == "Topstep" and health["context_file"] == "topstep.md"
     goal = c.get("/dashboard").json()["goal"]
-    assert goal["max_daily_loss"] == 1000
+    assert goal["max_daily_loss"] == 400   # tier is a ceiling; the tighter config wins
     # Persisted to the sibling local file.
     local = yaml.safe_load((tmp_path / "trading.local.yaml").read_text(encoding="utf-8"))
     assert local["account_profile"]["prop_firm"] == "Topstep"
@@ -280,8 +282,8 @@ def test_startup_seeds_configured_profile(tmp_path):
     cfg.account_profile.account_size = 50000
     app = create_app(cfg, config_path=path)
     st = app.state.appstate
-    assert st.cfg.risk.max_contracts == 5
-    assert st.cfg.daily_goal.max_daily_loss == 1000
+    assert st.cfg.risk.max_contracts == 2  # tier is a ceiling; the tighter config wins
+    assert st.cfg.daily_goal.max_daily_loss == 400
     assert st.agent.prop_firm_context() == "topstep.md"
 
 
@@ -296,7 +298,7 @@ def test_ingest_account_applies_prop_firm_without_persisting(tmp_path):
     assert r["account_profile"]["prop_firm"] == "Topstep"
     # Enforced numbers applied + firm context loaded (visible on /health + /dashboard).
     assert c.get("/health").json()["account_profile"]["context_file"] == "topstep.md"
-    assert c.get("/dashboard").json()["goal"]["max_daily_loss"] == 1000
+    assert c.get("/dashboard").json()["goal"]["max_daily_loss"] == 400
     # NOT persisted — a reported (chart) selection is runtime state, like the account name.
     assert not (tmp_path / "trading.local.yaml").exists()
 
@@ -329,4 +331,44 @@ def test_ingest_account_resend_same_is_noop(tmp_path):
     assert c.post("/ingest/account", json=body).json()["account_profile"]["prop_firm"] == "Topstep"
     # Re-reporting the identical selection (every reconnect does) is safe + stays applied.
     assert c.post("/ingest/account", json=body).json()["account_profile"]["prop_firm"] == "Topstep"
-    assert c.get("/dashboard").json()["goal"]["max_daily_loss"] == 1000
+    assert c.get("/dashboard").json()["goal"]["max_daily_loss"] == 400
+
+
+# ---- the tier is a CEILING, not an override -------------------------------
+def test_tier_caps_a_looser_configured_daily_loss(tmp_path, cfg):
+    # Configured LOOSER than the firm allows → the firm's hard limit binds.
+    cat = load_catalog(_catalog_file(tmp_path))
+    _, _, tier = find_account(cat, "Topstep", "Trading Combine", 50000)
+    cfg.daily_goal.max_daily_loss = 2000.0
+    session = make_session(cfg)
+    apply_account_profile(cfg, session, tier)
+    assert cfg.daily_goal.max_daily_loss == 1000.0
+    assert session.max_daily_loss == 1000.0
+
+
+def test_tier_caps_a_looser_configured_contract_ceiling(tmp_path, cfg):
+    cat = load_catalog(_catalog_file(tmp_path))
+    _, _, tier = find_account(cat, "Topstep", "Trading Combine", 50000)
+    cfg.risk.max_contracts = 40
+    apply_account_profile(cfg, make_session(cfg), tier)
+    assert cfg.risk.max_contracts == 5
+
+
+def test_profit_target_stays_tier_driven_but_warns_when_overridden(tmp_path, cfg):
+    # A PROFIT target is not a risk control — a lower one just halts a winning day early,
+    # and 0.5 x 3000 = 1500 is the firm's consistency-rule math. So the tier still wins,
+    # but the silent replacement of a configured value must be VISIBLE.
+    cat = load_catalog(_catalog_file(tmp_path))
+    _, _, tier = find_account(cat, "Topstep", "Trading Combine", 50000)
+    cfg.daily_goal.profit_target = 500.0
+    apply_account_profile(cfg, make_session(cfg), tier)
+    assert cfg.daily_goal.profit_target == 1500.0
+    assert any("profit_target" in w for w in cfg.config_warnings)
+
+
+def test_no_warning_when_profit_target_already_matches_the_tier(tmp_path, cfg):
+    cat = load_catalog(_catalog_file(tmp_path))
+    _, _, tier = find_account(cat, "Topstep", "Trading Combine", 50000)
+    cfg.daily_goal.profit_target = 1500.0
+    apply_account_profile(cfg, make_session(cfg), tier)
+    assert not any("profit_target" in w for w in cfg.config_warnings)

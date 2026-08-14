@@ -134,9 +134,15 @@ def apply_account_profile(
 ) -> dict:
     """Write the tier's enforceable numbers into the live config (and the running session).
 
-    Sets ``cfg.risk.max_contracts`` and ``cfg.daily_goal.max_daily_loss`` from the tier's
+    Caps ``cfg.risk.max_contracts`` and ``cfg.daily_goal.max_daily_loss`` at the tier's
     non-null values, and mirrors the daily loss onto ``session.max_daily_loss`` so the live
     daily-goal check uses it immediately (SessionState holds its own copy, seeded at startup).
+
+    ⚠ These take ``min(configured, tier)`` — the firm's number is a CEILING, never a floor.
+    Writing it in unconditionally meant a user who deliberately set a STRICTER limit silently
+    got the looser firm one: on 2026-08-12 a configured $500 daily stop was being enforced at
+    $1,200 (2.4x looser) with nothing in ``config_warnings`` to show it. You can never exceed
+    the firm's rule, and any tightening you configured survives.
 
     When the tier carries both a ``consistency_pct`` and a ``profit_target``, also sets the daily
     PROFIT target to ``consistency_pct × profit_target`` — the largest equal-day bank that still
@@ -146,14 +152,24 @@ def apply_account_profile(
 
     Returns the numbers that were applied (and the informational ones) for logging/UI."""
     if tier.max_contracts is not None:
-        cfg.risk.max_contracts = int(tier.max_contracts)
+        cfg.risk.max_contracts = min(cfg.risk.max_contracts, int(tier.max_contracts))
     if tier.max_daily_loss is not None:
-        cfg.daily_goal.max_daily_loss = float(tier.max_daily_loss)
+        limit = min(cfg.daily_goal.max_daily_loss, float(tier.max_daily_loss))
+        cfg.daily_goal.max_daily_loss = limit
         if session is not None:
-            session.max_daily_loss = float(tier.max_daily_loss)
+            session.max_daily_loss = limit
     daily_profit_target: float | None = None
     if tier.consistency_pct is not None and tier.profit_target is not None:
         daily_profit_target = round(tier.consistency_pct * tier.profit_target, 2)
+        # A profit target is NOT a risk control, so the firm's consistency math still wins
+        # (a lower one only halts a winning day early). But replacing a configured value
+        # silently is what made the daily-loss override invisible — so say so out loud.
+        if cfg.daily_goal.profit_target != daily_profit_target:
+            cfg.config_warnings.append(
+                f"daily_goal.profit_target: configured {cfg.daily_goal.profit_target:g} "
+                f"replaced by {daily_profit_target:g} from the "
+                f"{tier.consistency_pct:g} x {tier.profit_target:g} firm consistency rule"
+            )
         cfg.daily_goal.profit_target = daily_profit_target
         if session is not None:
             session.profit_target = daily_profit_target
