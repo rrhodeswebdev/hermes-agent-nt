@@ -636,7 +636,11 @@ def create_app(config: BridgeConfig | None = None, config_path: str | None = Non
         if len(st.store) < HISTORY_MIN_BARS:
             d = d.model_copy(update={"need_history": True})
         queued = f"QUEUED:{cmd.action} qty={cmd.qty}" if cmd is not None else "no-order"
-        why = f" reasons={result.risk_reasons}" if cmd is None and result.risk_reasons else ""
+        # Reasons print for APPROVED orders too, not just vetoes. Gating this on `cmd is
+        # None` made every approved-order reason invisible in serve.out — and a sizing clamp
+        # (sizing_conf_capped) ONLY ever happens on an approved order, so it could never be
+        # observed at all. The decline log still covers the veto side.
+        why = f" reasons={result.risk_reasons}" if result.risk_reasons else ""
         print(f"[decision] close={bar.close} {d.action} [{result.mode}] "
               f"conf={d.confidence:.2f} lat={elapsed:.1f}s -> {queued}{why} | {d.rationale[:160]}",
               flush=True)

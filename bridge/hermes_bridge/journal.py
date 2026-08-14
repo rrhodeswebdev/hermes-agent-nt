@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .indicators import MarketContext
@@ -36,6 +36,11 @@ class ClosedTrade:
     confidence: float = 0.0  # the entry decision's confidence (to study conf vs outcome)
     stop_price: float = 0.0   # the trade's original protective stop (0.0 if unattributed)
     target_price: float = 0.0  # the trade's original target (0.0 if unattributed)
+    # The RiskGate's reasons for the ENTRY it approved (e.g. "confidence_sized:0.68->3",
+    # "sizing_conf_capped:0.68->0.62"). Reasons on an APPROVED order never reach the decline
+    # log — that only records vetoes — so without this the learning loop cannot tell which
+    # trades a sizing clamp touched, which is the one thing a calibration lever needs scored.
+    risk_reasons: list[str] = field(default_factory=list)
 
     def to_record(self) -> dict:
         return {
@@ -46,6 +51,7 @@ class ClosedTrade:
             "confidence": self.confidence,
             "stop_price": self.stop_price, "target_price": self.target_price,
             "entry_context": self.entry_context, "rationale": self.rationale,
+            "risk_reasons": self.risk_reasons,
         }
 
 
@@ -57,10 +63,12 @@ class TradeTracker:
 
     def on_entry(self, *, ts: float, side: Side, qty: int, price: float,
                  context: MarketContext, rationale: str, confidence: float = 0.0,
-                 stop_price: float = 0.0, target_price: float = 0.0) -> None:
+                 stop_price: float = 0.0, target_price: float = 0.0,
+                 risk_reasons: list[str] | None = None) -> None:
         self._e = {"ts": ts, "side": side, "qty": qty, "price": price,
                    "context": context, "rationale": rationale, "confidence": confidence,
                    "stop_price": stop_price, "target_price": target_price,
+                   "risk_reasons": list(risk_reasons or []),
                    "bars_held": 0, "mfe": 0.0, "mae": 0.0}
 
     def note_scale(self, *, qty: int, avg_price: float) -> None:
@@ -107,6 +115,7 @@ class TradeTracker:
             confidence=round(float(e.get("confidence", 0.0)), 3),
             stop_price=round(float(e.get("stop_price", 0.0)), 4),
             target_price=round(float(e.get("target_price", 0.0)), 4),
+            risk_reasons=list(e.get("risk_reasons") or []),
         )
         self._e = None
         return trade

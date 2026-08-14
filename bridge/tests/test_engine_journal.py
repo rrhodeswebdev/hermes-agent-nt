@@ -233,3 +233,38 @@ def test_pending_entry_guard_expires_so_it_cannot_wedge_entries(cfg):
     eng._expire_pending_entry(bars[-1].ts + 86_400.0)       # long past any plausible fill
     assert eng.session.pending_entry_qty == 0
     assert eng._pending_entry is None
+
+
+def test_engine_journals_the_gates_reasons_for_the_entry(cfg, tmp_path):
+    # The whole point of persisting these: a sizing clamp is invisible otherwise, because
+    # reasons on an APPROVED order never reach the decline log.
+    js = JournalStore(str(tmp_path / "j.jsonl"))
+    eng = _engine(cfg, js)
+    bars = synthetic_bars(60)
+    for b in bars:
+        eng.store.append(b)
+    ctx = build_context(bars, atr_period=14)
+    entry_px = bars[-1].close
+    eng._pending_entry = {
+        "cmd_id": "test-1", "ts": bars[-1].ts, "side": Side.LONG,
+        "context": ctx, "rationale": "test entry",
+        "risk_reasons": ["confidence_sized:0.68->3", "sizing_conf_capped:0.68->0.62"],
+    }
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=entry_px, ts=bars[-1].ts))
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=entry_px + 3, ts=bars[-1].ts + 600))
+    recs = js.all()
+    assert recs[0]["risk_reasons"] == [
+        "confidence_sized:0.68->3", "sizing_conf_capped:0.68->0.62"]
+
+
+def test_unattributed_fill_journals_empty_reasons(cfg, tmp_path):
+    # No pending memo (a hand-posted resync fill) must not explode or invent reasons.
+    js = JournalStore(str(tmp_path / "j.jsonl"))
+    eng = _engine(cfg, js)
+    bars = synthetic_bars(60)
+    for b in bars:
+        eng.store.append(b)
+    eng.on_bar(bars[-1])
+    eng.on_fill(Fill(side=Side.LONG, qty=1, price=bars[-1].close, ts=bars[-1].ts))
+    eng.on_fill(Fill(side=Side.SHORT, qty=1, price=bars[-1].close + 1, ts=bars[-1].ts + 600))
+    assert js.all()[0]["risk_reasons"] == []

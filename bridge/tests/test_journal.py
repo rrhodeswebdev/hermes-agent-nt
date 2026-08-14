@@ -86,3 +86,22 @@ def test_tracker_confidence_defaults_zero_when_absent():
     assert trade is not None
     assert trade.confidence == 0.0
     assert "confidence" in trade.to_record()
+
+
+# ---- RiskGate reasons are journaled -----------------------------------------
+def test_risk_reasons_default_to_empty():
+    assert _trade().risk_reasons == []
+    assert _trade().to_record()["risk_reasons"] == []
+
+
+def test_tracker_carries_risk_reasons_onto_the_closed_trade():
+    # sizing_conf_capped only ever occurs on an APPROVED order, so it never reaches the
+    # decline log. Without this the learning loop cannot tell a capped trade from any other.
+    reasons = ["confidence_sized:0.68->3", "sizing_conf_capped:0.68->0.62"]
+    t = TradeTracker()
+    ctx = build_context(synthetic_bars(60), atr_period=14)
+    t.on_entry(ts=1.0, side=Side.LONG, qty=3, price=100.0, context=ctx,
+               rationale="r", risk_reasons=reasons)
+    trade = t.on_exit(ts=2.0, price=101.0, realized_pnl=6.0)
+    assert trade.risk_reasons == reasons
+    assert trade.to_record()["risk_reasons"] == reasons

@@ -198,3 +198,26 @@ def test_decisions_ring_snapshot_is_thread_safe(cfg):
         stop.set()
         t.join(timeout=2)
     assert not errors, f"dashboard snapshot raced with the writer: {errors[0]!r}"
+
+
+def test_decision_log_shows_risk_reasons_for_an_APPROVED_order(cfg, capsys):
+    # server.py used to print reasons only when the order was REJECTED (`cmd is None`),
+    # which made every approved-order reason structurally invisible in serve.out —
+    # `sizing_conf_capped` only ever occurs on an approved order, so it could never show up.
+    from hermes_bridge.models import Action, Decision
+
+    cfg.planner.enabled = False  # take the direct brain path, not the pre-armed plan cycle
+    app = create_app(cfg)
+    st = app.state.appstate
+    c = TestClient(app)
+    bars = synthetic_bars(60)
+    c.post("/ingest/history", json={"instrument": "ES", "timeframe": "5m",
+                                    "bars": [b.model_dump() for b in bars]})
+    st.engine.agent.decide = lambda req: Decision(
+        action=Action.ENTER_LONG, confidence=0.9, rationale="forced entry", stop_ticks=8)
+    capsys.readouterr()  # drop everything printed during setup
+    c.post("/ingest/bar", json={"instrument": "ES", "timeframe": "5m",
+                                "bar": bars[-1].model_dump()})
+    out = capsys.readouterr().out
+    assert "QUEUED:ENTER_LONG" in out          # the order really was approved...
+    assert "reasons=" in out                   # ...and the gate's reasons are visible anyway

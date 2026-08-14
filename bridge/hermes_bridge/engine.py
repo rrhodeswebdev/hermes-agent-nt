@@ -474,6 +474,10 @@ class TradingEngine:
                     # Absolute (stop, target) for the exit-replay (learning.exit_replays_enabled):
                     # the trade's original bracket, scored against later bars when it closes.
                     "brackets": self._command_brackets(rd.command, bar.close),
+                    # What the gate DID to this entry (sizing ladder, confidence clamp, ...).
+                    # Approved-order reasons never reach the decline log, so this memo is the
+                    # only path by which the learning loop can see them. Journaled on fill.
+                    "risk_reasons": list(rd.reasons or []),
                 }
             result = EngineResult(decision, rd.command if rd.approved else None, mode,
                                   rd.reasons)
@@ -971,6 +975,7 @@ class TradingEngine:
                     else "unattributed_fill (no matching pending entry)",
                     confidence=p.get("confidence", 0.0) if p is not None else 0.0,
                     stop_price=sp, target_price=tp,
+                    risk_reasons=p.get("risk_reasons") if p is not None else None,
                 )
             self._pending_entry = None  # consumed or invalidated either way
         elif (before_pos != 0 and abs(after_pos) > abs(before_pos)
