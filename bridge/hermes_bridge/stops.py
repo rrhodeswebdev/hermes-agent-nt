@@ -25,6 +25,8 @@ Nothing here executes orders or reads I/O; the RiskGate and the engine call into
 
 from __future__ import annotations
 
+import math
+
 from .config import BridgeConfig
 from .models import Side
 
@@ -156,6 +158,28 @@ def tightest_stop(side: Side | str, levels: list[float | None]) -> float | None:
     return min(present)
 
 
+def commission_breakeven_offset(cfg: BridgeConfig) -> float:
+    """Points of favorable movement a trade must hold to cover its OWN round-trip commission.
+
+    Price-breakeven (the stop resting exactly at entry) is a guaranteed NET LOSS: the trade
+    returns $0.00 gross and still pays both commission legs. Observed live 2026-08-12 — a
+    3-lot exited at exactly its entry for -$3.90 after peaking +$58.50.
+
+    Commission is ``2 x rate x qty`` and P&L is ``points x point_value x qty``, so qty
+    cancels: the offset is ``2 x rate / point_value``, the same for every size.
+
+    ROUNDED UP to a whole tick, because the result must be a tradeable price. Rounding down
+    would place the stop INSIDE the commission it exists to clear (on MNQ 0.65pt is 2.6
+    ticks; 2 ticks = $3.00 on 3 lots against $3.90 of commission). 0.0 when no rate is
+    configured, which keeps the legacy "breakeven == entry" behavior exactly."""
+    rate = cfg.execution.commission_per_contract
+    tick = cfg.instrument.tick_size or 0.25
+    point_value = (cfg.instrument.tick_value or 0.0) / tick
+    if rate <= 0 or point_value <= 0:
+        return 0.0
+    return math.ceil((2.0 * rate / point_value) / tick) * tick
+
+
 def managed_stop_price(
     *,
     side: Side,
@@ -188,13 +212,21 @@ def managed_stop_price(
     if mfe < be_r * one_r:
         return None  # not yet +1R — pre-managed phase, bracket/structural exit protect it
     trail = cfg.strategy.trail_enabled
+    be_offset = commission_breakeven_offset(cfg)
+    giveback = cfg.strategy.giveback_cap_pct
     if side == Side.LONG:
-        level = entry  # breakeven
+        level = entry + be_offset  # breakeven, clearing this trade's own commission
+        if giveback > 0 and mfe > 0:
+            # Hand back at most `giveback` of the peak — ratchets UP as MFE grows. Never
+            # loosens past the commission floor above.
+            level = max(level, entry + (1.0 - giveback) * mfe)
         if trail and swing_low is not None and swing_low > level:
             level = swing_low  # trail up behind the higher-low (lock in profit)
         return level
     # SHORT — the stop sits above; breakeven then trails DOWN behind the lower-high.
-    level = entry
+    level = entry - be_offset
+    if giveback > 0 and mfe > 0:
+        level = min(level, entry - (1.0 - giveback) * mfe)
     if trail and swing_high is not None and swing_high < level:
         level = swing_high
     return level

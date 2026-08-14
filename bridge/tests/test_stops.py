@@ -1,6 +1,12 @@
 """Stop-placement + trade-management policy (stops.py): the risk rework's pure core."""
 
-from hermes_bridge.config import BridgeConfig, InstrumentConfig, RiskParams, StrategyParams
+from hermes_bridge.config import (
+    BridgeConfig,
+    ExecutionConfig,
+    InstrumentConfig,
+    RiskParams,
+    StrategyParams,
+)
 from hermes_bridge.models import Side
 from hermes_bridge.stops import (
     atr_band_stop_ticks,
@@ -127,3 +133,75 @@ def test_managed_needs_initial_stop():
         side=Side.LONG, entry=100.0, initial_stop_ticks=None, mfe=99.0,
         swing_low=None, swing_high=None, cfg=cfg,
     ) is None
+
+
+# --------------------------------------------------------------------------- #
+# Commission-aware breakeven + give-back cap                                    #
+# --------------------------------------------------------------------------- #
+def _managed_c(side, mfe, *, commission=0.0, swing_low=None, swing_high=None, **strat):
+    """managed_stop_price with a commission rate in play. point_value = 0.50/0.25 = $2/pt,
+    so a $0.65/contract/side rate costs 2 * 0.65 / 2.0 = 0.65 pts round-trip — which is
+    2.6 ticks, so the offset rounds UP to a whole 3 ticks (0.75pt). Rounding DOWN would
+    leave the stop short of commission after NinjaTrader snaps it to the tick grid."""
+    base = dict(atr_period=14, atr_stop_mult=1.5, atr_target_mult=2.0)
+    base.update(strat)
+    cfg = BridgeConfig(
+        instrument=InstrumentConfig(symbol="MNQ", tick_size=0.25, tick_value=0.50),
+        strategy=StrategyParams(**base),
+        execution=ExecutionConfig(commission_per_contract=commission),
+    )
+    return managed_stop_price(
+        side=side, entry=100.0, initial_stop_ticks=8, mfe=mfe,
+        swing_low=swing_low, swing_high=swing_high, cfg=cfg,
+    )  # 8 ticks * 0.25 = 2.0 pts = 1R
+
+
+def test_breakeven_clears_commission_for_a_long():
+    # Price-breakeven (entry) is a GUARANTEED NET LOSS once commission is paid. The stop
+    # must sit a round-trip's worth of commission ABOVE entry for a long.
+    assert _managed_c(Side.LONG, mfe=2.0, commission=0.65, breakeven_r=1.0) == 100.75
+
+
+def test_breakeven_clears_commission_for_a_short():
+    assert _managed_c(Side.SHORT, mfe=2.0, commission=0.65, breakeven_r=1.0) == 99.25
+
+
+def test_commission_breakeven_offset_lands_on_the_tick_grid():
+    # 0.65pt is 2.6 ticks. A stop must be a tradeable price, and rounding DOWN (2 ticks =
+    # 0.50pt = $3.00 on 3 lots) would sit UNDER the $3.90 commission it exists to clear.
+    lvl = _managed_c(Side.LONG, mfe=2.0, commission=0.65, breakeven_r=1.0)
+    assert (lvl - 100.0) / 0.25 == 3.0
+
+
+def test_breakeven_is_entry_when_commission_is_zero():
+    # Legacy behavior preserved: no commission configured => breakeven is exactly entry.
+    assert _managed_c(Side.LONG, mfe=2.0, commission=0.0, breakeven_r=1.0) == 100.0
+
+
+def test_giveback_cap_off_by_default():
+    # Default 0.0 => no give-back level, breakeven behavior unchanged.
+    assert _managed_c(Side.LONG, mfe=20.0, breakeven_r=1.0) == 100.0
+
+
+def test_giveback_cap_rests_at_the_retained_fraction_of_peak():
+    # 40% cap => keep 60% of a 20pt peak => stop rests 12pt above entry.
+    assert _managed_c(Side.LONG, mfe=20.0, breakeven_r=1.0, giveback_cap_pct=0.40) == 112.0
+
+
+def test_giveback_cap_short_mirror():
+    assert _managed_c(Side.SHORT, mfe=20.0, breakeven_r=1.0, giveback_cap_pct=0.40) == 88.0
+
+
+def test_giveback_cap_never_sits_below_the_commission_breakeven_floor():
+    # A tiny peak: 60% of 1.0pt = 0.6pt, which is INSIDE the 0.75pt commission floor.
+    # The floor must win, otherwise the stop locks a guaranteed net loss.
+    lvl = _managed_c(Side.LONG, mfe=1.0, commission=0.65, breakeven_r=0.4,
+                     giveback_cap_pct=0.40)
+    assert lvl == 100.75
+
+
+def test_giveback_cap_wins_over_a_looser_swing_trail():
+    # Swing trail says 101, give-back says 112 → the tighter (higher for a long) wins.
+    lvl = _managed_c(Side.LONG, mfe=20.0, swing_low=101.0, breakeven_r=1.0,
+                     trail_enabled=True, giveback_cap_pct=0.40)
+    assert lvl == 112.0

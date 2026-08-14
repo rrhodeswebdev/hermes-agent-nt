@@ -61,6 +61,17 @@ strategy:
   #     in the journal). Set breakeven_r: 0 to revert to a static bracket.
   breakeven_r: 1.0      # pull the stop to breakeven once favorable excursion reaches 1.0 * stop
   trail_enabled: true   # then trail behind the higher-low (long) / lower-high (short)
+  # --- GIVE-BACK CAP: the fraction of PEAK favorable excursion a trade may hand back before
+  #     the managed stop takes it out. The stop rests at entry + (1 - pct) x MFE for a long,
+  #     so it ratchets UP as the peak grows. 0.0 = off (neutral default); 0.40 keeps 60% of
+  #     the peak. Needs breakeven_r > 0 (it lives inside the managed phase). Measured
+  #     2026-08-12 ETH: $239 of peak unrealized became -$117.80 net (capture -40.6%) with 6
+  #     of 7 trades going green — the give-back, not entry selection, was the constraint.
+  giveback_cap_pct: 0.0
+  # --- Breakeven clears COMMISSION automatically (execution.commission_per_contract): a stop
+  #     resting exactly at entry returns $0.00 gross and still pays both legs, which is a
+  #     guaranteed NET loss. The offset is 2 x rate / point_value, rounded UP to a whole tick.
+  #     At commission 0 this is 0 and breakeven is exactly entry, as before.
   # --- Rest the armed exit level in NinjaTrader as a REAL stop, this many ticks BEYOND it.
   #     Both discretionary exits (the plan's ExitRule and the breakeven/trail stop above) are
   #     tested once per bar CLOSE, and the bridge only sees completed bars — so between two

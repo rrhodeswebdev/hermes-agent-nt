@@ -152,6 +152,14 @@ class StrategyParams(BaseModel):
     # stops.managed_stop_price.
     breakeven_r: float = Field(default=0.0, ge=0.0)
     trail_enabled: bool = False
+    # GIVE-BACK CAP — the fraction of peak favorable excursion a trade may hand back before
+    # the managed stop takes it out. 0.40 means "keep 60% of the peak": the stop rests at
+    # entry + (1 - pct) x MFE for a long, so it RATCHETS UP as the peak grows. 0.0 = off
+    # (neutral default). Operates inside the managed phase, so it needs breakeven_r > 0.
+    # Motivated by the 2026-08-12 ETH session: $239 of peak unrealized returned -$117.80 net
+    # (capture -40.6%) with 6 of 7 trades going green — the give-back, not entry selection,
+    # was the binding constraint. See stops.managed_stop_price.
+    giveback_cap_pct: float = Field(default=0.0, ge=0.0, lt=1.0)
     # SHADOW breakeven-tuning (evidence-only — NO live order change). When > 0, every CLOSED
     # trade whose entry regime is "transitional" is scored against a tighter breakeven arming at
     # this many R (vs the live +1R manager): a kind="shadow_breakeven" record lands in the decline
