@@ -105,6 +105,17 @@ class TradeTracker:
         e = self._e
         if e is None:
             return None
+        # Fold the EXIT FILL into the excursion. on_bar is only driven while the position is
+        # open, so an INTRABAR fill (a target limit or a stop) closes the trade before the bar
+        # it landed on ever reaches the tracker — and for a target fill that is precisely the
+        # bar carrying the largest favorable move. Left out, all 175 journalled trades that
+        # demonstrably exited AT their target recorded an mfe BELOW the target distance they
+        # had just reached, understating the peak on 46% of records by ~5pt and making
+        # give-back look smaller than it was. Only ever widens: a worse exit cannot shrink a
+        # peak an earlier bar already proved.
+        exc = (price - e["price"]) if e["side"] == Side.LONG else (e["price"] - price)
+        e["mfe"] = max(e["mfe"], exc)
+        e["mae"] = min(e["mae"], exc)
         ctx: MarketContext = e["context"]
         trade = ClosedTrade(
             entry_ts=e["ts"], exit_ts=ts, side=str(e["side"]).split(".")[-1], qty=e["qty"],

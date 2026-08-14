@@ -105,3 +105,40 @@ def test_tracker_carries_risk_reasons_onto_the_closed_trade():
     trade = t.on_exit(ts=2.0, price=101.0, realized_pnl=6.0)
     assert trade.risk_reasons == reasons
     assert trade.to_record()["risk_reasons"] == reasons
+
+
+# ---- the exit fill counts toward the excursion ------------------------------
+def _tracked(side, entry, bar_hi, bar_lo, exit_px):
+    """Open a trade, show it ONE bar, then exit at exit_px."""
+    t = TradeTracker()
+    ctx = build_context(synthetic_bars(60), atr_period=14)
+    t.on_entry(ts=1.0, side=side, qty=1, price=entry, context=ctx, rationale="r")
+    t.on_bar(Bar(ts=2.0, open=entry, high=bar_hi, low=bar_lo, close=entry, volume=1.0))
+    return t.on_exit(ts=3.0, price=exit_px, realized_pnl=0.0)
+
+
+def test_mfe_includes_the_exit_fill_for_a_long():
+    # engine.on_bar only feeds the tracker while position != 0, so the bar an INTRABAR
+    # fill lands on is never seen — and for a target fill that is exactly the bar with the
+    # biggest favorable move. Every one of 175 journalled target-fills had mfe BELOW the
+    # target distance it demonstrably reached, which is impossible.
+    trade = _tracked(Side.LONG, 100.0, bar_hi=102.0, bar_lo=99.0, exit_px=110.0)
+    assert trade.mfe == 10.0     # the fill itself, not the last bar the tracker saw
+
+
+def test_mfe_includes_the_exit_fill_for_a_short():
+    trade = _tracked(Side.SHORT, 100.0, bar_hi=101.0, bar_lo=98.0, exit_px=90.0)
+    assert trade.mfe == 10.0
+
+
+def test_mae_includes_the_exit_fill():
+    # The same truncation hid stop fills from MAE.
+    trade = _tracked(Side.LONG, 100.0, bar_hi=102.0, bar_lo=99.0, exit_px=95.0)
+    assert trade.mae == -5.0
+
+
+def test_a_worse_exit_never_shrinks_a_peak_already_seen():
+    # Exiting below the bar's high must not pull mfe down to the exit.
+    trade = _tracked(Side.LONG, 100.0, bar_hi=108.0, bar_lo=99.0, exit_px=101.0)
+    assert trade.mfe == 8.0
+    assert trade.mae == -1.0
