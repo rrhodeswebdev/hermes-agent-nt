@@ -41,3 +41,13 @@ hermes/learned/.history/
 hermes/learned/archive/
 hermes/learned/distilled.md
 hermes/learned/day-reviews.md
+
+# Bridge runtime logs — the full decision/order/P&L stream (serve.out runs to tens of MB and
+# carries the same trade detail as the journal). Local only, same as bridge/state/.
+bridge/serve.out
+bridge/serve.err
+
+# Cross-dev comparison drops — someone else's config and blotter, plus our reply. Not ours to
+# publish, and not needed to build anything.
+from_dev/
+to_dev/
