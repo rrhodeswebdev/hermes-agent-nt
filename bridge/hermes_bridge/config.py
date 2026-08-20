@@ -198,6 +198,19 @@ class RiskParams(BaseModel):
     # Injected only if a decision lacks a stop. Kept within max_risk_per_trade for a
     # single contract (16 ticks * $12.50 = $200 < $250) so the safety net is usable.
     default_stop_ticks: int = Field(default=16, ge=1)
+    # Minimum clearance a WORKING-stop amendment must leave between its level and the last
+    # price, in ticks. The gate only ever sees a COMPLETED bar, but the amendment executes
+    # against the live book some hundreds of ms later, so a level that clears the bar close
+    # by a tick can still land on the wrong side of the market and be REJECTED. That is not
+    # a benign no-op: NinjaTrader's ErrorHandling cancels the bracket, DISABLES the strategy
+    # and force-flattens mid-trade (live 2026-08-20 18:52 ET, MNQ: level 29320.75 vs close
+    # 29321.00 vs market 29319). A stop crowding price is an exit anyway, and exits belong
+    # on the exit path. 0 restores the legacy behavior (reject only when already through).
+    # 2 ticks is deliberately modest: the live level crowded the close by exactly ONE tick,
+    # while a genuine breakeven/trail amendment sits ~1R below it, so this catches the
+    # razor-edge cases without suppressing normal tightening. It narrows the window rather
+    # than closing it -- only the strategy, which sees the live book, can do that outright.
+    amend_stop_clearance_ticks: int = Field(default=2, ge=0)
     # ATR-regime risk scaling. When the current ATR is >= strategies.reauthor.shock_ratio ×
     # the longer-window baseline ATR (a volatility spike — the SAME shock the re-author
     # governor reacts to), the per-trade dollar budget is multiplied by this factor (e.g.

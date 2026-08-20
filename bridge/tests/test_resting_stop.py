@@ -320,3 +320,31 @@ def test_engine_amendment_is_surfaced_on_the_bar_result():
     assert result.decision.action == Action.WAIT          # the exit did NOT fire
     assert [c.action for c in result.extra_commands] == [Action.AMEND_STOP]
     assert result.extra_commands[0].stop_price == 4982.0
+
+
+def test_amend_stop_is_rejected_when_it_crowds_the_last_price(cfg):
+    """A level that clears the bar close by a tick still executes against the LIVE market.
+
+    Live incident 2026-08-20 18:52 ET (MNQ, day 739849). A long 3 @ 29312.75 peaked at
+    29326.00 (MFE 13.25pt), so the give-back cap asked for entry + 0.60 * mfe = 29320.75.
+    The gate compared that to the BAR CLOSE (29321.00) and approved it by exactly one tick.
+    By the time the amendment reached NinjaTrader the market was 29319 — the level was 1.75
+    points ABOVE it — and NT8 rejected it with "Stop price can't be changed above the
+    market." A rejected order is not a benign no-op there: `ErrorHandling=Stop strategy,
+    cancel orders, close positions` cancelled the bracket, DISABLED the strategy and
+    force-flattened at market mid-trade.
+
+    The gate only ever sees a completed bar, so it must leave room for the drift between
+    that close and the live book: a stop that crowds the close is an exit, not a stop.
+    """
+    s = _session(cfg)
+    s.position = 3
+    s.avg_price = 29312.75
+    s.working_stop = 29303.25
+    rd = RiskGate(cfg).evaluate(
+        OrderCommand(id="a6", strategy_id="t", action=Action.AMEND_STOP,
+                     stop_price=29320.75),
+        s, last_price=29321.0,
+    )
+    assert not rd.approved
+    assert any("stop_crowds_price" in r for r in rd.reasons)

@@ -104,7 +104,7 @@ def evaluate_risk(
         return RiskDecision(True, command.model_copy(update={"qty": qty}), ["risk_reducing"])
 
     if command.action is Action.AMEND_STOP:
-        return _evaluate_amend_stop(command, session, last_price)
+        return _evaluate_amend_stop(cfg, command, session, last_price)
 
     if command.action not in _ENTRIES:
         return RiskDecision(False, None, [f"unsupported_action:{command.action}"])
@@ -380,7 +380,7 @@ def trigger_feasible(
 
 # ---- helpers (pure) ---------------------------------------------------------
 def _evaluate_amend_stop(
-    command: OrderCommand, session: SessionState, last_price: float | None
+    cfg: BridgeConfig, command: OrderCommand, session: SessionState, last_price: float | None
 ) -> RiskDecision:
     """Move the working protective stop on an open position.
 
@@ -397,9 +397,18 @@ def _evaluate_amend_stop(
         return RiskDecision(False, None, ["no_stop_price"])
     long_side = session.position > 0
     if last_price is not None:
-        through = price >= last_price if long_side else price <= last_price
-        if through:
+        # Signed distance from price to the level, on the protective side.
+        gap = (last_price - price) if long_side else (price - last_price)
+        if gap <= 0:
             return RiskDecision(False, None, [f"stop_through_price:{price:g}"])
+        tick = cfg.instrument.tick_size or 0.25
+        clearance = cfg.risk.amend_stop_clearance_ticks * tick
+        if clearance > 0 and gap < clearance:
+            # Clears the bar close but not the drift to the live book — NinjaTrader would
+            # reject it, and a rejected amendment terminates the strategy.
+            return RiskDecision(
+                False, None, [f"stop_crowds_price:{price:g} vs {last_price:g}"]
+            )
     cur = session.working_stop
     if cur is not None:
         tighter = price > cur if long_side else price < cur
