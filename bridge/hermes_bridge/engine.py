@@ -1086,9 +1086,16 @@ class TradingEngine:
             self._managed_level = min(self._managed_level, level)
         level = self._managed_level
         close = bar.close
+        # The RiskGate refuses to REST a level that comes within this much of the last price
+        # (NinjaTrader rejects it against the live book, and a rejected amendment terminates
+        # the strategy -- live 2026-08-20). Claim that same band here: inside it the level
+        # cannot be a stop, so the only executable answer is out. The two rules then tile the
+        # line with no gap -- exit inside the band, rest a real stop outside it.
+        tick = self.cfg.instrument.tick_size or 0.25
+        tol = self.cfg.risk.amend_stop_clearance_ticks * tick
         breached = (
-            (side == Side.LONG and close <= level)
-            or (side == Side.SHORT and close >= level)
+            (side == Side.LONG and close <= level + tol)
+            or (side == Side.SHORT and close >= level - tol)
         )
         if not breached:
             return None

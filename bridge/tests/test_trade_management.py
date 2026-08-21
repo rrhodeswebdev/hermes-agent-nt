@@ -184,3 +184,80 @@ def test_replay_runs_with_rework_enabled(cfg):
     assert report.entries > 0
     assert report.trades_today <= cfg.risk.max_trades_per_day
     assert isinstance(report.realized_pnl, float)
+
+
+def test_managed_exit_claims_the_clearance_band_a_stop_cannot_use():
+    """A level too close to the bar close must EXIT, because it cannot be rested.
+
+    The RiskGate refuses an AMEND_STOP that comes within risk.amend_stop_clearance_ticks
+    of the last price (NinjaTrader would reject it against the live book, and a rejected
+    amendment terminates the strategy — live 2026-08-20). That leaves a band where the
+    close-test says "not breached yet" and the amendment says "cannot rest this": without
+    this rule nothing acts at all, which is exactly where the give-back cap wanted to be.
+
+    Long 4000, 1R = 2.0pt, MFE 12.5pt, cap 0.40 ⇒ level = 4000 + 0.60 * 12.5 = 4007.50.
+    The close is 4007.75 — a single tick ABOVE the level, so `close <= level` is False and
+    the old code held. The trade has already handed back more than the cap allows; the
+    right answer is out, and out is the only answer that can actually be executed.
+    """
+    cfg = _managed_cfg(breakeven_r=1.0, trail_enabled=False, giveback_cap_pct=0.40)
+    entry = 4000.0
+    engine, ts = _open_long(cfg, entry, stop_ticks=8)
+
+    r = engine.on_bar(make_bar(ts + 300, entry + 0.5, entry + 12.5, entry, entry + 7.75))
+    assert r.command is not None
+    assert r.command.action is Action.EXIT
+    assert "managed_stop" in r.decision.rationale
+
+
+def _open_short(cfg, entry: float, stop_ticks: int = 8):
+    """The mirror of `_open_long` — an engine holding an open short at `entry`."""
+    store = BarStore("ES", "5m")
+    seed = _flat_seed(entry)
+    store.replace_history(seed)
+    session = make_session(cfg)
+    session.position = -1
+    session.avg_price = entry
+    engine = TradingEngine(cfg, store, session, _HoldAgent(cfg), RiskGate(cfg))
+    engine._active_stop_ticks = stop_ticks
+    ctx = build_context(seed, atr_period=cfg.strategy.atr_period,
+                        swing_lookback=cfg.strategy.swing_lookback)
+    engine.tracker.on_entry(ts=seed[-1].ts, side=Side.SHORT, qty=1, price=entry,
+                            context=ctx, rationale="entry")
+    return engine, seed[-1].ts
+
+
+def test_managed_exit_claims_the_clearance_band_on_a_short_too():
+    """The mirror of the long case: for a short the band sits just BELOW the level.
+
+    Short 4000, 1R = 2.0pt, MFE 12.5pt, cap 0.40 ⇒ level = 4000 - 0.60 * 12.5 = 3992.50.
+    The close is 3992.25, one tick below it, so `close >= level` is False and the old code
+    held a level that could not be rested.
+    """
+    cfg = _managed_cfg(breakeven_r=1.0, trail_enabled=False, giveback_cap_pct=0.40)
+    entry = 4000.0
+    engine, ts = _open_short(cfg, entry, stop_ticks=8)
+
+    r = engine.on_bar(make_bar(ts + 300, entry - 0.5, entry, entry - 12.5, entry - 7.75))
+    assert r.command is not None
+    assert r.command.action is Action.EXIT
+    assert "managed_stop" in r.decision.rationale
+
+
+def test_managed_exit_leaves_a_level_with_room_to_the_amendment():
+    """The other half of the tiling: with room to spare the level RESTS, it does not exit.
+
+    A guard rather than a driven test — it pins behavior the band rule must not swallow.
+    Same 4007.50 level as the long band case, but the close is 4009.00: six ticks of room,
+    comfortably outside the two-tick clearance, so the stop is executable and the engine
+    rests it instead of flattening a trade that is still working.
+    """
+    cfg = _managed_cfg(breakeven_r=1.0, trail_enabled=False, giveback_cap_pct=0.40)
+    entry = 4000.0
+    engine, ts = _open_long(cfg, entry, stop_ticks=8)
+    engine.session.working_stop = entry - 20.0   # the wide bracket already in the market
+
+    r = engine.on_bar(make_bar(ts + 300, entry + 0.5, entry + 12.5, entry, entry + 9.0))
+    assert r.command is None                      # no exit
+    assert [c.action for c in r.extra_commands] == [Action.AMEND_STOP]
+    assert r.extra_commands[0].stop_price == 4007.5

@@ -562,12 +562,68 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // TIGHTENS, so this can never widen a stop or open/close anything.
                 case "AMEND_STOP":
                     if (!cmd.StopPrice.HasValue) return;
+                    if (!StopIsExecutableNow(cmd.StopPrice.Value)) return;
                     if (Position.MarketPosition == MarketPosition.Long)
                         SetStopLoss(LongSignal, CalculationMode.Price, cmd.StopPrice.Value, false);
                     else if (Position.MarketPosition == MarketPosition.Short)
                         SetStopLoss(ShortSignal, CalculationMode.Price, cmd.StopPrice.Value, false);
                     break;
             }
+        }
+
+        // The bridge only ever sees COMPLETED bars, so an amendment it approved against a
+        // bar CLOSE can already be on the wrong side of the LIVE book by the time it lands
+        // here. NinjaTrader refuses such an order, and with ErrorHandling set to stop the
+        // strategy that refusal is not a no-op: it cancels the bracket, DISABLES the strategy
+        // and force-flattens mid-trade. That happened live on 2026-08-20 -- a sell stop
+        // amended to 29320.75 against a 29321.00 close while the market was already 29319.
+        //
+        // This method is the only place in the system that can see the live book, so it is
+        // the last line of defence. It fails CLOSED: anything not clearly executable is
+        // dropped and the bracket already resting in the market keeps protecting the trade.
+        private bool StopIsExecutableNow(double stopPrice)
+        {
+            double bid, ask;
+            try
+            {
+                bid = GetCurrentBid();
+                ask = GetCurrentAsk();
+            }
+            catch (Exception ex)
+            {
+                Print("Hermes AMEND_STOP dropped: live bid/ask unavailable (" + ex.Message + ")");
+                return false;
+            }
+            if (bid <= 0 || ask <= 0)
+            {
+                Print("Hermes AMEND_STOP dropped: no live bid/ask yet.");
+                return false;
+            }
+            // A long is protected by a SELL stop, which must sit BELOW the bid; a short by a
+            // BUY stop, which must sit ABOVE the ask. One tick of margin either way.
+            if (Position.MarketPosition == MarketPosition.Long)
+            {
+                if (stopPrice >= bid - TickSize)
+                {
+                    Print(string.Format(
+                        "Hermes AMEND_STOP dropped: stop {0} is not below bid {1} (long).",
+                        stopPrice, bid));
+                    return false;
+                }
+                return true;
+            }
+            if (Position.MarketPosition == MarketPosition.Short)
+            {
+                if (stopPrice <= ask + TickSize)
+                {
+                    Print(string.Format(
+                        "Hermes AMEND_STOP dropped: stop {0} is not above ask {1} (short).",
+                        stopPrice, ask));
+                    return false;
+                }
+                return true;
+            }
+            return false;   // flat -- nothing to protect
         }
 
         private void SetBracket(string signal, HermesCommand cmd)
