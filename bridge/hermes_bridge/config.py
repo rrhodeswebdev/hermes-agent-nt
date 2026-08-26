@@ -160,6 +160,17 @@ class StrategyParams(BaseModel):
     # (capture -40.6%) with 6 of 7 trades going green — the give-back, not entry selection,
     # was the binding constraint. See stops.managed_stop_price.
     giveback_cap_pct: float = Field(default=0.0, ge=0.0, lt=1.0)
+    # The cap's OWN arming gate, in R. `breakeven_r` used to gate breakeven AND the cap
+    # together, so a WIDE stop pushed +1R far away and locked the cap out of exactly the
+    # trades that needed it. Live 2026-08-26 T4: a 62-tick stop put 1R at 15.50pt, the trade
+    # peaked at 13.75 (88.7% of 1R) and handed back 71% of that peak with the cap never
+    # armed. Across 206 journalled trades, 21 locked-out trades reached >=0.75R and gave
+    # back >$25 each; a counterfactual arming at 0.80R recovers ~$1,013 over 17 trades with
+    # ZERO trades cut short (0.75R: +$1,280 / 1 hurt; 0.50R: +$2,229 / 2 hurt).
+    # 0.0 = inherit breakeven_r (the neutral default — no behavior change).
+    # Only the CAP uses this; breakeven and the structure trail still arm at breakeven_r,
+    # because below +1R a swing can sit under entry and would LOOSEN the stop.
+    giveback_arm_r: float = Field(default=0.0, ge=0.0)
     # SHADOW breakeven-tuning (evidence-only — NO live order change). When > 0, every CLOSED
     # trade whose entry regime is "transitional" is scored against a tighter breakeven arming at
     # this many R (vs the live +1R manager): a kind="shadow_breakeven" record lands in the decline

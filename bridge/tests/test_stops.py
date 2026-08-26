@@ -205,3 +205,60 @@ def test_giveback_cap_wins_over_a_looser_swing_trail():
     lvl = _managed_c(Side.LONG, mfe=20.0, swing_low=101.0, breakeven_r=1.0,
                      trail_enabled=True, giveback_cap_pct=0.40)
     assert lvl == 112.0
+
+
+# --------------------------------------------------------------------------- #
+# Give-back cap: its own arming gate, decoupled from breakeven_r               #
+# --------------------------------------------------------------------------- #
+def test_giveback_cap_arms_below_breakeven_r():
+    """The cap gets its own gate so a WIDE stop stops locking it out.
+
+    `breakeven_r` gated breakeven AND the give-back cap together, so a trade with a wide
+    stop had to clear a correspondingly distant +1R before the cap could protect anything.
+    Live 2026-08-26 T4: a 62-tick stop put 1R at 15.50pt, the trade peaked at 13.75 (88.7%
+    of 1R) and round-tripped 71% of that peak with the cap never armed. Across 206
+    journalled trades, 21 locked-out trades reached >=0.75R and handed back >$25 each.
+
+    Here 1R = 2.0pt and the cap arms at 0.8R = 1.6pt. At mfe 1.8 breakeven is still OUT
+    (1.8 < 2.0) but the cap is IN, so the level is the cap's: entry + (1-0.40)*1.8.
+    """
+    level = _managed(Side.LONG, mfe=1.8, breakeven_r=1.0,
+                     giveback_arm_r=0.8, giveback_cap_pct=0.40)
+    assert level == 100.0 + 0.6 * 1.8
+
+
+def test_giveback_arm_r_does_not_arm_breakeven():
+    """Only the CAP rides the new gate. With the cap off, arm_r must change nothing.
+
+    Guard, not a driven test: it pins the decoupling. If `giveback_arm_r` ever leaked into
+    the breakeven gate, stops would pull to entry below +1R and scratch working trades.
+    """
+    assert _managed(Side.LONG, mfe=1.8, breakeven_r=1.0,
+                    giveback_arm_r=0.8, giveback_cap_pct=0.0) is None
+
+
+def test_giveback_arm_r_defaults_to_breakeven_r():
+    """Default 0.0 inherits breakeven_r — the neutral no-op the rollout depends on."""
+    assert _managed(Side.LONG, mfe=1.8, breakeven_r=1.0, giveback_cap_pct=0.40) is None
+    # At +1R the cap arms on the inherited gate; its level (101.20) outranks breakeven (100.0).
+    assert _managed(Side.LONG, mfe=2.0, breakeven_r=1.0,
+                    giveback_cap_pct=0.40) == 100.0 + 0.6 * 2.0
+
+
+def test_giveback_cap_arms_below_breakeven_r_on_a_short():
+    """Mirror of the long case — the cap sits BELOW entry for a short."""
+    level = _managed(Side.SHORT, mfe=1.8, breakeven_r=1.0,
+                     giveback_arm_r=0.8, giveback_cap_pct=0.40)
+    assert level == 100.0 - 0.6 * 1.8
+
+
+def test_trail_stays_on_the_breakeven_gate_below_one_r():
+    """The structure trail must NOT follow the cap's earlier gate.
+
+    Below +1R a swing can sit under entry, so trailing there would LOOSEN the stop rather
+    than tighten it. With the cap armed at 0.8R the level is the cap's 101.08, and a swing
+    low of 101.5 must be IGNORED because breakeven has not armed yet.
+    """
+    level = _managed(Side.LONG, mfe=1.8, breakeven_r=1.0, giveback_arm_r=0.8,
+                     giveback_cap_pct=0.40, trail_enabled=True, swing_low=101.5)
+    assert level == 100.0 + 0.6 * 1.8      # the cap, NOT the swing

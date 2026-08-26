@@ -205,28 +205,38 @@ def managed_stop_price(
     initial bracket + the brain's structural exit) exactly as before.
     """
     be_r = cfg.strategy.breakeven_r
-    if be_r <= 0 or not initial_stop_ticks or initial_stop_ticks <= 0:
+    giveback = cfg.strategy.giveback_cap_pct
+    # The cap arms on its OWN gate; 0 inherits breakeven_r, which is the legacy behavior.
+    arm_r = cfg.strategy.giveback_arm_r or be_r
+    if not initial_stop_ticks or initial_stop_ticks <= 0:
         return None
     tick = cfg.instrument.tick_size or 0.25
     one_r = initial_stop_ticks * tick
-    if mfe < be_r * one_r:
-        return None  # not yet +1R — pre-managed phase, bracket/structural exit protect it
+    # Two INDEPENDENT gates. Tying the cap to breakeven_r meant a wide stop pushed +1R out
+    # of reach and locked the cap out of the trades that needed it most (live 2026-08-26).
+    be_on = be_r > 0 and mfe >= be_r * one_r
+    cap_on = giveback > 0 and mfe > 0 and arm_r > 0 and mfe >= arm_r * one_r
+    if not be_on and not cap_on:
+        return None  # pre-managed phase — bracket/structural exit protect it, as before
     trail = cfg.strategy.trail_enabled
     be_offset = commission_breakeven_offset(cfg)
-    giveback = cfg.strategy.giveback_cap_pct
     if side == Side.LONG:
-        level = entry + be_offset  # breakeven, clearing this trade's own commission
-        if giveback > 0 and mfe > 0:
-            # Hand back at most `giveback` of the peak — ratchets UP as MFE grows. Never
-            # loosens past the commission floor above.
-            level = max(level, entry + (1.0 - giveback) * mfe)
-        if trail and swing_low is not None and swing_low > level:
+        level = entry + be_offset if be_on else None  # breakeven clears this trade's commission
+        if cap_on:
+            # Hand back at most `giveback` of the peak — ratchets UP as MFE grows. Always
+            # above entry, so below +1R it still only ever TIGHTENS the resting bracket.
+            cap = entry + (1.0 - giveback) * mfe
+            level = cap if level is None else max(level, cap)
+        # The trail stays on the BREAKEVEN gate: below +1R a swing low can sit under entry,
+        # and moving the stop there would LOOSEN it.
+        if trail and be_on and swing_low is not None and swing_low > level:
             level = swing_low  # trail up behind the higher-low (lock in profit)
         return level
     # SHORT — the stop sits above; breakeven then trails DOWN behind the lower-high.
-    level = entry - be_offset
-    if giveback > 0 and mfe > 0:
-        level = min(level, entry - (1.0 - giveback) * mfe)
-    if trail and swing_high is not None and swing_high < level:
+    level = entry - be_offset if be_on else None
+    if cap_on:
+        cap = entry - (1.0 - giveback) * mfe
+        level = cap if level is None else min(level, cap)
+    if trail and be_on and swing_high is not None and swing_high < level:
         level = swing_high
     return level
