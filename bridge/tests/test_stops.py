@@ -262,3 +262,25 @@ def test_trail_stays_on_the_breakeven_gate_below_one_r():
     level = _managed(Side.LONG, mfe=1.8, breakeven_r=1.0, giveback_arm_r=0.8,
                      giveback_cap_pct=0.40, trail_enabled=True, swing_low=101.5)
     assert level == 100.0 + 0.6 * 1.8      # the cap, NOT the swing
+
+
+def test_giveback_cap_needs_a_minimum_absolute_peak():
+    """A percentage gate alone can arm the cap on a peak too small to be worth protecting.
+
+    `giveback_arm_r` is relative to 1R, so a TIGHT stop lets a trivial peak clear it. The
+    counterfactual that justified lowering the gate degenerates there: at the limit it
+    "saves" a trade with mfe 0.00 by exiting at entry, which is not a give-back cap at all
+    (2026-09-01). This floor is the guard rail that keeps that from becoming reachable.
+
+    1R = 2.0pt and the cap arms at 0.8R = 1.6pt, so mfe 1.8 clears the percentage gate --
+    but a 2.5pt floor must veto it, and breakeven has not armed either (1.8 < 2.0).
+    """
+    assert _managed(Side.LONG, mfe=1.8, breakeven_r=1.0, giveback_arm_r=0.8,
+                    giveback_cap_pct=0.40, giveback_min_mfe_points=2.5) is None
+
+
+def test_giveback_min_mfe_allows_a_peak_at_the_floor():
+    """At the floor the cap still arms — the veto is strictly below it."""
+    level = _managed(Side.LONG, mfe=1.8, breakeven_r=1.0, giveback_arm_r=0.8,
+                     giveback_cap_pct=0.40, giveback_min_mfe_points=1.8)
+    assert level == 100.0 + 0.6 * 1.8

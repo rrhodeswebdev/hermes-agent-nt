@@ -215,7 +215,9 @@ def managed_stop_price(
     # Two INDEPENDENT gates. Tying the cap to breakeven_r meant a wide stop pushed +1R out
     # of reach and locked the cap out of the trades that needed it most (live 2026-08-26).
     be_on = be_r > 0 and mfe >= be_r * one_r
-    cap_on = giveback > 0 and mfe > 0 and arm_r > 0 and mfe >= arm_r * one_r
+    min_mfe = cfg.strategy.giveback_min_mfe_points
+    cap_on = (giveback > 0 and mfe > 0 and arm_r > 0
+              and mfe >= arm_r * one_r and mfe >= min_mfe)
     if not be_on and not cap_on:
         return None  # pre-managed phase — bracket/structural exit protect it, as before
     trail = cfg.strategy.trail_enabled

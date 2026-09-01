@@ -171,6 +171,20 @@ class StrategyParams(BaseModel):
     # Only the CAP uses this; breakeven and the structure trail still arm at breakeven_r,
     # because below +1R a swing can sit under entry and would LOOSEN the stop.
     giveback_arm_r: float = Field(default=0.0, ge=0.0)
+    # Absolute floor on the peak, in POINTS, before the cap may arm at all. `giveback_arm_r`
+    # is RELATIVE to 1R, so a tight stop lets a trivial peak clear it -- and a peak that small
+    # is not worth protecting: exiting at 0.60 * a 2pt peak is a scratch, not a saved winner.
+    # The counterfactual that justifies lowering giveback_arm_r degenerates in exactly that
+    # corner: at the limit it "rescues" a trade with mfe 0.00 by exiting at ENTRY, crediting
+    # the cap with saving a loser that never went green (2026-09-01). This floor is the guard
+    # rail that keeps that corner unreachable, so the gate can be lowered on evidence instead
+    # of on an artifact.
+    # Points, not dollars: managed_stop_price never sees qty, and 1R and the cap level are
+    # both in points. Per contract the cap exit clears commission above ~1.1pt of peak, so the
+    # floor is size-invariant in the way that matters.
+    # 0.0 = off (neutral default). At giveback_arm_r 0.60 the smallest ELIGIBLE peak in 108
+    # journalled trades was 7.33pt, so a floor at or below ~7 is inert today by construction.
+    giveback_min_mfe_points: float = Field(default=0.0, ge=0.0)
     # SHADOW breakeven-tuning (evidence-only — NO live order change). When > 0, every CLOSED
     # trade whose entry regime is "transitional" is scored against a tighter breakeven arming at
     # this many R (vs the live +1R manager): a kind="shadow_breakeven" record lands in the decline
