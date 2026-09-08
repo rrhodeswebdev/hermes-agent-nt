@@ -82,3 +82,40 @@ def test_closing_reason_names_the_cause():
     assert closing_reason(_ts(2026, 6, 19, 14, 0)) == "holiday:Juneteenth"
     assert closing_reason(_ts(2026, 11, 27, 16, 0)) == "early_close"
     assert closing_reason(_ts(2026, 6, 18, 14, 0)) is None
+
+
+# --- the CME trading-day boundary (17:00 ET), not midnight ----------------- #
+# A holiday closes a TRADING day, and a CME equity-index trading day starts at the 17:00 ET
+# settlement break — the same boundary indicators.cme_trading_day already uses for the daily
+# goal / P&L reset. Keying the holiday off the raw ET calendar date instead blanketed the
+# 18:00 ET reopen that belongs to the NEXT day: on Labor Day 2026-09-07 that sat out a full
+# live ETH session (every bar: "WAIT [calendar_closed] holiday:Labor Day").
+def test_labor_day_2026_daytime_is_a_holiday():
+    # 2026-09-07 Monday, 14:00 UTC = 10:00 EDT — inside the holiday's own trading day.
+    assert holiday_name(_ts(2026, 9, 7, 14, 0)) == "Labor Day"
+
+
+def test_holiday_evening_reopen_belongs_to_the_next_trading_day():
+    # Labor Day 18:00 EDT (22:00 UTC) is the START of Tuesday 09-08's trading day — normal tape.
+    assert holiday_name(_ts(2026, 9, 7, 22, 0)) is None
+    assert within_close_cutoff(_ts(2026, 9, 7, 22, 0), 15) is False
+    assert closing_reason(_ts(2026, 9, 7, 22, 0)) is None
+
+
+def test_evening_before_a_holiday_stands_down():
+    # Sunday 2026-09-06 18:00 EDT opens Labor Day's trading day — still stand down.
+    assert holiday_name(_ts(2026, 9, 6, 22, 0)) == "Labor Day"
+    assert within_close_cutoff(_ts(2026, 9, 6, 22, 0), 15) is True
+
+
+def test_evening_before_a_full_holiday_stands_down_christmas():
+    # Dec 24 2026 18:00 EST (23:00 UTC) opens Christmas Day's trading day.
+    assert holiday_name(_ts(2026, 12, 24, 23, 0)) == "Christmas"
+
+
+def test_evening_before_an_early_close_still_trades():
+    # Dec 23 2026 18:00 EST (23:00 UTC) opens Christmas Eve's trading day, but the 13:00 ET
+    # close is a WALL-CLOCK event on the half day itself — the prior evening is normal tape.
+    # Regression guard: keying early_close off the trading date would gate this whole evening.
+    assert early_close_minute(_ts(2026, 12, 23, 23, 0)) is None
+    assert within_close_cutoff(_ts(2026, 12, 23, 23, 0), 15) is False

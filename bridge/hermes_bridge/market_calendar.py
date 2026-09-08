@@ -6,8 +6,11 @@ holiday/weekend gap and never flatten before an exchange early close (the Junete
 the operator had to flatten by hand), and it would trade thin holiday tape.
 
 This module is pure date logic (no I/O). For a bar timestamp it answers:
-  - is the bar's ET date a full market holiday?       -> stand down all day, flatten
-  - is it an early-close half day (13:00 ET)?         -> wind down + flatten before the close
+  - is the bar's TRADING date a full market holiday?  -> stand down all day, flatten
+  - is its ET date an early-close half day (13:00 ET)? -> wind down + flatten before the close
+The two use different day boundaries on purpose — a holiday closes a whole trading day (which
+starts at the previous 17:00 ET settlement), while an early close is a wall-clock time on the
+half day itself. See _cme_trading_date and early_close_minute.
 Movable holidays (MLK, Good Friday, Memorial Day, Thanksgiving, ...) are COMPUTED, so there is
 no annual table to maintain. ET conversion reuses indicators' DST-correct offset.
 
@@ -36,6 +39,18 @@ def _et(ts: float):
 def _et_date(ts: float) -> date:
     et = _et(ts)
     return date(et.year, et.month, et.day)
+
+
+def _cme_trading_date(ts: float) -> date:
+    """The CME equity-index TRADING date the bar belongs to — the calendar-date twin of
+    indicators.cme_trading_day. Its boundary is the 17:00 ET settlement break, not midnight,
+    so the overnight session that opens 18:00 ET groups with the FOLLOWING calendar date.
+
+    A holiday closes a trading day, so the holiday lookup keys off this. Using the raw ET
+    calendar date instead blanketed the 18:00 ET reopen that belongs to the next day: on
+    Labor Day 2026-09-07 that sat out a whole live ETH session while the daily-goal reset
+    (which does use cme_trading_day) had already rolled those same bars to Tuesday."""
+    return (_et(ts) + timedelta(hours=7)).date()
 
 
 def _et_minute(ts: float) -> int:
@@ -119,13 +134,24 @@ def _early_close_days(year: int) -> dict[date, str]:
 
 # ---- public API ----------------------------------------------------------- #
 def holiday_name(ts: float) -> str | None:
-    """The full-holiday name for the bar's ET date, or None."""
-    d = _et_date(ts)
+    """The full-holiday name for the bar's CME TRADING date, or None.
+
+    Trading date, not calendar date: the holiday's own session runs from the prior 18:00 ET
+    open through its 17:00 ET settlement, and the 18:00 ET reopen already belongs to the next
+    (tradeable) day. See _cme_trading_date."""
+    d = _cme_trading_date(ts)
     return _full_holidays(d.year).get(d)
 
 
 def early_close_minute(ts: float) -> int | None:
-    """13:00 ET (minute 780) if the bar's ET date is a futures early-close half day, else None."""
+    """13:00 ET (minute 780) if the bar's ET CALENDAR date is a futures early-close half day,
+    else None.
+
+    Calendar date here, unlike holiday_name: a 13:00 ET close is a wall-clock event on the half
+    day itself, and it is paired with _et_minute below. Keying it to the trading date would make
+    every bar of the PRIOR evening (18:00 ET onward, so already past minute 780 - lead) test as
+    "within the cutoff" and gate a full evening of normal tape — e.g. Dec 23 ahead of the
+    Christmas Eve half day."""
     d = _et_date(ts)
     return EARLY_CLOSE_MINUTE if d in _early_close_days(d.year) else None
 
