@@ -1160,11 +1160,21 @@ class TradingEngine:
         return rd.command
 
     def _to_command(self, d: Decision) -> OrderCommand:
+        # ENTRIES get a 1-lot floor: a 0 would be rejected as `zero_qty` on the
+        # non-auto-sizing path (see test_plan.test_zero_qty_trigger_never_fires).
+        # EXIT/FLATTEN must pass a 0 THROUGH, because that is what tells the RiskGate to
+        # size the order to the whole position (`qty = abs(session.position) if
+        # command.qty <= 0`, risk.py). evaluate_plan builds its EXIT with no qty at all,
+        # so flooring it to 1 silently asked to close ONE contract of a multi-lot position
+        # (2026-09-09: a plan_exit on 3 lots queued `EXIT qty=1`).
+        qty = d.qty
+        if qty <= 0:
+            qty = 0 if d.action in (Action.EXIT, Action.FLATTEN) else 1
         return OrderCommand(
             id=self._new_id(),
             strategy_id=self.cfg.strategy_id,
             action=d.action,
-            qty=d.qty if d.qty > 0 else 1,
+            qty=qty,
             stop_ticks=d.stop_ticks,
             target_ticks=d.target_ticks,
             stop_price=d.stop_price,
