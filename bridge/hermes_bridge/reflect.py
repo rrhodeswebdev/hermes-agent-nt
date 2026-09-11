@@ -260,6 +260,124 @@ Rules:
   is allowed — same rule: no numeric config."""
 
 
+# The distilled artifact's tiers and the share of the budget each may claim. HARD RULES is
+# the only CAP (a veto tier crowds by nature); the other two are FLOORS reserved for them.
+# Shares sum to 0.90, leaving slack for headings and the omission banner.
+DISTILL_TIERS: tuple[tuple[str, float], ...] = (
+    ("HARD RULES", 0.50),
+    ("CONDITIONAL HEURISTICS", 0.25),
+    ("WATCH-ITEMS", 0.15),
+)
+
+
+def _split_sections(text: str) -> list[tuple[str, str]]:
+    """[(HEADING, body)] in document order; ("", preamble) when text precedes the first
+    heading. Headings are matched loosely (## / ### , any case) so a model that varies the
+    level or capitalisation still gets apportioned instead of silently falling through."""
+    out: list[tuple[str, str]] = []
+    cur, buf = "", []
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"^#{2,3}\s+(.+?)\s*$", line)
+        if m:
+            if cur or buf:
+                out.append((cur, "".join(buf)))
+            cur, buf = m.group(1).strip().upper(), []
+        else:
+            buf.append(line)
+    if cur or buf:
+        out.append((cur, "".join(buf)))
+    return out
+
+
+def _keep_whole_bullets(body: str, budget: int) -> str:
+    """As many leading whole lines as fit, marked with the same "…" a boundary truncate
+    leaves. Never returns a half-written bullet — a rule cut mid-sentence is worse than an
+    absent one, because it still reads as an instruction. The marker is reserved for up
+    front, so the result still fits the budget."""
+    if budget <= 0:
+        return ""
+    if len(body) <= budget:
+        return body
+    marker = "…\n"
+    kept, used, room = [], 0, max(0, budget - len(marker))
+    for line in body.splitlines(keepends=True):
+        if used + len(line) > room:
+            break
+        kept.append(line)
+        used += len(line)
+    return "".join(kept) + marker
+
+
+def apportion_distilled(text: str, limit: int) -> tuple[str, dict]:
+    """Split the distilled artifact across its tiers deterministically.
+
+    The model would not honour the split on instruction alone: ordering the sections gave
+    hard-rules-only, and naming explicit character shares still produced 12 veto bullets to
+    the heuristic tier's 1 with no watch-items (2026-09-10). The veto tier is therefore
+    CAPPED here so it cannot consume the budget the positive tiers need, while unused space
+    is handed back so nothing is wasted.
+
+    Returns (text, report) where report carries per-tier dropped chars and the tiers that
+    were missing entirely — an unattended session reads that instead of re-deriving it.
+    """
+    sections = _split_sections(text)
+    present = {h for h, _ in sections if h}
+    # A tier is only really present if it carries at least one BULLET. Testing for
+    # non-whitespace is not enough: the model habitually writes a bare "…" continuation
+    # marker, and `body.strip()` counts that as content — which reported WATCH-ITEMS as
+    # present while the artifact carried nothing under it.
+    substantive = {
+        h for h, b in sections
+        if h and any(ln.lstrip().startswith(("-", "*")) for ln in b.splitlines())
+    }
+    missing = [name for name, _ in DISTILL_TIERS if name not in substantive]
+    if not present:  # unstructured reply: keep the old behaviour, still flag the shape
+        return truncate_at_boundary(text, limit), {
+            "dropped": {}, "missing": [name for name, _ in DISTILL_TIERS], "kept": {},
+        }
+    shares = dict(DISTILL_TIERS)
+    heads = {h: f"## {h}\n" for h, _ in sections if h}
+    want = {h: len(b) + len(heads.get(h, "")) for h, b in sections if h}
+    pre = sum(len(b) for h, b in sections if not h)
+
+    # Pass 1 — every tier gets AT MOST its own share, so a greedy earlier tier can never
+    # consume what a later one needs (the first cut handed each non-HARD tier all the
+    # remaining budget and WATCH-ITEMS came back 2 chars).
+    alloc: dict[str, int] = {}
+    for h in want:
+        cap = int(limit * shares[h]) if h in shares else 0
+        alloc[h] = min(want[h], cap) if h in shares else 0
+    # Pass 2 — hand the leftover to whoever still wants more, so slack from a short tier is
+    # spent rather than stranded. The POSITIVE tiers are served first and the veto tier
+    # last: the shares deliberately sum to less than 1, and giving that remainder to HARD
+    # RULES (first in document order) would quietly restore the crowding this exists to stop.
+    order = [h for h, _ in sections if h and h != "HARD RULES"]
+    order += [h for h, _ in sections if h == "HARD RULES"]
+    leftover = limit - pre - sum(alloc.values())
+    for h in order:
+        if leftover <= 0:
+            break
+        extra = min(max(0, want[h] - alloc[h]), leftover)
+        alloc[h] += extra
+        leftover -= extra
+
+    dropped: dict[str, int] = {}
+    kept_len: dict[str, int] = {}
+    out: list[str] = []
+    for heading, body in sections:
+        head = heads.get(heading, "")
+        budget = max(0, alloc.get(heading, limit) - len(head)) if heading else limit - pre
+        keep = _keep_whole_bullets(body, budget)
+        if len(keep) < len(body):
+            dropped[heading or "(preamble)"] = len(body) - len(keep)
+        if heading:
+            kept_len[heading] = len(keep)
+        out.append(head + keep)
+    return "".join(out).rstrip() + "\n", {
+        "dropped": dropped, "missing": missing, "kept": kept_len,
+    }
+
+
 class Reflector:
     def __init__(self, cfg: BridgeConfig, learned: LearnedStore, journal: JournalStore) -> None:
         self.cfg = cfg
@@ -423,10 +541,21 @@ class Reflector:
             return applied
         # Hard cap AT the configured limit (what's written is exactly what prompts
         # show — an over-limit tail would be silently cut at display time otherwise).
-        # Atomic write keeps a .history/ backup; revert by restoring or deleting
-        # hermes/learned/distilled.md (raw lessons take over again).
-        self.learned.set_distilled(truncate_at_boundary(str(text), lc.distilled_char_limit))
+        # The cap is applied PER TIER: left to itself the model spends the whole budget on
+        # the veto tier and writes the positive ones as nothing, which is what made the
+        # agent progressively more cautious instead of better. Atomic write keeps a
+        # .history/ backup; revert by restoring or deleting hermes/learned/distilled.md
+        # (raw lessons take over again).
+        shaped, report = apportion_distilled(str(text), lc.distilled_char_limit)
+        self.learned.set_distilled(shaped)
         applied["distilled"] = 1
+        applied["tiers"] = report["kept"]
+        applied["missing_tiers"] = report["missing"]
+        # Say it out loud every pass: an UNATTENDED session has no other way to notice that
+        # the tier carrying positive edge came back empty.
+        if report["missing"] or report["dropped"]:
+            print(f"[distill] tiers kept={report['kept']} dropped={report['dropped']} "
+                  f"MISSING={report['missing'] or 'none'}", flush=True)
         return applied
 
     def curate(self) -> dict:

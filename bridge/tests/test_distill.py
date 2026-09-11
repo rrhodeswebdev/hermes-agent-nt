@@ -29,7 +29,11 @@ def test_distill_writes_distilled_with_deep_model(tmp_path, monkeypatch):
 
     monkeypatch.setattr("hermes_bridge.reflect.run_claude_oneshot", _capture)
     applied = r.distill()
-    assert applied == {"distilled": 1, "error": None}
+    # distill() also reports the per-tier apportioning (kept sizes + any tier the model
+    # failed to write), so an unattended session can see an empty positive tier.
+    assert applied["distilled"] == 1
+    assert applied["error"] is None
+    assert "tiers" in applied and "missing_tiers" in applied
     assert seen["model"] == "opus"                     # the slow, deep tier
     assert "1xATR room" in seen["user"]                # full lesson bodies included
     assert "midday chop" in seen["user"]
