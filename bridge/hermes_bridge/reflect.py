@@ -225,10 +225,30 @@ memory system. You are given the FULL learned corpus: trader profile, every acti
 lesson, live agent notes, and archived notes. Produce ONE compact distilled artifact
 that the realtime decision agent will read INSTEAD of the raw lessons.
 
+Structure — ALL THREE sections are REQUIRED, with these character budgets. Ordering the
+sections is not enough: given only an ordering, every pass so far spent the entire budget
+on hard rules and emitted the other two as nothing (2026-09-10: raising the cap from 2400
+to 4000 bought longer vetoes, still zero heuristics and zero watch-items). Write the
+sections in this order but SIZE them to these shares of {limit}, and never let an earlier
+section borrow from a later one:
+
+  ## HARD RULES            <= 50% of {limit}   the non-negotiable vetoes
+  ## CONDITIONAL HEURISTICS >= 25% of {limit}   what WORKS, with its regime/session
+                                               conditions — the positive tier
+  ## WATCH-ITEMS           >= 15% of {limit}   patterns still gathering data, each with
+                                               its current evidence count
+
+If a section would be empty, say so explicitly in one bullet ("no confirmed heuristic yet
+— N candidates below the evidence bar") rather than omitting the heading. A missing
+section is a FAILED pass.
+
+CONDITIONAL HEURISTICS is the tier that makes exposure compound. The corpus skews
+heavily toward what lost, because losses generate rules and wins generate none, so mine
+the notes and day-reviews for what actually PAID — the setup, the regime, the location,
+the flow reading, and how often it repeated. State the conditions, not just the outcome.
+A heuristic with thin evidence belongs in WATCH-ITEMS with its count, not dropped.
+
 Rules:
-- Hard rules first (the non-negotiables), then conditional heuristics WITH their
-  regime/session conditions, then active watch-items (patterns still gathering data,
-  with their current evidence counts).
 - Preserve every load-bearing threshold EXACTLY as written (e.g. 1xATR clearance).
   Do not invent rules, soften rules, or resolve open questions — only compress,
   merge, and structure what exists. When notes conflict, keep the newer reading and

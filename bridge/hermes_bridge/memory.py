@@ -248,7 +248,7 @@ class LearnedStore:
                           lessons_chars: int = 2500, day_reviews_n: int = 0,
                           day_reviews_chars: int = 1800) -> str:
         sections: list[str] = []
-        notes_dropped = lessons_dropped = 0
+        notes_dropped = lessons_dropped = distilled_dropped = 0
         p = self.profile()
         if p:
             sections.append("=== TRADER PROFILE ===\n" + p[:profile_chars])
@@ -260,7 +260,21 @@ class LearnedStore:
         if distilled:
             # Distilled tier active: it stands in for the raw lessons (fresh notes
             # above still flow until the next distillation pass).
-            sections.append("=== DISTILLED LESSONS ===\n" + distilled[:lessons_chars])
+            # This used to be a bare slice, the one tier that could lose its tail with no
+            # banner and no counter — the HARD RULES would just stop mid-sentence once
+            # curation pushed the document past the budget (2229 of 2500 on 2026-09-10).
+            # Keep the HEAD (rule order is curated priority, not recency) but reserve room
+            # for the banner so the block still fits, and report the loss like every other tier.
+            if len(distilled) > lessons_chars:
+                banner = ("(… {n} chars of distilled rules over the prompt budget — "
+                          "run curation to consolidate)")
+                reserve = len(banner.format(n=len(distilled) - lessons_chars)) + 1
+                kept = truncate_at_boundary(distilled, max(0, lessons_chars - reserve))
+                distilled_dropped = len(distilled) - len(kept)
+                shown = kept + "\n" + banner.format(n=distilled_dropped)
+            else:
+                shown = distilled
+            sections.append("=== DISTILLED LESSONS ===\n" + shown)
             lessons = []
         else:
             lessons = self.lessons()
@@ -295,10 +309,12 @@ class LearnedStore:
                 if block:
                     sections.append("=== RECENT DAY-REVIEWS ===\n" + "\n\n".join(block))
         # Truncation was silent before; tell the operator once per change, not per call.
-        report = (notes_dropped, lessons_dropped)
+        report = (notes_dropped, lessons_dropped, distilled_dropped)
         if any(report) and report != getattr(self, "_last_trunc_report", None):
             print(f"[learned] prompt budget truncation: notes_dropped={notes_dropped} "
-                  f"lessons_dropped={lessons_dropped} (archive/curation holds the rest)",
+                  f"lessons_dropped={lessons_dropped} "
+                  f"distilled_dropped={distilled_dropped} "
+                  f"(archive/curation holds the rest)",
                   flush=True)
         self._last_trunc_report = report
         return "\n\n".join(sections)
