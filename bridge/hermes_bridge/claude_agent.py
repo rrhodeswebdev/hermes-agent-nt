@@ -80,6 +80,9 @@ _TRIGGER_SCHEMA = {
         # are enforced — prose is never parsed. Omit/null any gate the setup does not
         # state; an unset gate never vetoes.
         "min_volume": {"type": ["number", "null"]},
+        # The delta MARGIN this setup needs (a magnitude), on top of the global floor.
+        # Direction is applied for you: long requires >= +min_delta, short <= -min_delta.
+        "min_delta": {"type": ["number", "null"], "minimum": 0.0},
         "require_trend": {"type": ["string", "null"], "enum": ["up", "down", "flat", None]},
         "require_regime": {
             "type": ["string", "null"],
@@ -134,10 +137,16 @@ Reply with one JSON object:
   the rationale is never parsed. Set "min_volume" to the fill-bar volume floor you name
   ("on >900v" => 900), "require_trend" to the trend you require ("trend must be down" =>
   "down"), and "require_regime" likewise ("regime = trending" => "trending"). Omit/null a
-  gate your setup does not state — an unset gate never vetoes. A trigger whose stated
-  conditions are not re-verified this way WILL fire without them: on 2026-09-10 an arm
-  reading "volume>=650 ... trend must be down" filled on a 587-volume bar with trend=flat,
-  because those numbers existed only in prose.
+  gate your setup does not state — an unset gate never vetoes.
+  "min_delta" is the delta MARGIN the setup needs, as a magnitude (give 0.12, not -0.12,
+  for a short — direction is applied for you). Set it whenever a distilled heuristic or
+  your own rationale names a bar ABOVE the global delta floor: the margin, not merely
+  clearing the floor, is repeatedly what separates a shape's winners from its losers
+  (the ETH 2nd-close continuation long pays at >=0.12 and lost at 0.05-0.10).
+  A trigger whose stated conditions are not re-verified this way WILL fire without them.
+  Both happened on 2026-09-10: an arm reading "volume>=650 ... trend must be down" filled
+  on a 587-volume bar with trend=flat, and an arm of the 0.12 shape fired at 0.101 with no
+  min_delta set and lost — in each case the numbers existed only in prose.
 - "exit": invalidation thresholds (manage_position plans): exit if the close is at/
   beyond exit_below or exit_above. null = hold, the resting bracket protects. Tag its
   "setup" the same way (the setup the open position is being managed under).

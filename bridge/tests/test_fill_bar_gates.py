@@ -104,3 +104,45 @@ def test_gates_do_not_apply_to_exits():
     d = evaluate_plan(plan, _bar(29150.0, volume=1.0), position=-1,
                       trend="flat", regime="transitional")
     assert d.action is Action.EXIT
+
+
+# --- delta MARGIN (the trigger's own bar, stricter than the global floor) ---- #
+def _long(**kw):
+    return TradePlan(mode="seek_entry", triggers=[
+        EntryTrigger(direction="long", min_close=29227.5, max_close=29238.0,
+                     confidence=0.66, **kw)
+    ])
+
+
+def test_delta_below_the_triggers_own_margin_vetoes():
+    # The live 2026-09-10 case: the corpus knew >=0.12 was the discriminator for this shape
+    # ("floor-clearing 0.05-0.10 in this same shape LOST"), the arm fired at 0.101 and lost.
+    d = evaluate_plan(_long(min_delta=0.12), _bar(29236.25), position=0, delta_ratio=0.101)
+    assert d.action is Action.WAIT
+    assert "delta" in d.rationale
+
+
+def test_delta_at_the_margin_fires():
+    d = evaluate_plan(_long(min_delta=0.12), _bar(29236.25), position=0, delta_ratio=0.12)
+    assert d.action is Action.ENTER_LONG
+
+
+def test_delta_margin_is_direction_aware_for_shorts():
+    plan = TradePlan(mode="seek_entry", triggers=[
+        EntryTrigger(direction="short", max_close=29089.0, confidence=0.6, min_delta=0.12)
+    ])
+    # A SHORT needs delta <= -0.12; a strongly POSITIVE delta must not satisfy it.
+    assert evaluate_plan(plan, _bar(29087.0), position=0,
+                         delta_ratio=+0.30).action is Action.WAIT
+    assert evaluate_plan(plan, _bar(29087.0), position=0,
+                         delta_ratio=-0.30).action is Action.ENTER_SHORT
+
+
+def test_no_delta_margin_fails_open():
+    d = evaluate_plan(_long(), _bar(29236.25), position=0, delta_ratio=0.0)
+    assert d.action is Action.ENTER_LONG
+
+
+def test_unknown_live_delta_fails_open():
+    d = evaluate_plan(_long(min_delta=0.12), _bar(29236.25), position=0)
+    assert d.action is Action.ENTER_LONG

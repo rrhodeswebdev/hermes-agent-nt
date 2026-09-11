@@ -598,6 +598,7 @@ class TradingEngine:
         return evaluate_plan(
             plan, bar, self.session.position,
             trend=getattr(ctx, "trend", None), regime=getattr(ctx, "regime", None),
+            delta_ratio=getattr(ctx, "delta_ratio", None),
         )
 
     def _plan_is_stale(self, plan: TradePlan) -> bool:

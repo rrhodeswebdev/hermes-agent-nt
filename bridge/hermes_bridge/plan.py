@@ -73,6 +73,12 @@ class EntryTrigger(FrozenModel):
     min_volume: float | None = None                    # fill-bar volume must be >= this
     require_trend: Literal["up", "down", "flat"] | None = None
     require_regime: Literal["trending", "ranging", "transitional"] | None = None
+    # The delta MARGIN this setup needs, as a magnitude, on top of the global delta floor
+    # (strategy.delta_floor). The corpus repeatedly finds the margin — not merely clearing
+    # the floor — is what separates a shape's winners from its losers: the ETH 2nd-close
+    # continuation long pays at >=0.12 while the same shape at 0.05-0.10 lost. Enforced
+    # direction-aware: long needs delta_ratio >= +min_delta, short <= -min_delta.
+    min_delta: float | None = Field(default=None, ge=0.0)
 
     @field_validator("confirm_mode", mode="before")
     @classmethod
@@ -93,19 +99,27 @@ class EntryTrigger(FrozenModel):
         return True
 
     def gate_violation(
-        self, volume: float | None, trend: str | None, regime: str | None
+        self, volume: float | None, trend: str | None, regime: str | None,
+        delta_ratio: float | None = None,
     ) -> str | None:
         """The first of this trigger's own stated preconditions the FILL bar fails, else None.
 
         Fails OPEN in both directions: an unset gate never vetoes, and a missing live read
-        (no volume on the bar, no trend/regime yet) never vetoes either. A plumbing gap must
-        degrade to the previous behavior, never to a silent trading halt."""
+        (no volume on the bar, no trend/regime/delta yet) never vetoes either. A plumbing gap
+        must degrade to the previous behavior, never to a silent trading halt."""
         if self.min_volume is not None and volume is not None and volume < self.min_volume:
             return f"volume {volume:g}<{self.min_volume:g}"
         if self.require_trend is not None and trend and trend != self.require_trend:
             return f"trend {trend}!={self.require_trend}"
         if self.require_regime is not None and regime and regime != self.require_regime:
             return f"regime {regime}!={self.require_regime}"
+        if self.min_delta is not None and delta_ratio is not None:
+            # Direction-aware: the SIGN has to be right too, so a strongly positive delta can
+            # never satisfy a short's margin.
+            signed = delta_ratio if self.direction == "long" else -delta_ratio
+            if signed < self.min_delta:
+                return f"delta {delta_ratio:+.3f} short of {self.direction} margin " \
+                       f"{self.min_delta:g}"
         return None
 
     def describe(self) -> str:
@@ -186,6 +200,7 @@ def describe_analysis_error(exc: Exception) -> str:
 def evaluate_plan(
     plan: TradePlan, bar: Bar, position: int,
     *, trend: str | None = None, regime: str | None = None,
+    delta_ratio: float | None = None,
 ) -> Decision:
     """Compare the just-closed bar against the armed plan. Pure and instant.
 
@@ -211,7 +226,7 @@ def evaluate_plan(
         )
     for t in plan.triggers:
         if t.matches(close):
-            unmet = t.gate_violation(bar.volume, trend, regime)
+            unmet = t.gate_violation(bar.volume, trend, regime, delta_ratio)
             if unmet is not None:
                 return Decision(
                     action=Action.WAIT,

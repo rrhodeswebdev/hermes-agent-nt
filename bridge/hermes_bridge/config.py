@@ -512,7 +512,11 @@ class LearningConfig(BaseModel):
     retrieve_k: int = 3                           # similar past trades fed into each decision
     profile_char_limit: int = 1400
     notes_char_limit: int = 2200
-    lessons_char_limit: int = 2500
+    # 2500 -> 4000 on 2026-09-10. This is the budget the distilled artifact is READ at, and
+    # it has to hold three tiers (vetoes, conditional heuristics, watch-items). At 2500 the
+    # veto tier alone consumed it and the two tiers carrying positive edge were never written
+    # — the agent got progressively more cautious instead of better. See distilled_char_limit.
+    lessons_char_limit: int = 4000
     # Notes triage: the prompt shows the NEWEST notes within notes_char_limit; once the
     # live agent-notes.md outgrows notes_archive_over_chars, the oldest bullets move to
     # hermes/learned/archive/ (long-term memory — never deleted), keeping the newest
@@ -544,7 +548,12 @@ class LearningConfig(BaseModel):
     # reads INSTEAD of raw lessons — knowledge can grow without bloating the per-bar
     # prompt. Trigger via POST /control/distill.
     distill_model: str = "opus"       # the slow, deep tier for the distillation pass
-    distilled_char_limit: int = Field(2400, ge=1)  # hard cap on the distilled artifact
+    # Hard cap on the distilled artifact. 2400 -> 4000 on 2026-09-10: the WRITER was
+    # throttled below what the prompt side already reads, so the distiller spent its whole
+    # budget on HARD RULES and wrote neither CONDITIONAL HEURISTICS nor WATCH-ITEMS. Keep it
+    # at/below lessons_char_limit (validated) — reflect.apportion_distilled() then splits it
+    # 50/25/15 so the veto tier cannot crowd out the tiers that carry positive edge.
+    distilled_char_limit: int = Field(4000, ge=1)
     # Distillation is an opus pass over the FULL corpus — it needs far more than the
     # per-bar claude.timeout_s (30s). It runs off the hot path (manual /control/distill),
     # so a generous budget is safe.

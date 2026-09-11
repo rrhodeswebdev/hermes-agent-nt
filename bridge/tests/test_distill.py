@@ -115,7 +115,13 @@ def test_distill_write_is_boundary_aware(tmp_path, monkeypatch):
 
 def test_distilled_char_limit_default_raised():
     from hermes_bridge.config import LearningConfig
-    assert LearningConfig().distilled_char_limit == 2400
+    # 2400 -> 4000 on 2026-09-10. At 2400 the distiller spent its whole budget on the HARD
+    # RULES tier and wrote neither CONDITIONAL HEURISTICS nor WATCH-ITEMS, so the artifact
+    # the agent reads on every decision was 100% vetoes. Must stay <= lessons_char_limit
+    # (validated in load_config) or the text is re-truncated at prompt time.
+    lc = LearningConfig()
+    assert lc.distilled_char_limit == 4000
+    assert lc.distilled_char_limit <= lc.lessons_char_limit
 
 
 def test_distill_input_includes_day_review_footers(tmp_path, monkeypatch):
