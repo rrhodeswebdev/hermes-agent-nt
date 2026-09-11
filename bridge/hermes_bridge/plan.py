@@ -62,6 +62,17 @@ class EntryTrigger(FrozenModel):
     # matches()). Default True so behavior is unchanged when the feature is off.
     feasible: bool = True
     infeasible_reason: str | None = None
+    # The trigger's OWN preconditions, re-verified on the FILL bar (gate_violation).
+    # The authored setups already state these numerically ("delta >= +0.067 and >900v",
+    # "trend = down AND regime = trending") but nothing enforced them, so a trigger could
+    # fire on its price band alone with its own conditions unmet (2026-09-10: a SHORT
+    # stating volume>=650 filled on 587 with trend=flat/regime=transitional, and the
+    # brain's reflection logged it as a "gate-violating winner"). Carried as FIELDS so the
+    # check never parses a rationale — the same principle as setup_regime_mismatch.
+    # Each is optional and fails OPEN when unset: a plan that omits them behaves as before.
+    min_volume: float | None = None                    # fill-bar volume must be >= this
+    require_trend: Literal["up", "down", "flat"] | None = None
+    require_regime: Literal["trending", "ranging", "transitional"] | None = None
 
     @field_validator("confirm_mode", mode="before")
     @classmethod
@@ -80,6 +91,22 @@ class EntryTrigger(FrozenModel):
         if self.max_close is not None and close > self.max_close:
             return False
         return True
+
+    def gate_violation(
+        self, volume: float | None, trend: str | None, regime: str | None
+    ) -> str | None:
+        """The first of this trigger's own stated preconditions the FILL bar fails, else None.
+
+        Fails OPEN in both directions: an unset gate never vetoes, and a missing live read
+        (no volume on the bar, no trend/regime yet) never vetoes either. A plumbing gap must
+        degrade to the previous behavior, never to a silent trading halt."""
+        if self.min_volume is not None and volume is not None and volume < self.min_volume:
+            return f"volume {volume:g}<{self.min_volume:g}"
+        if self.require_trend is not None and trend and trend != self.require_trend:
+            return f"trend {trend}!={self.require_trend}"
+        if self.require_regime is not None and regime and regime != self.require_regime:
+            return f"regime {regime}!={self.require_regime}"
+        return None
 
     def describe(self) -> str:
         parts = []
@@ -156,11 +183,19 @@ def describe_analysis_error(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def evaluate_plan(plan: TradePlan, bar: Bar, position: int) -> Decision:
+def evaluate_plan(
+    plan: TradePlan, bar: Bar, position: int,
+    *, trend: str | None = None, regime: str | None = None,
+) -> Decision:
     """Compare the just-closed bar against the armed plan. Pure and instant.
 
     Mode/staleness checks happen in the engine before this is called; here the
     plan is assumed valid for the current position state.
+
+    ``trend``/``regime`` are the FILL bar's live structural read. A trigger that matches on
+    price but fails its own stated gates (EntryTrigger.gate_violation) does not fall through
+    to the next trigger -- it vetoes the bar, per the hard rule "if your own rationale names
+    a disqualifying condition, CANCEL. Not size down, not re-arm."
     """
     close = bar.close
     if plan.mode == "manage_position":
@@ -176,6 +211,12 @@ def evaluate_plan(plan: TradePlan, bar: Bar, position: int) -> Decision:
         )
     for t in plan.triggers:
         if t.matches(close):
+            unmet = t.gate_violation(bar.volume, trend, regime)
+            if unmet is not None:
+                return Decision(
+                    action=Action.WAIT,
+                    rationale=f"trigger_gate_unmet({t.describe()}): {unmet}",
+                )
             return Decision(
                 action=Action.ENTER_LONG if t.direction == "long" else Action.ENTER_SHORT,
                 confidence=t.confidence, qty=t.qty,

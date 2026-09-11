@@ -75,6 +75,16 @@ _TRIGGER_SCHEMA = {
         # grind-trend arms per the coverage-shapes doctrine; the hard delta floor still
         # gates firing — the tag exists so suppressed fires are measured, not lost.
         "confirm_mode": {"type": ["string", "null"], "enum": ["sign_persist", None]},
+        # The trigger's OWN preconditions, re-verified on the FILL bar. Whatever the
+        # rationale states numerically must ALSO appear here, because only these fields
+        # are enforced — prose is never parsed. Omit/null any gate the setup does not
+        # state; an unset gate never vetoes.
+        "min_volume": {"type": ["number", "null"]},
+        "require_trend": {"type": ["string", "null"], "enum": ["up", "down", "flat", None]},
+        "require_regime": {
+            "type": ["string", "null"],
+            "enum": ["trending", "ranging", "transitional", None],
+        },
         "rationale": {"type": "string"},
     },
     "required": ["direction"],
@@ -119,6 +129,15 @@ Reply with one JSON object:
   If a trigger implements a sign-persistence grind arm (the setup's detail carries the
   marker `confirm: sign_persist`; see "Coverage shapes" in the strategy framework),
   set "confirm_mode": "sign_persist" on that trigger; otherwise omit/null.
+  ENFORCED GATES — every precondition your rationale states numerically MUST also be set
+  as a field on the trigger, because ONLY the fields are checked when the trigger fires;
+  the rationale is never parsed. Set "min_volume" to the fill-bar volume floor you name
+  ("on >900v" => 900), "require_trend" to the trend you require ("trend must be down" =>
+  "down"), and "require_regime" likewise ("regime = trending" => "trending"). Omit/null a
+  gate your setup does not state — an unset gate never vetoes. A trigger whose stated
+  conditions are not re-verified this way WILL fire without them: on 2026-09-10 an arm
+  reading "volume>=650 ... trend must be down" filled on a 587-volume bar with trend=flat,
+  because those numbers existed only in prose.
 - "exit": invalidation thresholds (manage_position plans): exit if the close is at/
   beyond exit_below or exit_above. null = hold, the resting bracket protects. Tag its
   "setup" the same way (the setup the open position is being managed under).
@@ -463,6 +482,17 @@ class ClaudeAgentClient(AgentClient):
         armed = next((t.setup for t in triggers if t.setup), None)
         if armed is None and exit_rule is not None:
             armed = exit_rule.setup
+        # An unbound setup silently disables the setup/regime gate: setup_regime_mismatch
+        # fails open on a falsy setup, so `enforce_setup_regime` can be ON and never once
+        # fire (it hadn't, in any session up to 2026-09-10) purely because no trigger
+        # carried a bindable name. Say so out loud rather than no-op invisibly.
+        if armed is None and plan.triggers:
+            offered = [t.setup for t in plan.triggers if t.setup]
+            print(
+                f"[plan] setup UNBOUND - setup/regime gate inert this plan "
+                f"(offered={offered or 'none'}, roster={sorted(canon.values())})",
+                flush=True,
+            )
         return plan.model_copy(
             update={"triggers": triggers, "exit": exit_rule, "active_strategy": armed}
         )

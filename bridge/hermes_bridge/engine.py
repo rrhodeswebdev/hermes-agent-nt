@@ -356,7 +356,7 @@ class TradingEngine:
             # Plan cycle: answer the close instantly from the plan the previous
             # between-bars analysis armed. The prefilter does not apply here — Claude
             # already ran off the critical path.
-            decision = self._evaluate_armed_plan(armed, bar, mode)
+            decision = self._evaluate_armed_plan(armed, bar, mode, ctx)
         else:
             if self._prefilter is not None and mode == "seek_entry":
                 pre = self._prefilter.decide(
@@ -386,6 +386,12 @@ class TradingEngine:
         # that blocked it (item 2A). min_confidence first, then the two delta gates.
         sp = self.cfg.strategy
         suppressed_by = ""
+        # A trigger matched on price but failed its OWN stated gates (evaluate_plan already
+        # turned it into a WAIT). Attribute it like any other gate so the vetoed cohort is
+        # measurable against the ones that fired.
+        if decision.action == Action.WAIT and decision.rationale.startswith(
+                "trigger_gate_unmet"):
+            suppressed_by = "trigger_gate"
         if decision.action in (Action.ENTER_LONG, Action.ENTER_SHORT):
             if decision.confidence < sp.min_confidence:
                 decision = Decision(action=Action.WAIT,
@@ -566,7 +572,10 @@ class TradingEngine:
                       f"suppressed {decision.action.value})")
 
     # ---- pre-armed plan cycle -------------------------------------------------
-    def _evaluate_armed_plan(self, plan: TradePlan | None, bar: Bar, mode: Mode) -> Decision:
+    def _evaluate_armed_plan(
+        self, plan: TradePlan | None, bar: Bar, mode: Mode,
+        ctx: MarketContext | None = None,
+    ) -> Decision:
         if plan is None:
             return Decision(action=Action.WAIT, rationale="no_plan (analysis pending)")
         if plan.based_on_bar_ts >= bar.ts:
@@ -584,7 +593,12 @@ class TradingEngine:
                 action=Action.WAIT,
                 rationale=f"plan_mode_mismatch (armed={plan.mode}, actual={mode})",
             )
-        return evaluate_plan(plan, bar, self.session.position)
+        # Hand the FILL bar's live structural read to the plan so each trigger's own stated
+        # gates (volume / trend / regime) are re-verified at the moment it would fire.
+        return evaluate_plan(
+            plan, bar, self.session.position,
+            trend=getattr(ctx, "trend", None), regime=getattr(ctx, "regime", None),
+        )
 
     def _plan_is_stale(self, plan: TradePlan) -> bool:
         # Dead once the basis bar is max_plan_age_bars closes old — i.e. it has
