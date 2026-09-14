@@ -115,3 +115,30 @@ def test_a_bare_ellipsis_tier_counts_as_missing():
     _, rep = apportion_distilled(text, 4000)
     assert "WATCH-ITEMS" in rep["missing"]
     assert "CONDITIONAL HEURISTICS" not in rep["missing"]
+
+
+def test_a_bullet_larger_than_the_tier_budget_is_truncated_not_dropped():
+    # 2026-09-14 daemon pass: HARD RULES carried a 1105-char bullet, WATCH-ITEMS' first
+    # bullet exceeded its 600-char share, and the all-or-nothing line keeper rendered the
+    # tier as a bare "…" while 1079 chars of the limit went unused. A partial watch-item
+    # is far better than none.
+    big = "- **Watch:** " + "w" * 900 + "\n"
+    # Saturate the other tiers so NO leftover reaches WATCH-ITEMS: it gets exactly its
+    # 600-char share, and the 900-char bullet does not fit it whole.
+    text = H + _bullets(40) + C + _bullets(40, "c") + W + big
+    out, rep = apportion_distilled(text, 4000)
+    watch = out.split("## WATCH-ITEMS\n", 1)[1]
+    assert watch.lstrip().startswith("- **Watch:**"), f"tier rendered empty: {watch[:40]!r}"
+    assert len(out) <= 4000
+
+
+def test_missing_is_judged_on_the_rendered_output():
+    # If a tier ends up with no bullet in the OUTPUT it must be reported missing, even if
+    # the model's input carried content — that is what an unattended session needs to see.
+    big = "- **Watch:** " + "w" * 900 + "\n"
+    text = H + _bullets(30) + C + _bullets(30, "c") + W + big
+    out, rep = apportion_distilled(text, 700)  # tiny limit: something WILL come out empty
+    for name in ("HARD RULES", "CONDITIONAL HEURISTICS", "WATCH-ITEMS"):
+        rendered = out.split(f"## {name}\n", 1)[1].split("## ")[0] if f"## {name}\n" in out else ""
+        has_bullet = any(ln.lstrip().startswith("-") for ln in rendered.splitlines())
+        assert (name in rep["missing"]) == (not has_bullet), (name, rendered[:60], rep["missing"])

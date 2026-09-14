@@ -305,6 +305,13 @@ def _keep_whole_bullets(body: str, budget: int) -> str:
             break
         kept.append(line)
         used += len(line)
+    if not kept:
+        # Not one whole line fits: the model writes single bullets bigger than a whole
+        # tier's share (a 1105-char HARD RULE on 2026-09-14), so all-or-nothing would render
+        # the tier as a bare marker while budget went unused. A partial first bullet, cut at
+        # a word boundary, beats an empty tier.
+        first = next((ln for ln in body.splitlines() if ln.strip()), "")
+        return truncate_at_boundary(first, room).rstrip() + "\n" if room > 0 else ""
     return "".join(kept) + marker
 
 
@@ -363,6 +370,7 @@ def apportion_distilled(text: str, limit: int) -> tuple[str, dict]:
 
     dropped: dict[str, int] = {}
     kept_len: dict[str, int] = {}
+    rendered_has_bullet: dict[str, bool] = {}
     out: list[str] = []
     for heading, body in sections:
         head = heads.get(heading, "")
@@ -372,7 +380,14 @@ def apportion_distilled(text: str, limit: int) -> tuple[str, dict]:
             dropped[heading or "(preamble)"] = len(body) - len(keep)
         if heading:
             kept_len[heading] = len(keep)
+            rendered_has_bullet[heading] = any(
+                ln.lstrip().startswith(("-", "*")) for ln in keep.splitlines()
+            )
         out.append(head + keep)
+    # `missing` is judged on what was RENDERED, not on the model's input: a tier the model
+    # wrote but the budget cut to nothing is absent for every practical purpose, and an
+    # unattended session reads this field — it must not be told "none" over an empty tier.
+    missing = [name for name, _ in DISTILL_TIERS if not rendered_has_bullet.get(name)]
     return "".join(out).rstrip() + "\n", {
         "dropped": dropped, "missing": missing, "kept": kept_len,
     }
