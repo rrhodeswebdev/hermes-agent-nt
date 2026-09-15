@@ -77,3 +77,47 @@ def test_classify_regime_transitional_when_mixed_or_sparse():
     # Too few confirmed pivots to read structure.
     assert classify_regime(_pivots([(100, "high")]), atr_value=1.0, last_close=100) == (
         "transitional", "flat")
+
+
+# --- the close is the newest extreme once it breaks the last confirmed pivot ---------- #
+# A swing pivot needs `lookback` bars on EACH side to confirm, so a move that makes a new
+# extreme every bar never confirms one: the pivot list freezes at the last bounce and the
+# classifier keeps reading it. Live 2026-09-14 ETH: the last two pivots of each kind were a
+# small bounce (HH 29099->29105.75, HL 29069.75->29088.25) inside a 155-point decline, and
+# classify_regime said "trending/up" for 20+ minutes while price fell to 29031 -- 57 points
+# BELOW that "higher low". Three correct shorts were vetoed on `trend up!=down`, and the
+# brain dropped its own gate with the (accurate) note that the field was stuck.
+def test_close_below_the_last_swing_low_cannot_be_trending_up():
+    bounce = _pivots([(29099.0, "high"), (29069.75, "low"), (29105.75, "high"), (29088.25, "low")])
+    # sanity: at the bounce itself the pivots really do read HH+HL
+    assert classify_regime(bounce, atr_value=8.0, last_close=29100.0) == ("trending", "up")
+    # ...but a close 57 points below the last swing low is a lower low in progress
+    assert classify_regime(bounce, atr_value=8.0, last_close=29031.5)[1] != "up"
+
+
+def test_close_above_the_last_swing_high_cannot_be_trending_down():
+    down = _pivots([(110, "high"), (104, "low"), (100, "high"), (95, "low")])
+    assert classify_regime(down, atr_value=1.0, last_close=96) == ("trending", "down")
+    assert classify_regime(down, atr_value=1.0, last_close=115)[1] != "down"
+
+
+def test_a_breakdown_after_a_bounce_reads_as_broken_not_down():
+    # The provisional lower low contradicts the confirmed higher high: structure is BROKEN,
+    # which the docstring files under transitional. It is not yet a confirmed downtrend --
+    # that needs a lower HIGH too -- and the classifier must not invent one.
+    bounce = _pivots([(29099.0, "high"), (29069.75, "low"), (29105.75, "high"), (29088.25, "low")])
+    assert classify_regime(bounce, atr_value=8.0, last_close=29031.5) == ("transitional", "flat")
+
+
+def test_a_runaway_move_without_a_bounce_reads_as_a_trend():
+    # Lower high already confirmed, then price runs below the last low without ever bouncing
+    # enough to confirm a new pivot: the provisional low completes LH+LL.
+    leg = _pivots([(110, "high"), (104, "low"), (100, "high"), (98, "low")])
+    assert classify_regime(leg, atr_value=1.0, last_close=90) == ("trending", "down")
+
+
+def test_a_close_inside_the_last_pivots_changes_nothing():
+    # Within tolerance of the last extremes the read is exactly what it was.
+    up = _pivots([(100, "high"), (95, "low"), (110, "high"), (104, "low")])
+    assert classify_regime(up, atr_value=1.0, last_close=108) == ("trending", "up")
+    assert classify_regime(up, atr_value=1.0, last_close=104.1) == ("trending", "up")

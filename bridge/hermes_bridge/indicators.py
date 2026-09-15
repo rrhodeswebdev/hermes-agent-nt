@@ -95,6 +95,17 @@ def classify_regime(
     if len(highs) < 2 or len(lows) < 2:
         return "transitional", "flat"
     tol = atr_value * 0.25 if atr_value else (abs(last_close) * 0.0005 if last_close else 0.0)
+    # The close is the newest extreme once it has broken the last confirmed pivot. A swing
+    # needs `lookback` bars on EACH side to confirm, so a move that prints a new extreme every
+    # bar never confirms one: the pivot list freezes at the last bounce and the read goes
+    # stale in exact proportion to how strong the trend is. 2026-09-14: a 6.75pt HH + 18.5pt
+    # HL bounce kept this reading "trending/up" for 20+ minutes while price fell 57 points
+    # below that "higher low". Folding the close in as a provisional pivot lets the classifier
+    # see a runaway leg without waiting for a bounce it may never get.
+    if last_close < lows[-1] - tol:
+        lows = [*lows, last_close]
+    if last_close > highs[-1] + tol:
+        highs = [*highs, last_close]
     higher_high = highs[-1] > highs[-2] + tol
     lower_high = highs[-1] < highs[-2] - tol
     higher_low = lows[-1] > lows[-2] + tol
