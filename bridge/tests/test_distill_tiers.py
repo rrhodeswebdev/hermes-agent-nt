@@ -142,3 +142,15 @@ def test_missing_is_judged_on_the_rendered_output():
         rendered = out.split(f"## {name}\n", 1)[1].split("## ")[0] if f"## {name}\n" in out else ""
         has_bullet = any(ln.lstrip().startswith("-") for ln in rendered.splitlines())
         assert (name in rep["missing"]) == (not has_bullet), (name, rendered[:60], rep["missing"])
+
+
+def test_a_leading_blank_line_does_not_defeat_the_oversized_bullet_fallback():
+    # 2026-09-15 daemon pass: the model wrote WATCH-ITEMS as a blank line followed by a
+    # ~900-char bullet. The blank line "fit", so `kept` was non-empty, the fallback for an
+    # oversized first bullet never ran, and the tier rendered as blank + "…" with 1684 chars
+    # of the limit unused. Whitespace-only lines must not count as kept content.
+    text = H + _bullets(40) + C + _bullets(40, "c") + W + "\n- **Watch:** " + "w" * 900 + "\n"
+    out, rep = apportion_distilled(text, 4000)
+    watch = out.split("## WATCH-ITEMS\n", 1)[1]
+    assert watch.lstrip().startswith("- **Watch:**"), f"tier rendered empty: {watch[:40]!r}"
+    assert "WATCH-ITEMS" not in rep["missing"]

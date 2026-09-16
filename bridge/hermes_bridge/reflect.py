@@ -305,7 +305,11 @@ def _keep_whole_bullets(body: str, budget: int) -> str:
             break
         kept.append(line)
         used += len(line)
-    if not kept:
+    # Only CONTENT counts as kept. The model habitually opens a section with a blank line;
+    # that line "fits", so `kept` was non-empty and the oversized-bullet fallback below never
+    # ran — the tier rendered as blank + marker with 1684 chars of the limit unused
+    # (2026-09-15 daemon pass).
+    if not any(ln.strip() for ln in kept):
         # Not one whole line fits: the model writes single bullets bigger than a whole
         # tier's share (a 1105-char HARD RULE on 2026-09-14), so all-or-nothing would render
         # the tier as a bare marker while budget went unused. A partial first bullet, cut at
