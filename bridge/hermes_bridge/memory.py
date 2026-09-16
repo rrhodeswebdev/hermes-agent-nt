@@ -248,10 +248,15 @@ class LearnedStore:
                           lessons_chars: int = 2500, day_reviews_n: int = 0,
                           day_reviews_chars: int = 1800) -> str:
         sections: list[str] = []
-        notes_dropped = lessons_dropped = distilled_dropped = 0
+        notes_dropped = lessons_dropped = distilled_dropped = profile_dropped = 0
         p = self.profile()
         if p:
-            sections.append("=== TRADER PROFILE ===\n" + p[:profile_chars])
+            # The operator->brain channel. This was a bare slice: on 2026-09-15 it dropped
+            # the actionable half of a roll-week instruction mid-sentence ("... while ")
+            # with no marker and no report. Cut at a boundary and say so, like every tier.
+            shown_p = truncate_at_boundary(p, profile_chars)
+            profile_dropped = len(p) - len(shown_p) if len(shown_p) < len(p) else 0
+            sections.append("=== TRADER PROFILE ===\n" + shown_p)
         n = self.notes()
         if n:
             shown, notes_dropped = self._notes_for_prompt(n, notes_chars)
@@ -309,11 +314,12 @@ class LearnedStore:
                 if block:
                     sections.append("=== RECENT DAY-REVIEWS ===\n" + "\n\n".join(block))
         # Truncation was silent before; tell the operator once per change, not per call.
-        report = (notes_dropped, lessons_dropped, distilled_dropped)
+        report = (notes_dropped, lessons_dropped, distilled_dropped, profile_dropped)
         if any(report) and report != getattr(self, "_last_trunc_report", None):
             print(f"[learned] prompt budget truncation: notes_dropped={notes_dropped} "
                   f"lessons_dropped={lessons_dropped} "
                   f"distilled_dropped={distilled_dropped} "
+                  f"profile_dropped={profile_dropped} "
                   f"(archive/curation holds the rest)",
                   flush=True)
         self._last_trunc_report = report
